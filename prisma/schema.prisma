@@ -1,0 +1,131 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            Int             @id @default(autoincrement())
+  name          String?
+  email         String          @unique
+  phoneNumber   String?         @unique
+  password      String
+  role          Role            @default(STUDENT)
+  grade         Grade?          // Student's grade/year
+  courses       Course[]        @relation("AdminCourses") // Courses created by the admin
+  enrollments   Enrollment[]
+  payments      Payment[]
+  certificates  Certificate[]
+  createdAt     DateTime        @default(now())
+  lastLoginAt   DateTime?
+}
+
+model Course {
+  id                Int            @id @default(autoincrement())
+  title             String
+  description       String
+  price             Float
+  thumbnail         String
+  // YouTube specific fields
+  isYoutube         Boolean        @default(false)
+  youtubePlaylistId String?
+  // Relations
+  teacher           User           @relation("AdminCourses", fields: [teacherId], references: [id])
+  teacherId         Int
+  videos            Video[]
+  enrollments       Enrollment[]
+  certificates      Certificate[]
+  learningPaths     LearningPath[] @relation("CoursesInPath")
+  prerequisite      LearningPath[] @relation("Prerequisites")
+  createdAt         DateTime       @default(now())
+  category          String?
+  grade             Grade          // Required field for Egyptian secondary school year
+}
+
+model Video {
+  id          Int             @id @default(autoincrement())
+  title       String
+  url         String
+  thumbnail   String
+  course      Course          @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  courseId    Int
+  duration    Int
+  // YouTube specific fields
+  isYoutube   Boolean         @default(false)
+  youtubeId   String?
+  position    Int?
+  // Additional metadata
+  description String?
+  transcript  String?         // For searchable video content
+  createdAt   DateTime        @default(now())
+}
+
+model Enrollment {
+  id          Int           @id @default(autoincrement())
+  user        User          @relation(fields: [userId], references: [id])
+  userId      Int
+  course      Course        @relation(fields: [courseId], references: [id])
+  courseId    Int
+  isPaid      Boolean       @default(false)  // Track if the user has paid for this course
+  paymentDate DateTime?     // Date when payment was processed
+  progress    Float         @default(0) // Overall progress percentage
+  startedAt   DateTime      @default(now())
+  completedAt DateTime?     // When the course was completed
+  isCompleted Boolean       @default(false)
+  lastAccess  DateTime      @default(now())
+  createdAt   DateTime      @default(now())
+}
+
+model Certificate {
+  id          Int      @id @default(autoincrement())
+  user        User     @relation(fields: [userId], references: [id])
+  userId      Int
+  course      Course   @relation(fields: [courseId], references: [id])
+  courseId    Int
+  issueDate   DateTime @default(now())
+  certificateNumber String    @unique
+  certificateUrl    String?
+  
+  @@unique([userId, courseId])
+}
+
+model LearningPath {
+  id           Int      @id @default(autoincrement())
+  title        String
+  description  String
+  courses      Course[] @relation("CoursesInPath")
+  prerequisites Course[] @relation("Prerequisites")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model Payment {
+  id        Int           @id @default(autoincrement())
+  user      User          @relation(fields: [userId], references: [id])
+  userId    Int
+  amount    Float
+  status    PaymentStatus
+  createdAt DateTime      @default(now())
+}
+
+enum Role {
+  STUDENT
+  ADMIN
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+
+
+enum Grade {
+  FIRST_SECONDARY  // اولى ثانوي
+  SECOND_SECONDARY // تانيه ثانوي
+  THIRD_SECONDARY  // تالته ثانوي
+}
