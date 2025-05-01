@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors'); // Import CORS package
 const cookieParser = require('cookie-parser'); // Import cookie-parser package
+const { performance } = require('perf_hooks');
 const Authrouter = require('./src/routes/auth');
 const Userrouter = require('./src/routes/users');
 const Courserouter = require('./src/routes/courses');
@@ -10,6 +11,9 @@ const StreamRouter = require('./src/routes/streamRoutes');
 const SearchRouter = require('./src/routes/searchRoutes');
 const PaymentRouter = require('./src/routes/paymentRoutes');
 const enrollmentRoutes = require('./src/routes/enrollmentRoutes');
+const videoProgressRoutes = require('./src/routes/videoProgressRoutes');
+const quizRoutes = require('./src/routes/quizRoutes');
+const { requestLogger } = require('./src/controllers/quizController');
 
 const { setupDefaultAdmin } = require('./src/config/setupAdmin');
 const path = require('path');
@@ -33,6 +37,8 @@ app.use(cors({
 
 app.use(express.json());
 app.use(cookieParser()); // Add cookie-parser middleware
+// Add request logger middleware to log all requests
+app.use(requestLogger);
 // Serve uploaded files statically
 // app.use('/enroll' , enrollRouter); // Add the enrollment router
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
@@ -45,6 +51,8 @@ app.use('/youtube', YoutubeRouter);
 app.use('/stream', StreamRouter);
 app.use('/search', SearchRouter);
 app.use('/payments', PaymentRouter);
+app.use('/progress', videoProgressRoutes);
+app.use('/quizzes', quizRoutes);
 app.get('/', (req, res) => {
     res.send('Hello World!');
 });

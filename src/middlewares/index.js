@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken');
+const logger = require('./logger');
 
 // Authentication middleware
 const authenticateToken = (req, res, next) => {
@@ -47,5 +48,6 @@ module.exports = {
   authenticateToken,
   authorizeAdmin,
   checkCourseAccess,
-  checkVideoAccess
+  checkVideoAccess,
+  logger
 };
