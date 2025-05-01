@@ -395,35 +395,8 @@ const getUserEnrolledCourses = async (req, res) => {
       where: {
         userId: userId
       },
-      select: {
-        id: true,
-        createdAt: true,
-        course: {
-          select: {
-            id: true,
-            title: true,
-            description: true,
-            price: true,
-            grade: true,
-            thumbnail: true,
-            teacher: {
-              select: {
-                id: true,
-                name: true,
-                email: true
-              }
-            },
-            videos: {
-              select: {
-                id: true,
-                title: true,
-                url: true,
-                thumbnail: true,
-                duration: true
-              }
-            }
-          }
-        }
+      include: {
+        course: true
       }
     });
 

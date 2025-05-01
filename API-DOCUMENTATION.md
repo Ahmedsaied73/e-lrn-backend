@@ -13,6 +13,8 @@ This document provides comprehensive information about the API endpoints availab
 - [YouTube Integration](#youtube-integration)
 - [Video Streaming](#video-streaming)
 - [Search](#search)
+- [Video Progress](#video-progress)
+- [Quizzes](#quizzes)
 
 ## Base URL
 
@@ -950,6 +952,421 @@ GET /search/recommended
   }
 ]
 ```
+
+## Video Progress
+
+### Endpoints
+
+#### Mark Video as Completed
+
+```
+POST /progress/complete
+```
+
+**Authentication Required:** Yes
+
+**Purpose:** Record when a user finishes watching a video
+
+**Request Body:**
+
+```json
+{
+  "videoId": 1
+}
+```
+
+**Response:**
+
+```json
+{
+  "message": "Video marked as completed",
+  "videoProgress": {
+    "id": 1,
+    "userId": 1,
+    "videoId": 1,
+    "completed": true,
+    "watchedAt": "2023-05-15T14:30:00Z",
+    "updatedAt": "2023-05-15T14:30:00Z"
+  }
+}
+```
+
+**Security Requirements:**
+- User must be authenticated
+- User must be enrolled in the course containing the video
+- Admin users can bypass enrollment check
+
+#### Check Video Completion Status
+
+```
+GET /progress/:videoId
+```
+
+**Authentication Required:** Yes
+
+**Purpose:** Check if a user has completed a specific video
+
+**Response:**
+
+```json
+{
+  "videoId": 1,
+  "completed": true,
+  "watchedAt": "2023-05-15T14:30:00Z"
+}
+```
+
+**Security Requirements:**
+- User must be authenticated
+
+#### Get Course Video Progress
+
+```
+GET /progress/course/:courseId
+```
+
+**Authentication Required:** Yes
+
+**Purpose:** Get completion status for all videos in a course
+
+**Response:**
+
+```json
+{
+  "courseId": 1,
+  "totalVideos": 3,
+  "completedVideos": 2,
+  "videos": [
+    {
+      "id": 1,
+      "title": "Variables and Data Types",
+      "duration": 1200,
+      "completed": true,
+      "watchedAt": "2023-05-15T14:30:00Z"
+    },
+    {
+      "id": 2,
+      "title": "Functions and Scope",
+      "duration": 1500,
+      "completed": true,
+      "watchedAt": "2023-05-16T10:15:00Z"
+    },
+    {
+      "id": 3,
+      "title": "Arrays and Objects",
+      "duration": 1800,
+      "completed": false,
+      "watchedAt": null
+    }
+  ]
+}
+```
+
+**Security Requirements:**
+- User must be authenticated
+
+## Quizzes
+
+### Endpoints
+
+#### Create Quiz (Admin Only)
+
+```
+POST /quizzes
+```
+
+**Authentication Required:** Yes (Admin only)
+
+**Purpose:** Create a new quiz for a course or video
+
+**Request Body:**
+
+```json
+{
+  "title": "JavaScript Basics Quiz",
+  "description": "Test your knowledge of JavaScript fundamentals",
+  "isFinal": false,
+  "videoId": 1,
+  "passingScore": 70,
+  "questions": [
+    {
+      "text": "Which of the following is a primitive data type in JavaScript?",
+      "options": ["Array", "Object", "String", "Function"],
+      "correctOption": 2,
+      "explanation": "String is a primitive data type in JavaScript",
+      "points": 1
+    },
+    {
+      "text": "What does the '===' operator do in JavaScript?",
+      "options": [
+        "Assigns a value", 
+        "Compares values and types", 
+        "Compares only values", 
+        "Logical AND"
+      ],
+      "correctOption": 1,
+      "explanation": "The strict equality operator (===) checks both value and type",
+      "points": 2
+    }
+  ]
+}
+```
+
+**Response:**
+
+```json
+{
+  "message": "Quiz created successfully",
+  "quiz": {
+    "id": 1,
+    "title": "JavaScript Basics Quiz",
+    "description": "Test your knowledge of JavaScript fundamentals",
+    "isFinal": false,
+    "passingScore": 70,
+    "videoId": 1,
+    "courseId": null,
+    "createdAt": "2023-05-20T09:00:00Z",
+    "updatedAt": "2023-05-20T09:00:00Z",
+    "questions": [
+      {
+        "id": 1,
+        "text": "Which of the following is a primitive data type in JavaScript?",
+        "options": ["Array", "Object", "String", "Function"],
+        "points": 1
+      },
+      {
+        "id": 2,
+        "text": "What does the '===' operator do in JavaScript?",
+        "options": [
+          "Assigns a value", 
+          "Compares values and types", 
+          "Compares only values", 
+          "Logical AND"
+        ],
+        "points": 2
+      }
+    ]
+  }
+}
+```
+
+**Security Requirements:**
+- User must be authenticated
+- User must have admin role
+
+#### Get Quiz
+
+```
+GET /quizzes/:id
+```
+
+**Authentication Required:** Yes
+
+**Purpose:** Get quiz details and questions (without correct answers)
+
+**Response:**
+
+```json
+{
+  "id": 1,
+  "title": "JavaScript Basics Quiz",
+  "description": "Test your knowledge of JavaScript fundamentals",
+  "isFinal": false,
+  "passingScore": 70,
+  "videoId": 1,
+  "courseId": null,
+  "video": {
+    "id": 1,
+    "title": "Variables and Data Types",
+    "courseId": 1
+  },
+  "questions": [
+    {
+      "id": 1,
+      "text": "Which of the following is a primitive data type in JavaScript?",
+      "options": ["Array", "Object", "String", "Function"],
+      "points": 1
+    },
+    {
+      "id": 2,
+      "text": "What does the '===' operator do in JavaScript?",
+      "options": [
+        "Assigns a value", 
+        "Compares values and types", 
+        "Compares only values", 
+        "Logical AND"
+      ],
+      "points": 2
+    }
+  ]
+}
+```
+
+**Security Requirements:**
+- User must be authenticated
+- For lecture quizzes, user must have completed the associated video
+- For final exams, user must have completed all videos in the course
+
+#### Submit Quiz Answers
+
+```
+POST /quizzes/submit
+```
+
+**Authentication Required:** Yes
+
+**Purpose:** Submit answers for a quiz and get results
+
+**Request Body:**
+
+```json
+{
+  "quizId": 1,
+  "answers": [
+    {
+      "questionId": 1,
+      "selectedOption": 2
+    },
+    {
+      "questionId": 2,
+      "selectedOption": 1
+    }
+  ]
+}
+```
+
+**Response:**
+
+```json
+{
+  "message": "Quiz answers submitted successfully",
+  "quizId": 1,
+  "correctAnswers": 2,
+  "totalQuestions": 2,
+  "score": 100,
+  "passingScore": 70,
+  "passed": true,
+  "results": [
+    {
+      "questionId": 1,
+      "selectedOption": 2,
+      "isCorrect": true
+    },
+    {
+      "questionId": 2,
+      "selectedOption": 1,
+      "isCorrect": true
+    }
+  ]
+}
+```
+
+**Security Requirements:**
+- User must be authenticated
+- User must be enrolled in the course
+- User must not have already taken the quiz
+
+#### Get Quiz Results
+
+```
+GET /quizzes/:quizId/results
+```
+
+**Authentication Required:** Yes
+
+**Purpose:** Get detailed results for a previously taken quiz
+
+**Response:**
+
+```json
+{
+  "quizId": 1,
+  "title": "JavaScript Basics Quiz",
+  "correctAnswers": 2,
+  "totalQuestions": 2,
+  "score": 100,
+  "passingScore": 70,
+  "passed": true,
+  "submittedAt": "2023-05-20T10:15:00Z",
+  "results": [
+    {
+      "questionId": 1,
+      "questionText": "Which of the following is a primitive data type in JavaScript?",
+      "selectedOption": 2,
+      "correctOption": 2,
+      "isCorrect": true,
+      "points": 1,
+      "explanation": "String is a primitive data type in JavaScript"
+    },
+    {
+      "questionId": 2,
+      "questionText": "What does the '===' operator do in JavaScript?",
+      "selectedOption": 1,
+      "correctOption": 1,
+      "isCorrect": true,
+      "points": 2,
+      "explanation": "The strict equality operator (===) checks both value and type"
+    }
+  ]
+}
+```
+
+**Security Requirements:**
+- User must be authenticated
+- User must have taken the quiz
+
+#### Get Course Quizzes
+
+```
+GET /quizzes/course/:courseId
+```
+
+**Authentication Required:** Yes
+
+**Purpose:** Get all quizzes for a course with user's completion status
+
+**Response:**
+
+```json
+[
+  {
+    "id": 1,
+    "title": "JavaScript Basics Quiz",
+    "description": "Test your knowledge of JavaScript fundamentals",
+    "isFinal": false,
+    "passingScore": 70,
+    "videoId": 1,
+    "videoTitle": "Variables and Data Types",
+    "questionCount": 2,
+    "createdAt": "2023-05-20T09:00:00Z",
+    "status": {
+      "taken": true,
+      "score": 100,
+      "passed": true,
+      "submittedAt": "2023-05-20T10:15:00Z"
+    }
+  },
+  {
+    "id": 2,
+    "title": "JavaScript Final Exam",
+    "description": "Comprehensive test of all JavaScript concepts",
+    "isFinal": true,
+    "passingScore": 75,
+    "videoId": null,
+    "videoTitle": null,
+    "questionCount": 10,
+    "createdAt": "2023-05-21T11:30:00Z",
+    "status": {
+      "taken": false,
+      "score": null,
+      "passed": null
+    }
+  }
+]
+```
+
+**Security Requirements:**
+- User must be authenticated
 
 ## Error Responses
 

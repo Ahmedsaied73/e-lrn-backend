@@ -9,7 +9,8 @@ A comprehensive e-learning platform with course management, video streaming, use
 - **Course Management**: Create, update, and delete courses with detailed information
 - **Video Content**: Upload videos or integrate with YouTube playlists
 - **Payment System**: Process payments for course enrollment
-- **Progress Tracking**: Monitor student progress through courses
+- **Progress Tracking**: Monitor student progress through courses and track video completion
+- **Quiz System**: Create and manage quizzes for lectures and final exams with automatic grading
 - **Search Functionality**: Advanced search with filtering options
 - **Responsive Design**: Works on desktop and mobile devices
 
@@ -20,6 +21,21 @@ A comprehensive e-learning platform with course management, video streaming, use
 - Node.js (v14 or higher)
 - MySQL database
 - YouTube API key (for YouTube integration)
+
+### Required Packages
+
+The following packages are required for the project:
+
+```bash
+# Core packages
+npm install express prisma @prisma/client jsonwebtoken bcrypt
+
+# Middleware and utilities
+npm install cors dotenv multer morgan cookie-parser
+
+# Validation
+npm install zod
+```
 
 ### Installation
 
@@ -42,8 +58,14 @@ A comprehensive e-learning platform with course management, video streaming, use
 
 4. Run database migrations
    ```bash
-   npx prisma migrate dev
+   npx prisma migrate dev --name "add_quiz_and_video_progress"
    ```
+   
+   This will create the necessary database tables for:
+   - VideoProgress: Tracks which videos a user has completed
+   - Quiz: Stores quiz metadata (title, description, passing score)
+   - Question: Stores individual quiz questions with options and correct answers
+   - Answer: Records user responses to quiz questions
 
 5. Start the server
    ```bash
