@@ -41,6 +41,128 @@ const requestLogger = (req, res, next) => {
 };
 
 /**
+ * Get all quiz results for the authenticated user
+ * @param {Object} req - Express request object with authenticated user
+ * @param {Object} res - Express response object
+ */
+const getUserQuizResults = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // Get all answers submitted by this user, grouped by quiz
+    const userAnswers = await prisma.answer.findMany({
+      where: {
+        userId: userId
+      },
+      include: {
+        question: {
+          include: {
+            quiz: {
+              include: {
+                course: {
+                  select: {
+                    id: true,
+                    title: true
+                  }
+                },
+                video: {
+                  select: {
+                    id: true,
+                    title: true,
+                    courseId: true
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      orderBy: {
+        submittedAt: 'desc'
+      }
+    });
+
+    if (userAnswers.length === 0) {
+      return res.json({
+        message: 'No quiz results found',
+        results: []
+      });
+    }
+
+    // Group answers by quiz
+    const quizResults = {};
+    
+    for (const answer of userAnswers) {
+      const quizId = answer.question.quizId;
+      
+      if (!quizResults[quizId]) {
+        // Initialize quiz result object
+        const quiz = answer.question.quiz;
+        quizResults[quizId] = {
+          quizId: quizId,
+          title: quiz.title,
+          description: quiz.description,
+          isFinal: quiz.isFinal,
+          passingScore: quiz.passingScore,
+          courseId: quiz.courseId || (quiz.video ? quiz.video.courseId : null),
+          courseTitle: quiz.course ? quiz.course.title : (quiz.video ? quiz.video.title : null),
+          videoId: quiz.videoId,
+          videoTitle: quiz.video ? quiz.video.title : null,
+          submittedAt: answer.submittedAt,
+          answers: [],
+          correctAnswers: 0,
+          totalQuestions: 0,
+          earnedPoints: 0,
+          totalPoints: 0,
+          score: 0,
+          passed: false
+        };
+      }
+      
+      // Add answer to the quiz result
+      quizResults[quizId].answers.push({
+        questionId: answer.questionId,
+        questionText: answer.question.text,
+        selectedOption: answer.selectedOption,
+        correctOption: answer.question.correctOption,
+        isCorrect: answer.isCorrect,
+        points: answer.question.points,
+        explanation: answer.question.explanation
+      });
+      
+      // Update statistics
+      if (answer.isCorrect) {
+        quizResults[quizId].correctAnswers++;
+        quizResults[quizId].earnedPoints += answer.question.points;
+      }
+      quizResults[quizId].totalQuestions++;
+      quizResults[quizId].totalPoints += answer.question.points;
+    }
+    
+    // Calculate scores and determine pass/fail status
+    for (const quizId in quizResults) {
+      const result = quizResults[quizId];
+      result.score = result.totalPoints > 0 ? (result.earnedPoints / result.totalPoints) * 100 : 0;
+      result.passed = result.score >= result.passingScore;
+    }
+
+    // Convert to array and sort by submission date (newest first)
+    const resultsArray = Object.values(quizResults).sort((a, b) => 
+      new Date(b.submittedAt) - new Date(a.submittedAt)
+    );
+
+    res.json({
+      message: 'Quiz results retrieved successfully',
+      count: resultsArray.length,
+      results: resultsArray
+    });
+  } catch (error) {
+    console.error('Error getting user quiz results:', error);
+    res.status(500).json({ error: 'Failed to get quiz results' });
+  }
+};
+
+/**
  * Create a new quiz (admin only)
  * @param {Object} req - Express request object
  * @param {Object} res - Express response object
@@ -655,5 +777,6 @@ module.exports = {
   submitQuizAnswers,
   getQuizResults,
   getCourseQuizzes,
+  getUserQuizResults,
   requestLogger
 };

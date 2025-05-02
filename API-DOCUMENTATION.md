@@ -1112,6 +1112,86 @@ POST /quizzes
 }
 ```
 
+#### Get All User Quiz Results
+
+```
+GET /quizzes/user/results
+```
+
+**Authentication Required:** Yes
+
+**Purpose:** Retrieve all quiz results for the authenticated user
+
+**Response:**
+
+```json
+{
+  "message": "Quiz results retrieved successfully",
+  "count": 2,
+  "results": [
+    {
+      "quizId": 1,
+      "title": "JavaScript Basics Quiz",
+      "description": "Test your knowledge of JavaScript fundamentals",
+      "isFinal": false,
+      "passingScore": 70,
+      "courseId": 1,
+      "courseTitle": "Introduction to JavaScript",
+      "videoId": 1,
+      "videoTitle": "Variables and Data Types",
+      "submittedAt": "2023-06-15T14:30:00Z",
+      "correctAnswers": 2,
+      "totalQuestions": 2,
+      "earnedPoints": 3,
+      "totalPoints": 3,
+      "score": 100,
+      "passed": true,
+      "answers": [
+        {
+          "questionId": 1,
+          "questionText": "Which of the following is a primitive data type in JavaScript?",
+          "selectedOption": 2,
+          "correctOption": 2,
+          "isCorrect": true,
+          "points": 1,
+          "explanation": "String is a primitive data type in JavaScript"
+        },
+        {
+          "questionId": 2,
+          "questionText": "What does the '===' operator do in JavaScript?",
+          "selectedOption": 1,
+          "correctOption": 1,
+          "isCorrect": true,
+          "points": 2,
+          "explanation": "The strict equality operator (===) checks both value and type"
+        }
+      ]
+    },
+    {
+      "quizId": 2,
+      "title": "React Fundamentals Quiz",
+      "description": "Test your knowledge of React",
+      "isFinal": true,
+      "passingScore": 70,
+      "courseId": 2,
+      "courseTitle": "Advanced React",
+      "videoId": null,
+      "videoTitle": null,
+      "submittedAt": "2023-06-10T11:15:00Z",
+      "correctAnswers": 3,
+      "totalQuestions": 5,
+      "earnedPoints": 6,
+      "totalPoints": 10,
+      "score": 60,
+      "passed": false,
+      "answers": [
+        // Array of answer objects similar to above
+      ]
+    }
+  ]
+}
+```
+
 **Response:**
 
 ```json

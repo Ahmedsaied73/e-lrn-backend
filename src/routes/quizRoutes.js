@@ -4,7 +4,8 @@ const {
   getQuiz, 
   submitQuizAnswers, 
   getQuizResults,
-  getCourseQuizzes
+  getCourseQuizzes,
+  getUserQuizResults
 } = require('../controllers/quizController');
 const { authenticateToken, authorizeAdmin } = require('../middlewares');
 
@@ -24,5 +25,8 @@ router.get('/:quizId/results', authenticateToken, getQuizResults);
 
 // Get all quizzes for a course
 router.get('/course/:courseId', authenticateToken, getCourseQuizzes);
+
+// Get all quiz results for the authenticated user
+router.get('/user/results', authenticateToken, getUserQuizResults);
 
 module.exports = router;
