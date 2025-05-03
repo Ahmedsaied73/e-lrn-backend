@@ -47,7 +47,20 @@ const requestLogger = (req, res, next) => {
  */
 const getUserQuizResults = async (req, res) => {
   try {
+    const user = req.user.id;
+    // Verify user authentication
+    if (!req.user || !req.user.id) {
+      return res.status(401).json({
+        error: 'Unauthorized - User not authenticated'
+      });
+    }
+
     const userId = req.user.id;
+    if (isNaN(userId)) {
+      return res.status(400).json({
+        error: 'Invalid user ID format'
+      });
+    }
 
     // Get all answers submitted by this user, grouped by quiz
     const userAnswers = await prisma.answer.findMany({
@@ -82,11 +95,12 @@ const getUserQuizResults = async (req, res) => {
       }
     });
 
-    if (userAnswers.length === 0) {
-      return res.json({
+    if (!userAnswers || userAnswers.length === 0) {
+      return res.status(404).json({
         message: 'No quiz results found',
+        count: 0,
         results: []
-      });
+    });
     }
 
     // Group answers by quiz
@@ -600,65 +614,115 @@ const submitQuizAnswers = async (req, res) => {
  */
 const getQuizResults = async (req, res) => {
   try {
-    const { quizId } = req.params;
     const userId = req.user.id;
 
-    // Verify the quiz exists
-    const quiz = await prisma.quiz.findUnique({
-      where: { id: parseInt(quizId) },
-      include: {
-        questions: true
-      }
-    });
-
-    if (!quiz) {
-      return res.status(404).json({ error: 'Quiz not found' });
-    }
-
-    // Get the user's answers for this quiz
+    // Get all answers submitted by this user, grouped by quiz
     const userAnswers = await prisma.answer.findMany({
       where: {
-        userId: userId,
-        question: {
-          quizId: parseInt(quizId)
-        }
+        userId: userId
       },
       include: {
-        question: true
+        question: {
+          include: {
+            quiz: {
+              include: {
+                course: {
+                  select: {
+                    id: true,
+                    title: true
+                  }
+                },
+                video: {
+                  select: {
+                    id: true,
+                    title: true,
+                    courseId: true
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      orderBy: {
+        submittedAt: 'desc'
       }
     });
 
-    if (userAnswers.length === 0) {
-      return res.status(404).json({ error: 'No quiz results found for this user' });
+    if (!userAnswers || userAnswers.length === 0) {
+      return res.status(404).json({
+        message: 'No quiz results found',
+        count: 0,
+        results: []
+      });
     }
 
-    // Calculate the score
-    const totalPoints = quiz.questions.reduce((sum, q) => sum + q.points, 0);
-    const earnedPoints = userAnswers.reduce((sum, a) => a.isCorrect ? sum + a.question.points : sum, 0);
-    const score = totalPoints > 0 ? (earnedPoints / totalPoints) * 100 : 0;
-    const passed = score >= quiz.passingScore;
+    // Group answers by quiz
+    const quizResults = {};
+    
+    for (const answer of userAnswers) {
+      const quizId = answer.question.quizId;
+      
+      if (!quizResults[quizId]) {
+        // Initialize quiz result object
+        const quiz = answer.question.quiz;
+        quizResults[quizId] = {
+          quizId: quizId,
+          title: quiz.title,
+          description: quiz.description,
+          isFinal: quiz.isFinal,
+          passingScore: quiz.passingScore,
+          courseId: quiz.courseId || (quiz.video ? quiz.video.courseId : null),
+          courseTitle: quiz.course ? quiz.course.title : (quiz.video ? quiz.video.title : null),
+          videoId: quiz.videoId,
+          videoTitle: quiz.video ? quiz.video.title : null,
+          submittedAt: answer.submittedAt,
+          answers: [],
+          correctAnswers: 0,
+          totalQuestions: 0,
+          earnedPoints: 0,
+          totalPoints: 0,
+          score: 0,
+          passed: false
+        };
+      }
+      
+      // Add answer to the quiz result
+      quizResults[quizId].answers.push({
+        questionId: answer.questionId,
+        questionText: answer.question.text,
+        selectedOption: answer.selectedOption,
+        correctOption: answer.question.correctOption,
+        isCorrect: answer.isCorrect,
+        points: answer.question.points,
+        explanation: answer.question.explanation
+      });
+      
+      // Update statistics
+      if (answer.isCorrect) {
+        quizResults[quizId].correctAnswers++;
+        quizResults[quizId].earnedPoints += answer.question.points;
+      }
+      quizResults[quizId].totalQuestions++;
+      quizResults[quizId].totalPoints += answer.question.points;
+    }
+    
+    // Calculate scores and determine pass/fail status
+    for (const quizId in quizResults) {
+      const result = quizResults[quizId];
+      result.score = result.totalPoints > 0 ? (result.earnedPoints / result.totalPoints) * 100 : 0;
+      result.passed = result.score >= result.passingScore;
+    }
 
-    // Format the results
-    const results = userAnswers.map(answer => ({
-      questionId: answer.questionId,
-      questionText: answer.question.text,
-      selectedOption: answer.selectedOption,
-      correctOption: answer.question.correctOption,
-      isCorrect: answer.isCorrect,
-      points: answer.question.points,
-      explanation: answer.question.explanation
-    }));
+    // Filter only passed quizzes and sort by submission date (newest first)
+    const passedQuizzes = Object.values(quizResults)
+      .filter(result => result.passed)
+      .sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt));
 
     res.json({
-      quizId: parseInt(quizId),
-      title: quiz.title,
-      correctAnswers: userAnswers.filter(a => a.isCorrect).length,
-      totalQuestions: quiz.questions.length,
-      score,
-      passingScore: quiz.passingScore,
-      passed,
-      submittedAt: userAnswers[0].submittedAt,
-      results
+      message: 'Passed quiz results retrieved successfully',
+      count: passedQuizzes.length,
+      results: passedQuizzes
     });
   } catch (error) {
     console.error('Error getting quiz results:', error);

@@ -14,9 +14,15 @@ const markVideoCompleted = async (req, res) => {
       return res.status(400).json({ error: 'Video ID is required' });
     }
 
+    // Parse videoId to integer and verify the video exists
+    const parsedVideoId = parseInt(videoId, 10);
+    if (isNaN(parsedVideoId)) {
+      return res.status(400).json({ error: 'Invalid video ID format' });
+    }
+
     // Verify the video exists
     const video = await prisma.video.findUnique({
-      where: { id: parseInt(videoId) },
+      where: { id: parsedVideoId },
       include: { course: true }
     });
 
@@ -52,7 +58,7 @@ const markVideoCompleted = async (req, res) => {
       where: {
         userId_videoId: {
           userId: userId,
-          videoId: parseInt(videoId)
+          videoId: parsedVideoId
         }
       },
       update: {
@@ -61,7 +67,7 @@ const markVideoCompleted = async (req, res) => {
       },
       create: {
         userId: userId,
-        videoId: parseInt(videoId),
+        videoId: parsedVideoId,
         completed: true
       }
     });
@@ -127,7 +133,7 @@ const checkVideoCompletion = async (req, res) => {
       where: {
         userId_videoId: {
           userId: userId,
-          videoId: parseInt(videoId)
+          videoId: parsedVideoId
         }
       }
     });
