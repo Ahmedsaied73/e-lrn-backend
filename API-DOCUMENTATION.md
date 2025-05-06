@@ -15,6 +15,7 @@ This document provides comprehensive information about the API endpoints availab
 - [Search](#search)
 - [Video Progress](#video-progress)
 - [Quizzes](#quizzes)
+- [Assignments](#assignments)
 
 ## Base URL
 
@@ -993,6 +994,309 @@ POST /progress/complete
 
 **Security Requirements:**
 - User must be authenticated
+
+## Assignments
+
+### Endpoints
+
+#### Create Assignment (Admin Only)
+
+```
+POST /assignments
+```
+
+**Authentication Required:** Yes (Admin only)
+
+**Purpose:** Create a new assignment for a video
+
+**Request Body:**
+
+```json
+{
+  "title": "JavaScript Arrays Implementation",
+  "description": "Create a program that demonstrates array manipulation in JavaScript",
+  "videoId": 1,
+  "dueDate": "2023-07-15T23:59:59Z"
+}
+```
+
+**Response:**
+
+```json
+{
+  "message": "Assignment created successfully",
+  "assignment": {
+    "id": 1,
+    "title": "JavaScript Arrays Implementation",
+    "description": "Create a program that demonstrates array manipulation in JavaScript",
+    "videoId": 1,
+    "dueDate": "2023-07-15T23:59:59Z",
+    "createdAt": "2023-06-01T10:00:00Z",
+    "updatedAt": "2023-06-01T10:00:00Z"
+  }
+}
+```
+
+#### Get Assignment by ID
+
+```
+GET /assignments/:id
+```
+
+**Authentication Required:** Yes
+
+**Purpose:** Retrieve details of a specific assignment
+
+**Response:**
+
+```json
+{
+  "id": 1,
+  "title": "JavaScript Arrays Implementation",
+  "description": "Create a program that demonstrates array manipulation in JavaScript",
+  "videoId": 1,
+  "dueDate": "2023-07-15T23:59:59Z",
+  "createdAt": "2023-06-01T10:00:00Z",
+  "updatedAt": "2023-06-01T10:00:00Z",
+  "video": {
+    "id": 1,
+    "title": "Arrays in JavaScript",
+    "courseId": 1
+  },
+  "hasSubmitted": false,
+  "submission": null
+}
+```
+
+#### Submit Assignment
+
+```
+POST /assignments/submit
+```
+
+**Authentication Required:** Yes
+
+**Purpose:** Submit an assignment solution
+
+**Request Body:**
+
+```json
+{
+  "assignmentId": 1,
+  "content": "// My JavaScript array implementation\nconst myArray = [1, 2, 3];\nconsole.log(myArray.map(x => x * 2));",
+  "fileUrl": "https://example.com/uploads/assignment1.js"
+}
+```
+
+**Response:**
+
+```json
+{
+  "message": "Assignment submitted successfully",
+  "submission": {
+    "id": 1,
+    "content": "// My JavaScript array implementation\nconst myArray = [1, 2, 3];\nconsole.log(myArray.map(x => x * 2));",
+    "fileUrl": "https://example.com/uploads/assignment1.js",
+    "userId": 1,
+    "assignmentId": 1,
+    "status": "PENDING",
+    "submittedAt": "2023-06-10T14:30:00Z"
+  }
+}
+```
+
+#### Grade Submission (Admin Only)
+
+```
+POST /assignments/submissions/:submissionId/grade
+```
+
+**Authentication Required:** Yes (Admin only)
+
+**Purpose:** Grade a student's assignment submission
+
+**Request Body:**
+
+```json
+{
+  "grade": 85,
+  "feedback": "Good implementation of array methods, but could improve code comments.",
+  "status": "GRADED"
+}
+```
+
+**Response:**
+
+```json
+{
+  "message": "Submission graded successfully",
+  "submission": {
+    "id": 1,
+    "content": "// My JavaScript array implementation\nconst myArray = [1, 2, 3];\nconsole.log(myArray.map(x => x * 2));",
+    "fileUrl": "https://example.com/uploads/assignment1.js",
+    "userId": 1,
+    "assignmentId": 1,
+    "status": "GRADED",
+    "grade": 85,
+    "feedback": "Good implementation of array methods, but could improve code comments.",
+    "submittedAt": "2023-06-10T14:30:00Z",
+    "gradedAt": "2023-06-12T09:15:00Z"
+  }
+}
+```
+
+#### Get Video Assignments
+
+```
+GET /assignments/video/:videoId
+```
+
+**Authentication Required:** Yes
+
+**Purpose:** Get all assignments for a specific video
+
+**Response:**
+
+```json
+{
+  "assignments": [
+    {
+      "id": 1,
+      "title": "JavaScript Arrays Implementation",
+      "description": "Create a program that demonstrates array manipulation in JavaScript",
+      "videoId": 1,
+      "dueDate": "2023-07-15T23:59:59Z",
+      "createdAt": "2023-06-01T10:00:00Z",
+      "updatedAt": "2023-06-01T10:00:00Z",
+      "hasSubmitted": true,
+      "submission": {
+        "id": 1,
+        "status": "GRADED",
+        "grade": 85,
+        "submittedAt": "2023-06-10T14:30:00Z"
+      }
+    },
+    {
+      "id": 2,
+      "title": "JavaScript Objects Exercise",
+      "description": "Create a program that demonstrates object manipulation in JavaScript",
+      "videoId": 1,
+      "dueDate": "2023-07-20T23:59:59Z",
+      "createdAt": "2023-06-02T11:00:00Z",
+      "updatedAt": "2023-06-02T11:00:00Z",
+      "hasSubmitted": false,
+      "submission": null
+    }
+  ]
+}
+```
+
+#### Get Assignment Submissions (Admin Only)
+
+```
+GET /assignments/:assignmentId/submissions
+```
+
+**Authentication Required:** Yes (Admin only)
+
+**Purpose:** Get all student submissions for a specific assignment
+
+**Response:**
+
+```json
+{
+  "assignmentId": 1,
+  "title": "JavaScript Arrays Implementation",
+  "submissionsCount": 2,
+  "submissions": [
+    {
+      "id": 1,
+      "content": "// My JavaScript array implementation\nconst myArray = [1, 2, 3];\nconsole.log(myArray.map(x => x * 2));",
+      "fileUrl": "https://example.com/uploads/assignment1.js",
+      "status": "GRADED",
+      "grade": 85,
+      "feedback": "Good implementation of array methods, but could improve code comments.",
+      "submittedAt": "2023-06-10T14:30:00Z",
+      "gradedAt": "2023-06-12T09:15:00Z",
+      "user": {
+        "id": 1,
+        "name": "John Doe",
+        "email": "john@example.com"
+      }
+    },
+    {
+      "id": 2,
+      "content": "// Array implementation\nlet arr = [5, 10, 15];\narr.forEach(item => console.log(item));",
+      "fileUrl": "https://example.com/uploads/assignment2.js",
+      "status": "PENDING",
+      "submittedAt": "2023-06-11T16:45:00Z",
+      "user": {
+        "id": 2,
+        "name": "Jane Smith",
+        "email": "jane@example.com"
+      }
+    }
+  ]
+}
+```
+
+#### Get User Submissions
+
+```
+GET /assignments/user/submissions
+```
+
+**Authentication Required:** Yes
+
+**Purpose:** Get all assignment submissions by the current user
+
+**Response:**
+
+```json
+{
+  "submissionsCount": 2,
+  "submissions": [
+    {
+      "id": 1,
+      "content": "// My JavaScript array implementation\nconst myArray = [1, 2, 3];\nconsole.log(myArray.map(x => x * 2));",
+      "fileUrl": "https://example.com/uploads/assignment1.js",
+      "status": "GRADED",
+      "grade": 85,
+      "feedback": "Good implementation of array methods, but could improve code comments.",
+      "submittedAt": "2023-06-10T14:30:00Z",
+      "gradedAt": "2023-06-12T09:15:00Z",
+      "assignment": {
+        "id": 1,
+        "title": "JavaScript Arrays Implementation",
+        "video": {
+          "id": 1,
+          "title": "Arrays in JavaScript",
+          "courseId": 1
+        }
+      }
+    },
+    {
+      "id": 3,
+      "content": "// React component implementation\nfunction MyComponent() {\n  return <div>Hello World</div>;\n}",
+      "fileUrl": "https://example.com/uploads/assignment3.jsx",
+      "status": "PENDING",
+      "submittedAt": "2023-06-15T11:20:00Z",
+      "assignment": {
+        "id": 3,
+        "title": "React Component Creation",
+        "video": {
+          "id": 5,
+          "title": "Introduction to React Components",
+          "courseId": 2
+        }
+      }
+    }
+  ]
+}
+```
+
+**Security Requirements:**
+- User must be authenticated
 - User must be enrolled in the course containing the video
 - Admin users can bypass enrollment check
 
@@ -1015,9 +1319,6 @@ GET /progress/:videoId
   "watchedAt": "2023-05-15T14:30:00Z"
 }
 ```
-
-**Security Requirements:**
-- User must be authenticated
 
 #### Get Course Video Progress
 

@@ -11,6 +11,12 @@ A comprehensive e-learning platform with course management, video streaming, use
 - **Payment System**: Process payments for course enrollment
 - **Progress Tracking**: Monitor student progress through courses and track video completion
 - **Quiz System**: Create and manage quizzes for lectures and final exams with automatic grading
+- **Assignment System**: Create and grade assignments for each video with file submission support
+- **Sequential Learning**: Enforces structured learning path where students must complete prerequisites
+  - Requires completion of current video before accessing the next
+  - Mandatory quiz completion with passing score before proceeding
+  - Required assignment submission and approval before moving to next video
+  - 'Next Lecture' feature guides students through the course sequence
 - **Search Functionality**: Advanced search with filtering options
 - **Responsive Design**: Works on desktop and mobile devices
 

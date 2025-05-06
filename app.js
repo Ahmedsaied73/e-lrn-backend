@@ -13,6 +13,7 @@ const PaymentRouter = require('./src/routes/paymentRoutes');
 const enrollmentRoutes = require('./src/routes/enrollmentRoutes');
 const videoProgressRoutes = require('./src/routes/videoProgressRoutes');
 const quizRoutes = require('./src/routes/quizRoutes');
+const assignmentRoutes = require('./src/routes/assignmentRoutes');
 const { requestLogger } = require('./src/controllers/quizController');
 
 const { setupDefaultAdmin } = require('./src/config/setupAdmin');
@@ -53,6 +54,7 @@ app.use('/search', SearchRouter);
 app.use('/payments', PaymentRouter);
 app.use('/progress', videoProgressRoutes);
 app.use('/quizzes', quizRoutes);
+app.use('/assignments', assignmentRoutes);
 app.get('/', (req, res) => {
     res.send('Hello World!');
 });
