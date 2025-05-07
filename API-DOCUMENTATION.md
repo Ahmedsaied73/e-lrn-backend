@@ -14,7 +14,6 @@ This document provides comprehensive information about the API endpoints availab
 - [Video Streaming](#video-streaming)
 - [Search](#search)
 - [Video Progress](#video-progress)
-- [Quizzes](#quizzes)
 - [Assignments](#assignments)
 
 ## Base URL
@@ -993,6 +992,8 @@ POST /progress/complete
 ```
 
 **Security Requirements:**
+
+**Security Requirements:**
 - User must be authenticated
 
 ## Assignments
@@ -1007,37 +1008,110 @@ POST /assignments
 
 **Authentication Required:** Yes (Admin only)
 
-**Purpose:** Create a new assignment for a video
+**Purpose:** Create a new assignment for a specific video
 
-**Request Body:**
+**Request Body for Regular Assignment:**
 
 ```json
 {
-  "title": "JavaScript Arrays Implementation",
-  "description": "Create a program that demonstrates array manipulation in JavaScript",
+  "title": "JavaScript DOM Manipulation",
+  "description": "Create a web page that demonstrates DOM manipulation techniques",
   "videoId": 1,
   "dueDate": "2023-07-15T23:59:59Z"
 }
 ```
 
-**Response:**
+**Request Body for MCQ Assignment:**
+
+```json
+{
+  "title": "JavaScript Fundamentals Quiz",
+  "description": "Test your knowledge of JavaScript fundamentals",
+  "videoId": 1,
+  "dueDate": "2023-07-15T23:59:59Z",
+  "isMCQ": true,
+  "passingScore": 70.0,
+  "questions": [
+    {
+      "text": "Which of the following is a primitive data type in JavaScript?",
+      "options": ["Array", "Object", "String", "Function"],
+      "correctOption": 2,
+      "explanation": "String is a primitive data type in JavaScript",
+      "points": 1
+    },
+    {
+      "text": "What does the '====' operator do in JavaScript?",
+      "options": ["Assigns a value", "Compares values and types", "Compares only values", "Logical AND"],
+      "correctOption": 1,
+      "explanation": "The strict equality operator (===) checks both value and type",
+      "points": 2
+    }
+  ]
+}
+```
+
+**Response for Regular Assignment:**
 
 ```json
 {
   "message": "Assignment created successfully",
   "assignment": {
     "id": 1,
-    "title": "JavaScript Arrays Implementation",
-    "description": "Create a program that demonstrates array manipulation in JavaScript",
+    "title": "JavaScript DOM Manipulation",
+    "description": "Create a web page that demonstrates DOM manipulation techniques",
     "videoId": 1,
     "dueDate": "2023-07-15T23:59:59Z",
+    "isMCQ": false,
     "createdAt": "2023-06-01T10:00:00Z",
     "updatedAt": "2023-06-01T10:00:00Z"
   }
 }
 ```
 
-#### Get Assignment by ID
+**Response for MCQ Assignment:**
+
+```json
+{
+  "message": "MCQ assignment created successfully",
+  "assignment": {
+    "id": 2,
+    "title": "JavaScript Fundamentals Quiz",
+    "description": "Test your knowledge of JavaScript fundamentals",
+    "videoId": 1,
+    "dueDate": "2023-07-15T23:59:59Z",
+    "isMCQ": true,
+    "passingScore": 70.0,
+    "createdAt": "2023-06-01T10:00:00Z",
+    "updatedAt": "2023-06-01T10:00:00Z",
+    "questions": [
+      {
+        "id": 1,
+        "assignmentId": 2,
+        "text": "Which of the following is a primitive data type in JavaScript?",
+        "options": ["Array", "Object", "String", "Function"],
+        "correctOption": 2,
+        "explanation": "String is a primitive data type in JavaScript",
+        "points": 1
+      },
+      {
+        "id": 2,
+        "assignmentId": 2,
+        "text": "What does the '====' operator do in JavaScript?",
+        "options": ["Assigns a value", "Compares values and types", "Compares only values", "Logical AND"],
+        "correctOption": 1,
+        "explanation": "The strict equality operator (===) checks both value and type",
+        "points": 2
+      }
+    ]
+  }
+}
+```
+
+**Security Requirements:**
+- User must be authenticated
+- User must have admin role
+
+#### Get Assignment
 
 ```
 GET /assignments/:id
@@ -1045,105 +1119,92 @@ GET /assignments/:id
 
 **Authentication Required:** Yes
 
-**Purpose:** Retrieve details of a specific assignment
+**Purpose:** Get assignment details
 
-**Response:**
+**Response for Regular Assignment:**
 
 ```json
 {
   "id": 1,
-  "title": "JavaScript Arrays Implementation",
-  "description": "Create a program that demonstrates array manipulation in JavaScript",
+  "title": "JavaScript DOM Manipulation",
+  "description": "Create a web page that demonstrates DOM manipulation techniques",
   "videoId": 1,
   "dueDate": "2023-07-15T23:59:59Z",
+  "isMCQ": false,
   "createdAt": "2023-06-01T10:00:00Z",
   "updatedAt": "2023-06-01T10:00:00Z",
   "video": {
     "id": 1,
-    "title": "Arrays in JavaScript",
+    "title": "Variables and Data Types",
     "courseId": 1
   },
-  "hasSubmitted": false,
-  "submission": null
-}
-```
-
-#### Submit Assignment
-
-```
-POST /assignments/submit
-```
-
-**Authentication Required:** Yes
-
-**Purpose:** Submit an assignment solution
-
-**Request Body:**
-
-```json
-{
-  "assignmentId": 1,
-  "content": "// My JavaScript array implementation\nconst myArray = [1, 2, 3];\nconsole.log(myArray.map(x => x * 2));",
-  "fileUrl": "https://example.com/uploads/assignment1.js"
-}
-```
-
-**Response:**
-
-```json
-{
-  "message": "Assignment submitted successfully",
+  "hasSubmitted": true,
   "submission": {
-    "id": 1,
-    "content": "// My JavaScript array implementation\nconst myArray = [1, 2, 3];\nconsole.log(myArray.map(x => x * 2));",
-    "fileUrl": "https://example.com/uploads/assignment1.js",
-    "userId": 1,
-    "assignmentId": 1,
+    "id": 3,
     "status": "PENDING",
-    "submittedAt": "2023-06-10T14:30:00Z"
-  }
-}
-```
-
-#### Grade Submission (Admin Only)
-
-```
-POST /assignments/submissions/:submissionId/grade
-```
-
-**Authentication Required:** Yes (Admin only)
-
-**Purpose:** Grade a student's assignment submission
-
-**Request Body:**
-
-```json
-{
-  "grade": 85,
-  "feedback": "Good implementation of array methods, but could improve code comments.",
-  "status": "GRADED"
-}
-```
-
-**Response:**
-
-```json
-{
-  "message": "Submission graded successfully",
-  "submission": {
-    "id": 1,
-    "content": "// My JavaScript array implementation\nconst myArray = [1, 2, 3];\nconsole.log(myArray.map(x => x * 2));",
-    "fileUrl": "https://example.com/uploads/assignment1.js",
-    "userId": 1,
-    "assignmentId": 1,
-    "status": "GRADED",
-    "grade": 85,
-    "feedback": "Good implementation of array methods, but could improve code comments.",
     "submittedAt": "2023-06-10T14:30:00Z",
-    "gradedAt": "2023-06-12T09:15:00Z"
+    "grade": null,
+    "feedback": null
   }
 }
 ```
+
+**Response for MCQ Assignment:**
+
+```json
+{
+  "id": 2,
+  "title": "JavaScript Fundamentals Quiz",
+  "description": "Test your knowledge of JavaScript fundamentals",
+  "videoId": 1,
+  "dueDate": "2023-07-15T23:59:59Z",
+  "isMCQ": true,
+  "passingScore": 70.0,
+  "createdAt": "2023-06-01T10:00:00Z",
+  "updatedAt": "2023-06-01T10:00:00Z",
+  "video": {
+    "id": 1,
+    "title": "Variables and Data Types",
+    "courseId": 1
+  },
+  "AssignmentQuestion": [
+    {
+      "id": 1,
+      "text": "Which of the following is a primitive data type in JavaScript?",
+      "options": ["Array", "Object", "String", "Function"],
+      "correctOption": 2,
+      "explanation": "String is a primitive data type in JavaScript",
+      "points": 1,
+      "userAnswer": {
+        "selectedOption": 2,
+        "isCorrect": true
+      }
+    },
+    {
+      "id": 2,
+      "text": "What does the '====' operator do in JavaScript?",
+      "options": ["Assigns a value", "Compares values and types", "Compares only values", "Logical AND"],
+      "correctOption": 1,
+      "explanation": "The strict equality operator (===) checks both value and type",
+      "points": 2,
+      "userAnswer": null
+    }
+  ],
+  "hasSubmitted": true,
+  "submission": {
+    "id": 4,
+    "status": "GRADED",
+    "submittedAt": "2023-06-10T14:30:00Z",
+    "grade": 85.5,
+    "mcqScore": 85.5,
+    "gradedAt": "2023-06-10T14:30:00Z"
+  }
+}
+```
+
+**Security Requirements:**
+- User must be authenticated
+- User must be enrolled in the course or be an admin
 
 #### Get Video Assignments
 
@@ -1162,34 +1223,162 @@ GET /assignments/video/:videoId
   "assignments": [
     {
       "id": 1,
-      "title": "JavaScript Arrays Implementation",
-      "description": "Create a program that demonstrates array manipulation in JavaScript",
+      "title": "JavaScript DOM Manipulation",
+      "description": "Create a web page that demonstrates DOM manipulation techniques",
       "videoId": 1,
       "dueDate": "2023-07-15T23:59:59Z",
+      "isMCQ": false,
       "createdAt": "2023-06-01T10:00:00Z",
-      "updatedAt": "2023-06-01T10:00:00Z",
       "hasSubmitted": true,
       "submission": {
-        "id": 1,
-        "status": "GRADED",
-        "grade": 85,
-        "submittedAt": "2023-06-10T14:30:00Z"
+        "id": 3,
+        "status": "PENDING",
+        "submittedAt": "2023-06-10T14:30:00Z",
+        "grade": null
       }
     },
     {
       "id": 2,
-      "title": "JavaScript Objects Exercise",
-      "description": "Create a program that demonstrates object manipulation in JavaScript",
+      "title": "JavaScript Fundamentals Quiz",
+      "description": "Test your knowledge of JavaScript fundamentals",
       "videoId": 1,
-      "dueDate": "2023-07-20T23:59:59Z",
-      "createdAt": "2023-06-02T11:00:00Z",
-      "updatedAt": "2023-06-02T11:00:00Z",
+      "dueDate": "2023-07-15T23:59:59Z",
+      "isMCQ": true,
+      "passingScore": 70.0,
+      "createdAt": "2023-06-01T10:00:00Z",
       "hasSubmitted": false,
       "submission": null
     }
   ]
 }
 ```
+
+**Security Requirements:**
+- User must be authenticated
+- User must be enrolled in the course or be an admin
+
+#### Submit Assignment
+
+```
+POST /assignments/submit
+```
+
+**Authentication Required:** Yes
+
+**Purpose:** Submit completed assignment (works for both regular and MCQ assignments)
+
+**Request Body for Regular Assignment:**
+
+```json
+{
+  "assignmentId": 1,
+  "content": "Here is my solution to the DOM manipulation assignment...",
+  "fileUrl": "/uploads/assignments/user1/assignment1/dom-manipulation.zip"
+}
+```
+
+**Request Body for MCQ Assignment:**
+
+```json
+{
+  "assignmentId": 2,
+  "answers": [
+    {
+      "questionId": 1,
+      "selectedOption": 2
+    },
+    {
+      "questionId": 2,
+      "selectedOption": 1
+    }
+  ]
+}
+```
+
+**Response for Regular Assignment:**
+
+```json
+{
+  "message": "Assignment submitted successfully",
+  "submission": {
+    "id": 3,
+    "userId": 1,
+    "assignmentId": 1,
+    "content": "Here is my solution to the DOM manipulation assignment...",
+    "fileUrl": "/uploads/assignments/user1/assignment1/dom-manipulation.zip",
+    "status": "PENDING",
+    "submittedAt": "2023-06-10T14:30:00Z"
+  }
+}
+```
+
+**Response for MCQ Assignment:**
+
+```json
+{
+  "message": "MCQ assignment passed",
+  "submission": {
+    "id": 4,
+    "userId": 1,
+    "assignmentId": 2,
+    "mcqScore": 85.5,
+    "status": "GRADED",
+    "grade": 85.5,
+    "submittedAt": "2023-06-10T14:30:00Z",
+    "gradedAt": "2023-06-10T14:30:00Z"
+  },
+  "mcqScore": 85.5,
+  "passed": true,
+  "passingScore": 70.0
+}
+```
+
+**Security Requirements:**
+- User must be authenticated
+- User must be enrolled in the course
+- Assignment must not be past due date (unless late submissions are allowed)
+
+#### Grade Assignment (Admin Only)
+
+```
+POST /assignments/submissions/:submissionId/grade
+```
+
+**Authentication Required:** Yes (Admin only)
+
+**Purpose:** Grade a student's assignment submission (for non-MCQ assignments)
+
+**Request Body:**
+
+```json
+{
+  "grade": 92,
+  "feedback": "Excellent work! Your DOM manipulation techniques were well implemented and clearly documented. For future assignments, consider adding error handling to your JavaScript functions.",
+  "status": "GRADED"
+}
+```
+
+**Response:**
+
+```json
+{
+  "message": "Submission graded successfully",
+  "submission": {
+    "id": 3,
+    "assignmentId": 1,
+    "userId": 1,
+    "status": "GRADED",
+    "submittedAt": "2023-06-10T14:30:00Z",
+    "gradedAt": "2023-06-12T09:45:00Z",
+    "grade": 92,
+    "feedback": "Excellent work! Your DOM manipulation techniques were well implemented and clearly documented. For future assignments, consider adding error handling to your JavaScript functions."
+  }
+}
+```
+
+**Security Requirements:**
+- User must be authenticated
+- User must have admin role
 
 #### Get Assignment Submissions (Admin Only)
 
@@ -1199,25 +1388,25 @@ GET /assignments/:assignmentId/submissions
 
 **Authentication Required:** Yes (Admin only)
 
-**Purpose:** Get all student submissions for a specific assignment
+**Purpose:** Get all submissions for a specific assignment
 
 **Response:**
 
 ```json
 {
   "assignmentId": 1,
-  "title": "JavaScript Arrays Implementation",
+  "title": "JavaScript DOM Manipulation",
   "submissionsCount": 2,
   "submissions": [
     {
-      "id": 1,
-      "content": "// My JavaScript array implementation\nconst myArray = [1, 2, 3];\nconsole.log(myArray.map(x => x * 2));",
-      "fileUrl": "https://example.com/uploads/assignment1.js",
+      "id": 3,
+      "assignmentId": 1,
+      "userId": 1,
       "status": "GRADED",
-      "grade": 85,
-      "feedback": "Good implementation of array methods, but could improve code comments.",
       "submittedAt": "2023-06-10T14:30:00Z",
-      "gradedAt": "2023-06-12T09:15:00Z",
+      "gradedAt": "2023-06-12T09:45:00Z",
+      "grade": 92,
+      "feedback": "Excellent work!",
       "user": {
         "id": 1,
         "name": "John Doe",
@@ -1225,11 +1414,14 @@ GET /assignments/:assignmentId/submissions
       }
     },
     {
-      "id": 2,
-      "content": "// Array implementation\nlet arr = [5, 10, 15];\narr.forEach(item => console.log(item));",
-      "fileUrl": "https://example.com/uploads/assignment2.js",
+      "id": 4,
+      "assignmentId": 1,
+      "userId": 2,
       "status": "PENDING",
-      "submittedAt": "2023-06-11T16:45:00Z",
+      "submittedAt": "2023-06-11T10:15:00Z",
+      "gradedAt": null,
+      "grade": null,
+      "feedback": null,
       "user": {
         "id": 2,
         "name": "Jane Smith",
@@ -1240,6 +1432,10 @@ GET /assignments/:assignmentId/submissions
 }
 ```
 
+**Security Requirements:**
+- User must be authenticated
+- User must have admin role
+
 #### Get User Submissions
 
 ```
@@ -1248,7 +1444,7 @@ GET /assignments/user/submissions
 
 **Authentication Required:** Yes
 
-**Purpose:** Get all assignment submissions by the current user
+**Purpose:** Get all submissions by the current user
 
 **Response:**
 
@@ -1257,37 +1453,44 @@ GET /assignments/user/submissions
   "submissionsCount": 2,
   "submissions": [
     {
-      "id": 1,
-      "content": "// My JavaScript array implementation\nconst myArray = [1, 2, 3];\nconsole.log(myArray.map(x => x * 2));",
-      "fileUrl": "https://example.com/uploads/assignment1.js",
+      "id": 3,
+      "assignmentId": 1,
+      "userId": 1,
       "status": "GRADED",
-      "grade": 85,
-      "feedback": "Good implementation of array methods, but could improve code comments.",
       "submittedAt": "2023-06-10T14:30:00Z",
-      "gradedAt": "2023-06-12T09:15:00Z",
+      "gradedAt": "2023-06-12T09:45:00Z",
+      "grade": 92,
+      "feedback": "Excellent work!",
       "assignment": {
         "id": 1,
-        "title": "JavaScript Arrays Implementation",
+        "title": "JavaScript DOM Manipulation",
+        "description": "Create a web page that demonstrates DOM manipulation techniques",
+        "isMCQ": false,
         "video": {
           "id": 1,
-          "title": "Arrays in JavaScript",
+          "title": "Variables and Data Types",
           "courseId": 1
         }
       }
     },
     {
-      "id": 3,
-      "content": "// React component implementation\nfunction MyComponent() {\n  return <div>Hello World</div>;\n}",
-      "fileUrl": "https://example.com/uploads/assignment3.jsx",
-      "status": "PENDING",
-      "submittedAt": "2023-06-15T11:20:00Z",
+      "id": 4,
+      "assignmentId": 2,
+      "userId": 1,
+      "status": "GRADED",
+      "submittedAt": "2023-06-11T10:15:00Z",
+      "gradedAt": "2023-06-11T10:15:00Z",
+      "grade": 85.5,
+      "mcqScore": 85.5,
       "assignment": {
-        "id": 3,
-        "title": "React Component Creation",
+        "id": 2,
+        "title": "JavaScript Fundamentals Quiz",
+        "description": "Test your knowledge of JavaScript fundamentals",
+        "isMCQ": true,
         "video": {
-          "id": 5,
-          "title": "Introduction to React Components",
-          "courseId": 2
+          "id": 1,
+          "title": "Variables and Data Types",
+          "courseId": 1
         }
       }
     }
@@ -1297,70 +1500,49 @@ GET /assignments/user/submissions
 
 **Security Requirements:**
 - User must be authenticated
-- User must be enrolled in the course containing the video
-- Admin users can bypass enrollment check
+- User must have admin role
 
-#### Check Video Completion Status
-
-```
-GET /progress/:videoId
-```
-
-**Authentication Required:** Yes
-
-**Purpose:** Check if a user has completed a specific video
-
-**Response:**
-
-```json
-{
-  "videoId": 1,
-  "completed": true,
-  "watchedAt": "2023-05-15T14:30:00Z"
-}
-```
-
-#### Get Course Video Progress
+#### Get User Assignment Submissions
 
 ```
-GET /progress/course/:courseId
+GET /assignments/submissions
 ```
 
 **Authentication Required:** Yes
 
-**Purpose:** Get completion status for all videos in a course
+**Purpose:** Get all assignment submissions for the authenticated user
 
 **Response:**
 
 ```json
-{
-  "courseId": 1,
-  "totalVideos": 3,
-  "completedVideos": 2,
-  "videos": [
-    {
-      "id": 1,
-      "title": "Variables and Data Types",
-      "duration": 1200,
-      "completed": true,
-      "watchedAt": "2023-05-15T14:30:00Z"
-    },
-    {
-      "id": 2,
-      "title": "Functions and Scope",
-      "duration": 1500,
-      "completed": true,
-      "watchedAt": "2023-05-16T10:15:00Z"
-    },
-    {
-      "id": 3,
-      "title": "Arrays and Objects",
-      "duration": 1800,
-      "completed": false,
-      "watchedAt": null
-    }
-  ]
-}
+[
+  {
+    "id": 3,
+    "assignmentId": 1,
+    "assignmentTitle": "JavaScript DOM Manipulation",
+    "courseId": 1,
+    "courseTitle": "Introduction to JavaScript",
+    "status": "graded",
+    "submittedAt": "2023-06-10T14:30:00Z",
+    "gradedAt": "2023-06-12T09:45:00Z",
+    "grade": 92,
+    "totalPoints": 100,
+    "feedback": "Excellent work! Your DOM manipulation techniques were well implemented and clearly documented. For future assignments, consider adding error handling to your JavaScript functions."
+  },
+  {
+    "id": 5,
+    "assignmentId": 2,
+    "assignmentTitle": "Build a Calculator",
+    "courseId": 1,
+    "courseTitle": "Introduction to JavaScript",
+    "status": "submitted",
+    "submittedAt": "2023-06-20T16:15:00Z",
+    "gradedAt": null,
+    "grade": null,
+    "totalPoints": 150,
+    "feedback": null
+  }
+]
 ```
 
 **Security Requirements:**

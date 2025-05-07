@@ -18,19 +18,19 @@ router.post('/', authenticateToken, authorizeAdmin(), createAssignment);
 // Get an assignment by ID
 router.get('/:id', authenticateToken, getAssignment);
 
-// Submit an assignment
+// Submit an assignment (works for both regular and MCQ assignments)
 router.post('/submit', authenticateToken, submitAssignment);
 
-// Grade a submission (admin only)
+// Grade a submission (admin only) - for non-MCQ assignments
 router.post('/submissions/:submissionId/grade', authenticateToken, authorizeAdmin(), gradeSubmission);
 
 // Get all assignments for a video
 router.get('/video/:videoId', authenticateToken, getVideoAssignments);
 
+// Get all submissions by the current user - this route must come BEFORE the wildcard route below
+router.get('/user/submissions', authenticateToken, getUserSubmissions);
+
 // Get all submissions for an assignment (admin only)
 router.get('/:assignmentId/submissions', authenticateToken, authorizeAdmin(), getAssignmentSubmissions);
-
-// Get all submissions by the current user
-router.get('/user/submissions', authenticateToken, getUserSubmissions);
 
 module.exports = router;

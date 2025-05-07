@@ -21,6 +21,7 @@ model User {
   certificates  Certificate[]
   videoProgress VideoProgress[]
   quizAnswers   Answer[]
+  assignmentAnswers AssignmentAnswer[] // Answers to MCQ assignment questions
   submissions   Submission[]    // Assignment submissions by the user
   createdAt     DateTime        @default(now())
   lastLoginAt   DateTime?
@@ -205,9 +206,42 @@ model Assignment {
   video       Video       @relation(fields: [videoId], references: [id], onDelete: Cascade)
   videoId     Int
   dueDate     DateTime?
+  isMCQ       Boolean     @default(false)
+  passingScore Float      @default(70.0)   // Percentage needed to pass MCQ assignments
   submissions Submission[]
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
+
+  AssignmentQuestion AssignmentQuestion[]
+}
+
+// New model for assignment questions (for MCQ assignments)
+model AssignmentQuestion {
+  id          Int      @id @default(autoincrement())
+  assignment  Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  assignmentId Int
+  text        String   @db.Text
+  options     Json     // Array of possible answers stored as JSON
+  correctOption Int     // Index of the correct option
+  explanation String?  @db.Text
+  points      Int      @default(1)
+  answers     AssignmentAnswer[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// New model for student answers to assignment questions
+model AssignmentAnswer {
+  id          Int       @id @default(autoincrement())
+  user        User      @relation(fields: [userId], references: [id])
+  userId      Int
+  question    AssignmentQuestion  @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  questionId  Int
+  selectedOption Int
+  isCorrect   Boolean
+  submittedAt DateTime  @default(now())
+
+  @@unique([userId, questionId])
 }
 
 // New model for assignment submissions
@@ -218,12 +252,14 @@ model Submission {
   assignment  Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
   assignmentId Int
   content     String?   @db.Text
-  fileUrl     String?
+  fileUrl     String?   
   status      SubmissionStatus @default(PENDING)
   grade       Float?
   feedback    String?   @db.Text
   submittedAt DateTime  @default(now())
   gradedAt    DateTime?
+  // For MCQ assignments
+  mcqScore    Float?    // Score for MCQ assignments (percentage)
 
   @@unique([userId, assignmentId])
 }

@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE `assignment` ADD COLUMN `isMCQ` BOOLEAN NOT NULL DEFAULT false,
+    ADD COLUMN `passingScore` DOUBLE NOT NULL DEFAULT 70.0;

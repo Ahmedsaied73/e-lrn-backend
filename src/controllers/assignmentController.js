@@ -7,7 +7,7 @@ const prisma = require('../config/db');
  */
 const createAssignment = async (req, res) => {
   try {
-    const { title, description, videoId, dueDate } = req.body;
+    const { title, description, videoId, dueDate, isMCQ, passingScore, questions } = req.body;
 
     // Validate required fields
     if (!title) {
@@ -33,10 +33,42 @@ const createAssignment = async (req, res) => {
       data: {
         title,
         description,
-        videoId: parseInt(videoId),
-        dueDate: dueDate ? new Date(dueDate) : null
+        dueDate: dueDate ? new Date(dueDate) : null,
+        isMCQ: isMCQ === true,
+        passingScore: isMCQ === true ? parseFloat(passingScore) || 70.0 : 70.0, // Default value for non-MCQ assignments
+        video: {
+          connect: { id: parseInt(videoId) }
+        }
       }
     });
+
+    // If it's an MCQ assignment, create the questions
+    if (isMCQ === true && Array.isArray(questions) && questions.length > 0) {
+      // Create questions for the MCQ assignment
+      const createdQuestions = await Promise.all(
+        questions.map(async (question) => {
+          return await prisma.assignmentQuestion.create({
+            data: {
+              assignmentId: assignment.id,
+              text: question.text,
+              options: question.options,
+              correctOption: question.correctOption,
+              explanation: question.explanation,
+              points: question.points || 1
+            }
+          });
+        })
+      );
+
+      // Return the assignment with questions
+      return res.status(201).json({
+        message: 'MCQ assignment created successfully',
+        assignment: {
+          ...assignment,
+          questions: createdQuestions
+        }
+      });
+    }
 
     res.status(201).json({
       message: 'Assignment created successfully',
@@ -60,7 +92,7 @@ const getAssignment = async (req, res) => {
 
     // Fetch the assignment
     const assignment = await prisma.assignment.findUnique({
-      where: { id: parseInt(id) },
+      where: { id: parseInt(id, 10) },
       include: {
         video: {
           select: {
@@ -68,7 +100,8 @@ const getAssignment = async (req, res) => {
             title: true,
             courseId: true
           }
-        }
+        },
+        AssignmentQuestion: true // Include MCQ questions if it's an MCQ assignment
       }
     });
 
@@ -103,6 +136,30 @@ const getAssignment = async (req, res) => {
       }
     });
 
+    // For MCQ assignments, get the user's answers if they exist
+    let userAnswers = [];
+    if (assignment.isMCQ && assignment.AssignmentQuestion.length > 0) {
+      const questionIds = assignment.AssignmentQuestion.map(q => q.id);
+      userAnswers = await prisma.assignmentAnswer.findMany({
+        where: {
+          userId: userId,
+          questionId: { in: questionIds }
+        }
+      });
+
+      // Map user answers to questions
+      assignment.AssignmentQuestion = assignment.AssignmentQuestion.map(question => {
+        const userAnswer = userAnswers.find(a => a.questionId === question.id);
+        return {
+          ...question,
+          userAnswer: userAnswer ? {
+            selectedOption: userAnswer.selectedOption,
+            isCorrect: userAnswer.isCorrect
+          } : null
+        };
+      });
+    }
+
     // Return assignment with submission status
     res.json({
       ...assignment,
@@ -122,31 +179,39 @@ const getAssignment = async (req, res) => {
  */
 const submitAssignment = async (req, res) => {
   try {
-    const { assignmentId, content, fileUrl } = req.body;
+    const { assignmentId, content, fileUrl, answers } = req.body;
     const userId = req.user.id;
 
     if (!assignmentId) {
       return res.status(400).json({ error: 'Assignment ID is required' });
     }
 
-    if (!content && !fileUrl) {
-      return res.status(400).json({ error: 'Content or file URL is required' });
-    }
-
     // Verify the assignment exists
     const assignment = await prisma.assignment.findUnique({
-      where: { id: parseInt(assignmentId) },
+      where: { id: parseInt(assignmentId, 10) },
       include: {
         video: {
           select: {
             courseId: true
           }
-        }
+        },
+        AssignmentQuestion: true // Include questions for MCQ assignments
       }
     });
 
     if (!assignment) {
       return res.status(404).json({ error: 'Assignment not found' });
+    }
+
+    // Validate input based on assignment type
+    if (assignment.isMCQ) {
+      if (!Array.isArray(answers) || answers.length === 0) {
+        return res.status(400).json({ error: 'Answers are required for MCQ assignments' });
+      }
+    } else {
+      if (!content && !fileUrl) {
+        return res.status(400).json({ error: 'Content or file URL is required for non-MCQ assignments' });
+      }
     }
 
     // Verify user is enrolled in the course
@@ -166,7 +231,7 @@ const submitAssignment = async (req, res) => {
       }
     }
 
-    // Check if the assignment due date has passed
+    // Check if the assignment has a due date and if it has passed
     if (assignment.dueDate && new Date() > new Date(assignment.dueDate)) {
       return res.status(400).json({
         error: 'The due date for this assignment has passed',
@@ -185,9 +250,55 @@ const submitAssignment = async (req, res) => {
     });
 
     let submission;
+    let mcqScore = null;
+
+    // Handle MCQ assignment submission
+    if (assignment.isMCQ) {
+      // Process MCQ answers
+      let correctAnswers = 0;
+      let totalPoints = 0;
+      
+      // Delete any existing answers if resubmitting
+      if (existingSubmission) {
+        await prisma.assignmentAnswer.deleteMany({
+          where: {
+            userId: userId,
+            questionId: {
+              in: assignment.AssignmentQuestion.map(q => q.id)
+            }
+          }
+        });
+      }
+
+      // Create answers for each question
+      for (const answer of answers) {
+        const question = assignment.AssignmentQuestion.find(q => q.id === parseInt(answer.questionId));
+        
+        if (!question) continue;
+        
+        const isCorrect = parseInt(answer.selectedOption) === question.correctOption;
+        
+        await prisma.assignmentAnswer.create({
+          data: {
+            userId: userId,
+            questionId: question.id,
+            selectedOption: parseInt(answer.selectedOption),
+            isCorrect: isCorrect
+          }
+        });
+
+        if (isCorrect) {
+          correctAnswers += question.points;
+        }
+        totalPoints += question.points;
+      }
+
+      // Calculate score as percentage
+      mcqScore = totalPoints > 0 ? (correctAnswers / totalPoints) * 100 : 0;
+    }
 
     if (existingSubmission) {
-      // Update existing submission if it's still pending
+      // Update existing submission
       if (existingSubmission.status !== 'PENDING') {
         return res.status(400).json({
           error: 'This assignment has already been graded and cannot be resubmitted'
@@ -197,9 +308,14 @@ const submitAssignment = async (req, res) => {
       submission = await prisma.submission.update({
         where: { id: existingSubmission.id },
         data: {
-          content,
-          fileUrl,
-          submittedAt: new Date()
+          content: assignment.isMCQ ? null : content,
+          fileUrl: assignment.isMCQ ? null : fileUrl,
+          mcqScore: assignment.isMCQ ? mcqScore : null,
+          submittedAt: new Date(),
+          // Auto-grade MCQ assignments
+          status: assignment.isMCQ ? 'GRADED' : 'PENDING',
+          grade: assignment.isMCQ ? mcqScore : null,
+          gradedAt: assignment.isMCQ ? new Date() : null
         }
       });
     } else {
@@ -208,10 +324,25 @@ const submitAssignment = async (req, res) => {
         data: {
           userId: userId,
           assignmentId: parseInt(assignmentId),
-          content,
-          fileUrl,
-          status: 'PENDING'
+          content: assignment.isMCQ ? null : content,
+          fileUrl: assignment.isMCQ ? null : fileUrl,
+          mcqScore: assignment.isMCQ ? mcqScore : null,
+          status: assignment.isMCQ ? 'GRADED' : 'PENDING',
+          grade: assignment.isMCQ ? mcqScore : null,
+          gradedAt: assignment.isMCQ ? new Date() : null
         }
+      });
+    }
+
+    // For MCQ assignments, include the score and whether it passed
+    if (assignment.isMCQ) {
+      const passed = mcqScore >= assignment.passingScore;
+      return res.json({
+        message: `MCQ assignment ${passed ? 'passed' : 'failed'}`,
+        submission,
+        mcqScore,
+        passed,
+        passingScore: assignment.passingScore
       });
     }
 
@@ -360,9 +491,16 @@ const getAssignmentSubmissions = async (req, res) => {
   try {
     const { assignmentId } = req.params;
 
+    // Validate assignmentId is provided and is a valid number
+    if (!assignmentId || isNaN(parseInt(assignmentId, 10))) {
+      return res.status(400).json({ error: 'Valid assignment ID is required' });
+    }
+
+    const assignmentIdInt = parseInt(assignmentId, 10);
+
     // Verify the assignment exists
     const assignment = await prisma.assignment.findUnique({
-      where: { id: parseInt(assignmentId) }
+      where: { id: assignmentIdInt }
     });
 
     if (!assignment) {
@@ -371,7 +509,7 @@ const getAssignmentSubmissions = async (req, res) => {
 
     // Get all submissions for the assignment
     const submissions = await prisma.submission.findMany({
-      where: { assignmentId: parseInt(assignmentId) },
+      where: { assignmentId: assignmentIdInt },
       include: {
         user: {
           select: {
@@ -385,7 +523,7 @@ const getAssignmentSubmissions = async (req, res) => {
     });
 
     res.json({
-      assignmentId: parseInt(assignmentId),
+      assignmentId: assignmentIdInt,
       title: assignment.title,
       submissionsCount: submissions.length,
       submissions
