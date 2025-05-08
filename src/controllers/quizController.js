@@ -835,6 +835,99 @@ const getCourseQuizzes = async (req, res) => {
   }
 };
 
+/**
+ * Get status of a specific quiz for the current user
+ * @param {Object} req - Express request object with authenticated user
+ * @param {Object} res - Express response object
+ */
+const getQuizStatus = async (req, res) => {
+  try {
+    const { quizId } = req.params;
+    const userId = req.user.id;
+
+    // Validate quizId
+    const parsedQuizId = parseInt(quizId, 10);
+    if (isNaN(parsedQuizId)) {
+      return res.status(400).json({ error: 'Invalid quiz ID format' });
+    }
+
+    // Verify the quiz exists
+    const quiz = await prisma.quiz.findUnique({
+      where: { id: parsedQuizId },
+      select: {
+        id: true,
+        title: true,
+        description: true,
+        isFinal: true,
+        passingScore: true,
+        courseId: true,
+        videoId: true
+      }
+    });
+
+    if (!quiz) {
+      return res.status(404).json({ error: 'Quiz not found' });
+    }
+
+    // Get user's answers for this quiz
+    const userAnswers = await prisma.answer.findMany({
+      where: {
+        userId: userId,
+        question: {
+          quizId: parsedQuizId
+        }
+      },
+      include: {
+        question: true
+      },
+      orderBy: {
+        submittedAt: 'desc'
+      }
+    });
+
+    // If user hasn't taken the quiz
+    if (userAnswers.length === 0) {
+      return res.json({
+        quizId: parsedQuizId,
+        title: quiz.title,
+        taken: false,
+        status: 'NOT_ATTEMPTED',
+        message: 'User has not attempted this quiz yet'
+      });
+    }
+
+    // Calculate the score
+    const totalPoints = await prisma.question.aggregate({
+      where: { quizId: parsedQuizId },
+      _sum: { points: true }
+    });
+    
+    const earnedPoints = userAnswers.reduce((sum, a) => a.isCorrect ? sum + a.question.points : sum, 0);
+    const totalPointsValue = totalPoints._sum.points || 0;
+    const score = totalPointsValue > 0 ? (earnedPoints / totalPointsValue) * 100 : 0;
+    const passed = score >= quiz.passingScore;
+    
+    // Get the submission time from the first answer (they should all have the same timestamp)
+    const submittedAt = userAnswers.length > 0 ? userAnswers[0].submittedAt : null;
+
+    res.json({
+      quizId: parsedQuizId,
+      title: quiz.title,
+      taken: true,
+      status: passed ? 'PASSED' : 'FAILED',
+      score: score,
+      passingScore: quiz.passingScore,
+      passed: passed,
+      submittedAt: submittedAt,
+      correctAnswers: userAnswers.filter(a => a.isCorrect).length,
+      totalQuestions: userAnswers.length
+    });
+  } catch (error) {
+    console.error('Error getting quiz status:', error);
+    res.status(500).json({ error: 'Failed to get quiz status' });
+  }
+};
+
 module.exports = {
   createQuiz,
   getQuiz,
@@ -842,5 +935,6 @@ module.exports = {
   getQuizResults,
   getCourseQuizzes,
   getUserQuizResults,
+  getQuizStatus,
   requestLogger
 };

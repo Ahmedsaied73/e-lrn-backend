@@ -6,7 +6,8 @@ const {
   gradeSubmission,
   getVideoAssignments,
   getAssignmentSubmissions,
-  getUserSubmissions
+  getUserSubmissions,
+  getAssignmentStatus
 } = require('../controllers/assignmentController');
 const { authenticateToken, authorizeAdmin } = require('../middlewares');
 
@@ -29,6 +30,9 @@ router.get('/video/:videoId', authenticateToken, getVideoAssignments);
 
 // Get all submissions by the current user - this route must come BEFORE the wildcard route below
 router.get('/user/submissions', authenticateToken, getUserSubmissions);
+
+// Get the status of a specific assignment for the current user
+router.get('/:assignmentId/status', authenticateToken, getAssignmentStatus);
 
 // Get all submissions for an assignment (admin only)
 router.get('/:assignmentId/submissions', authenticateToken, authorizeAdmin(), getAssignmentSubmissions);

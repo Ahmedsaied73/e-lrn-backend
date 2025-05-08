@@ -128,6 +128,12 @@ const checkVideoCompletion = async (req, res) => {
     const { videoId } = req.params;
     const userId = req.user.id;
 
+    // Parse videoId to integer and verify it's valid
+    const parsedVideoId = parseInt(videoId, 10);
+    if (isNaN(parsedVideoId)) {
+      return res.status(400).json({ error: 'Invalid video ID format' });
+    }
+
     // Find the video progress record
     const videoProgress = await prisma.videoProgress.findUnique({
       where: {
@@ -140,7 +146,7 @@ const checkVideoCompletion = async (req, res) => {
 
     // Return completion status
     res.json({
-      videoId: parseInt(videoId),
+      videoId: parsedVideoId,
       completed: videoProgress ? videoProgress.completed : false,
       watchedAt: videoProgress ? videoProgress.watchedAt : null
     });

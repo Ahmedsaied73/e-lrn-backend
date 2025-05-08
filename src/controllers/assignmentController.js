@@ -572,6 +572,93 @@ const getUserSubmissions = async (req, res) => {
   }
 };
 
+/**
+ * Get status of a specific assignment for the current user
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ */
+const getAssignmentStatus = async (req, res) => {
+  try {
+    const { assignmentId } = req.params;
+    const userId = req.user.id;
+
+    // Validate assignmentId
+    const parsedAssignmentId = parseInt(assignmentId, 10);
+    if (isNaN(parsedAssignmentId)) {
+      return res.status(400).json({ error: 'Invalid assignment ID format' });
+    }
+
+    // Verify the assignment exists
+    const assignment = await prisma.assignment.findUnique({
+      where: { id: parsedAssignmentId },
+      include: {
+        video: {
+          select: {
+            id: true,
+            title: true,
+            courseId: true
+          }
+        }
+      }
+    });
+
+    if (!assignment) {
+      return res.status(404).json({ error: 'Assignment not found' });
+    }
+
+    // Check if the user has submitted this assignment
+    const submission = await prisma.submission.findUnique({
+      where: {
+        userId_assignmentId: {
+          userId: userId,
+          assignmentId: parsedAssignmentId
+        }
+      }
+    });
+
+    // If no submission found
+    if (!submission) {
+      return res.json({
+        assignmentId: parsedAssignmentId,
+        title: assignment.title,
+        submitted: false,
+        status: 'NOT_SUBMITTED',
+        message: 'User has not submitted this assignment yet',
+        dueDate: assignment.dueDate,
+        isPastDue: assignment.dueDate ? new Date() > new Date(assignment.dueDate) : false
+      });
+    }
+
+    // For MCQ assignments, include score details
+    let mcqDetails = null;
+    if (assignment.isMCQ) {
+      mcqDetails = {
+        score: submission.mcqScore,
+        passingScore: assignment.passingScore,
+        passed: submission.mcqScore >= assignment.passingScore
+      };
+    }
+
+    res.json({
+      assignmentId: parsedAssignmentId,
+      title: assignment.title,
+      submitted: true,
+      submittedAt: submission.submittedAt,
+      status: submission.status,
+      grade: submission.grade,
+      feedback: submission.feedback,
+      isMCQ: assignment.isMCQ,
+      mcq: mcqDetails,
+      gradedAt: submission.gradedAt,
+      dueDate: assignment.dueDate,
+      isPastDue: assignment.dueDate ? new Date() > new Date(assignment.dueDate) : false
+    });
+  } catch (error) {
+    console.error('Error getting assignment status:', error);
+    res.status(500).json({ error: 'Failed to get assignment status' });
+  }
+};
+
 module.exports = {
   createAssignment,
   getAssignment,
@@ -579,5 +666,6 @@ module.exports = {
   gradeSubmission,
   getVideoAssignments,
   getAssignmentSubmissions,
-  getUserSubmissions
+  getUserSubmissions,
+  getAssignmentStatus
 };
