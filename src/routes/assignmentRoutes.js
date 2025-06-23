@@ -7,7 +7,8 @@ const {
   getVideoAssignments,
   getAssignmentSubmissions,
   getUserSubmissions,
-  getAssignmentStatus
+  getAssignmentStatus,
+  getCourseAssignments
 } = require('../controllers/assignmentController');
 const { authenticateToken, authorizeAdmin } = require('../middlewares');
 
@@ -36,5 +37,8 @@ router.get('/:assignmentId/status', authenticateToken, getAssignmentStatus);
 
 // Get all submissions for an assignment (admin only)
 router.get('/:assignmentId/submissions', authenticateToken, authorizeAdmin(), getAssignmentSubmissions);
+
+// Get all assignments for a course (with related video info)
+router.get('/course/:courseId', authenticateToken, getCourseAssignments);
 
 module.exports = router;

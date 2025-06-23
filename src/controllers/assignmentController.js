@@ -659,6 +659,52 @@ const getAssignmentStatus = async (req, res) => {
   }
 };
 
+/**
+ * Get all assignments for a course, including related video info
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ */
+const getCourseAssignments = async (req, res) => {
+  try {
+    const { courseId } = req.params;
+    if (!courseId || isNaN(parseInt(courseId, 10))) {
+      return res.status(400).json({ error: 'Invalid courseId' });
+    }
+    // Verify the course exists
+    const course = await prisma.course.findUnique({
+      where: { id: parseInt(courseId, 10) },
+      select: { id: true, title: true }
+    });
+    if (!course) {
+      return res.status(404).json({ error: 'Course not found' });
+    }
+    // Get all assignments for videos in this course
+    const assignments = await prisma.assignment.findMany({
+      where: {
+        video: {
+          courseId: parseInt(courseId, 10)
+        }
+      },
+      include: {
+        video: {
+          select: {
+            id: true,
+            title: true
+          }
+        }
+      },
+      orderBy: { createdAt: 'asc' }
+    });
+    res.json({
+      course: { id: course.id, title: course.title },
+      assignments
+    });
+  } catch (error) {
+    console.error('Error fetching course assignments:', error);
+    res.status(500).json({ error: 'Failed to fetch course assignments' });
+  }
+};
+
 module.exports = {
   createAssignment,
   getAssignment,
@@ -667,5 +713,6 @@ module.exports = {
   getVideoAssignments,
   getAssignmentSubmissions,
   getUserSubmissions,
-  getAssignmentStatus
+  getAssignmentStatus,
+  getCourseAssignments
 };
