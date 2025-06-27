@@ -22,7 +22,7 @@ router.get('/enrolled', authenticateToken, getUserEnrolledCourses);
 router.get('/:id', authenticateToken, getCourseById);
 
 // Route to create a new course with thumbnail upload (admin only)
-router.post('/', authenticateToken, authorizeAdmin, handleCourseThumbnailUpload, createCourse);
+router.post('/', authenticateToken, authorizeAdmin(), handleCourseThumbnailUpload, createCourse);
 
 // Route to update a course with thumbnail upload (admin only)
 router.put('/:id', authenticateToken, authorizeAdmin, handleCourseThumbnailUpload, updateCourse);

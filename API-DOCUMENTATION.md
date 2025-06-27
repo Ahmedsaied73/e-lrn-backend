@@ -467,7 +467,7 @@ GET /videos/:id
 }
 ```
 
-#### Upload Video (Admin Only)
+#### Upload Video to Course (Admin Only)
 
 ```
 POST /videos/course/:courseId
@@ -475,12 +475,59 @@ POST /videos/course/:courseId
 
 **Authentication Required:** Yes (Admin only)
 
-**Request Body:** Form data with the following fields:
+**Request Body:**
 
-- `title`: Video title
-- `description`: Video description
-- `order`: Video order in the course
-- `video`: Video file
+- You can either upload a video file or register a video from a custom/absolute path.
+- Use `multipart/form-data` for file uploads or `application/json` for custom path only (no thumbnail).
+
+**Form Data Fields:**
+- `title` (string, required): Video title
+- `description` (string, optional): Video description
+- `order` (integer, required): Video order in the course
+- `duration` (number, optional): Duration in seconds
+- `video` (file, required if not using `customPath`): The video file to upload
+- `customPath` (string, required if not uploading a file): Absolute path to the video file on the server (e.g., `D:/media/lesson2.mp4`)
+- `thumbnail` (file, optional): Thumbnail image for the video
+
+**At least one of `video` or `customPath` is required.**
+
+**Example: Upload a Video File**
+
+```sh
+curl -X POST http://localhost:3005/videos/course/1 \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -F "title=Lecture 1" \
+  -F "order=1" \
+  -F "duration=600" \
+  -F "video=@/path/to/video.mp4" \
+  -F "thumbnail=@/path/to/thumb.jpg"
+```
+
+**Example: Register a Video from a Custom/Absolute Path**
+
+```sh
+curl -X POST http://localhost:3005/videos/course/1 \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -F "title=Lecture 2" \
+  -F "order=2" \
+  -F "duration=900" \
+  -F "customPath=D:/media/videos/lecture2.mp4" \
+  -F "thumbnail=@/path/to/thumb.jpg"
+```
+
+Or, if you only want to send JSON (no thumbnail):
+
+```sh
+curl -X POST http://localhost:3005/videos/course/1 \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Lecture 2",
+    "order": 2,
+    "duration": 900,
+    "customPath": "D:/media/videos/lecture2.mp4"
+  }'
+```
 
 **Response:**
 
@@ -489,17 +536,36 @@ POST /videos/course/:courseId
   "message": "Video uploaded successfully",
   "video": {
     "id": 3,
-    "title": "Arrays and Objects",
-    "description": "Working with complex data structures",
-    "duration": 1800,
-    "order": 3,
+    "title": "Lecture 2",
+    "description": "...",
+    "order": 2,
+    "duration": 900,
     "courseId": 1,
-    "videoUrl": "/uploads/videos/arrays-objects.mp4",
-    "thumbnailUrl": "/uploads/thumbnails/video3.jpg",
-    "createdAt": "2023-04-12T14:30:00Z"
+    "videoUrl": "D:/media/videos/lecture2.mp4", // or a relative uploads path
+    "thumbnailUrl": "/uploads/videos/thumb-...jpg",
+    "createdAt": "2025-06-25T12:00:00Z"
   }
 }
 ```
+
+**Error Responses:**
+- `400`: Missing required fields, invalid custom path, or no file provided
+- `404`: Course not found
+- `500`: Internal server error
+
+**Notes:**
+- If both `video` and `customPath` are provided, the uploaded file takes precedence.
+- The backend checks if the file at `customPath` exists and is accessible.
+- The `videoUrl` in the response will be the path used (either the uploaded file’s URL or the custom path).
+- Only admins can upload/register videos.
+- If you use `customPath`, the file must already exist on the server and be accessible to the backend.
+- You can optionally upload a thumbnail image; otherwise, a default will be used.
+
+**Security Requirements:**
+- User must be authenticated
+- User must have admin role
+- Never expose sensitive server paths to the client
+- Only allow trusted admins to use the `customPath` feature
 
 #### Update Video (Admin Only)
 

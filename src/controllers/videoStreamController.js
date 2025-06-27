@@ -1,8 +1,9 @@
 const prisma = require('../config/db');
-const { 
-  getYoutubeStreamUrl, 
-  getHLSStreamInfo 
+const {
+  getYoutubeStreamUrl,
+  getHLSStreamInfo
 } = require('../utils/youtubeApi');
+const { generateVideoToken } = require('../middlewares/videoStreamAuth');
 const { 
   generatePlayerHTML, 
   generatePlayerScript 
@@ -58,8 +59,13 @@ const getVideoStreamUrl = async (req, res) => {
     } else {
       // Regular video file
       const baseUrl = `${req.protocol}://${req.get('host')}`;
-      const streamUrl = video.url.startsWith('http') ? video.url : `${baseUrl}/${video.url}`;
+
       
+      // Generate a signed URL for HLS video
+      const hlsStreamPath = `uploads/videos/${video.id}/output.m3u8`;
+      const token = generateVideoToken(hlsStreamPath);
+      const streamUrl = `${baseUrl}/stream/videos/${video.id}/output.m3u8?token=${token}`;
+
       response = {
         videoId: parseInt(videoId),
         title: video.title,
@@ -241,4 +247,4 @@ module.exports = {
   getVideoStreamUrl,
   getVideoEmbedCode,
   getCoursePlayer
-}; 
+};

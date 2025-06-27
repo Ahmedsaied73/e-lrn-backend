@@ -1,8 +1,10 @@
 const express = require('express');
 const router = express.Router();
+const path = require('path');
 const { authenticateToken } = require('../middlewares');
 const { checkCourseAccess, checkVideoAccess } = require('../middlewares/accessControl');
 const { ensureSequentialAccess } = require('../middlewares/sequentialAccess');
+const { validateVideoToken } = require('../middlewares/videoStreamAuth');
 const videoStreamController = require('../controllers/videoStreamController');
 const nextVideoController = require('../controllers/nextVideoController');
 
@@ -13,6 +15,17 @@ router.get(
   checkVideoAccess,
   ensureSequentialAccess,
   (req, res) => videoStreamController.getVideoStreamUrl(req, res)
+);
+
+// Route to serve HLS video files, protected by JWT
+router.get(
+  '/videos/:videoId/:filename',
+  validateVideoToken,
+  (req, res) => {
+    const { videoId, filename } = req.params;
+    const filePath = path.join(__dirname, '../../uploads/videos', videoId, filename);
+    res.sendFile(filePath);
+  }
 );
 
 // Video embed code
