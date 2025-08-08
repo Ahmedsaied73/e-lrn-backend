@@ -69,6 +69,36 @@ model Video {
   description String?
   transcript  String?         // For searchable video content
   createdAt   DateTime        @default(now())
+  muxData     MuxData?        
+}
+
+model MuxData {
+  id          Int     @id @default(autoincrement())
+  assetId     String  @unique
+  playbackId  String? @unique
+  uploadId    String? @unique  // For direct upload tracking
+  isProcessed Boolean @default(false)
+  status      MuxAssetStatus @default(PREPARING)
+  duration    Float?  // Video duration in seconds
+  aspectRatio String? // e.g., "16:9"
+  resolution  String? // e.g., "1920x1080"
+  fileSize    BigInt? // File size in bytes
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  // Mux specific metadata
+  muxCreatedAt DateTime?
+  muxUpdatedAt DateTime?
+  errorMessage String? // Store any processing errors
+  // Relations
+  video       Video   @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  videoId     Int     @unique
+}
+
+enum MuxAssetStatus {
+  PREPARING   // Asset is being prepared
+  READY       // Asset is ready for playback
+  ERRORED     // Asset processing failed
+  DELETED     // Asset has been deleted
 }
 
 model Enrollment {

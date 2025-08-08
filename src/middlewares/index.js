@@ -44,9 +44,16 @@ const authorizeAdmin = (allowedRoles) => {
 // Import access control middleware
 const { checkCourseAccess, checkVideoAccess } = require('./accessControl');
 
+// Combine authentication and admin authorization into a single middleware
+const isAdmin = [
+  authenticateToken,
+  authorizeAdmin(['ADMIN'])
+];
+
 module.exports = {
   authenticateToken,
   authorizeAdmin,
+  isAdmin,
   checkCourseAccess,
   checkVideoAccess,
   logger
