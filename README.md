@@ -1,6 +1,6 @@
 # E-Learning Platform
 
-A comprehensive e-learning platform with course management, video streaming, user progress tracking, and YouTube integration.
+A comprehensive e-learning platform with course management, video streaming, user progress tracking, and YouTube integration. Previously integrated with Mux for video processing, now simplified with direct video uploads and YouTube embedding.
 
 ## Features
 
@@ -130,7 +130,19 @@ Optional flags:
 - `--markAsPaid=true|false` (default: true) - Mark all enrollments as paid
 - `--force=true|false` (default: false) - Skip confirmation prompt
 
-## YouTube Integration
+## Video Management
+
+The platform supports two approaches for video content:
+
+### Direct Video Upload
+
+Administrators can upload video files directly to the platform:
+
+1. Videos are stored in the local filesystem under the `uploads/videos` directory
+2. The platform handles video streaming through direct file access
+3. Video metadata is stored in the database for tracking and management
+
+### YouTube Integration
 
 The platform supports importing YouTube playlists as courses:
 
@@ -138,6 +150,10 @@ The platform supports importing YouTube playlists as courses:
 2. Use the admin interface to import a playlist by its ID
 3. Set a price for the course (optional)
 4. The platform will automatically import all videos from the playlist
+
+### Recent Changes
+
+**Mux Integration Removed**: The platform previously used Mux for video processing and streaming. This integration has been removed to simplify the architecture and reduce external dependencies. All video handling now uses direct file uploads or YouTube embedding.
 
 ## API Documentation
 
