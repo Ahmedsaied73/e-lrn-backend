@@ -1,30 +1,29 @@
 const prisma = require('../config/db');
-const fs = require('fs');
-const path = require('path');
 
-// Get all courses
+// Get all courses (with pagination)
 const getAllCourses = async (req, res) => {
   try {
-    const courses = await prisma.course.findMany({
-      include: {
-        teacher: {
-          select: {
-            id: true,
-            name: true,
-            email: true
-          }
-        },
-        videos: {
-          select: {
-            id: true,
-            title: true,
-            duration: true
+    const page = parseInt(req.query.page) || 1;
+    const take = parseInt(req.query.limit) || 20;
+    const skip = (page - 1) * take;
+
+    const [courses, total] = await Promise.all([
+      prisma.course.findMany({
+        skip,
+        take,
+        include: {
+          teacher: {
+            select: { id: true, name: true, email: true }
+          },
+          videos: {
+            select: { id: true, title: true, duration: true }
           }
         }
-      }
-    });
+      }),
+      prisma.course.count()
+    ]);
 
-    // Add full URL for thumbnails
+    // Ensure thumbnails have full URL if not already
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     const coursesWithUrls = courses.map(course => ({
       ...course,
@@ -33,10 +32,19 @@ const getAllCourses = async (req, res) => {
         : course.thumbnail
     }));
 
-    res.json(coursesWithUrls);
+    res.json({
+      success: true,
+      data: coursesWithUrls,
+      meta: {
+        total,
+        page,
+        limit: take,
+        totalPages: Math.ceil(total / take)
+      }
+    });
   } catch (error) {
     console.error('Error fetching courses:', error);
-    res.status(500).json({ error: 'Failed to fetch courses' });
+    res.status(500).json({ success: false, error: 'Failed to fetch courses' });
   }
 };
 
@@ -48,45 +56,26 @@ const getCourseById = async (req, res) => {
     const course = await prisma.course.findUnique({
       where: { id: parseInt(id) },
       include: {
-        teacher: {
-          select: {
-            id: true,
-            name: true,
-            email: true
-          }
-        },
+        teacher: { select: { id: true, name: true, email: true } },
         videos: {
-          select: {
-            id: true,
-            title: true,
-            url: true,
-            thumbnail: true,
-            duration: true
-          }
+          select: { id: true, title: true, url: true, thumbnail: true, duration: true }
         },
         enrollments: {
-          select: {
-            id: true,
-            userId: true,
-            createdAt: true
-          }
+          select: { id: true, userId: true, createdAt: true }
         }
       }
     });
 
     if (!course) {
-      return res.status(404).json({ error: 'Course not found' });
+      return res.status(404).json({ success: false, error: 'Course not found' });
     }
 
-    // Add full URLs for thumbnails and videos
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     
-    // Process course thumbnail
     if (course.thumbnail && !course.thumbnail.startsWith('http')) {
       course.thumbnail = `${baseUrl}/${course.thumbnail}`;
     }
     
-    // Process video URLs and thumbnails
     if (course.videos) {
       course.videos = course.videos.map(video => ({
         ...video,
@@ -95,69 +84,50 @@ const getCourseById = async (req, res) => {
       }));
     }
 
-    res.json(course);
+    res.json({ success: true, data: course });
   } catch (error) {
     console.error('Error fetching course:', error);
-    res.status(500).json({ error: 'Failed to fetch course' });
+    res.status(500).json({ success: false, error: 'Failed to fetch course' });
   }
 };
 
 // Create a new course (automatically linked to the admin/teacher)
 const createCourse = async (req, res) => {
   try {
-    const { title, description, price, grade } = req.body;
+    const { title, description, price, grade, thumbnail } = req.body;
 
-    // Validate required fields
-    if (!title || !description || !price || !grade) {
-      return res.status(400).json({ error: 'Title, description, price, and grade are required' });
+    if (!title || !description || price === undefined || !grade) {
+      return res.status(400).json({ success: false, error: 'Title, description, price, and grade are required' });
     }
 
-    // Validate grade is one of the allowed values
     const validGrades = ['FIRST_SECONDARY', 'SECOND_SECONDARY', 'THIRD_SECONDARY'];
     if (!validGrades.includes(grade)) {
-      return res.status(400).json({ 
-        error: 'Invalid grade value', 
-        validValues: validGrades 
-      });
+      return res.status(400).json({ success: false, error: 'Invalid grade value' });
     }
 
-    // Find the admin user
     const admin = await prisma.user.findFirst({
-      where: {
-        role: 'ADMIN'
-      }
+      where: { role: 'ADMIN' }
     });
 
     if (!admin) {
-      return res.status(500).json({ error: 'Administrator account not found' });
+      return res.status(500).json({ success: false, error: 'Administrator account not found' });
     }
 
-    // Get thumbnail path from file upload if available
-    let thumbnailPath = null;
-    if (req.file) {
-      thumbnailPath = `uploads/courses/${req.file.filename}`;
-    }
-
-    // Create the course with the admin as the teacher
     const course = await prisma.course.create({
       data: {
         title,
         description,
         price: parseFloat(price),
         grade,
-        thumbnail: thumbnailPath || 'uploads/courses/default-course.jpg', // Default image if none provided
+        thumbnail: thumbnail || 'https://via.placeholder.com/640x360?text=No+Thumbnail',
         teacherId: admin.id
       }
     });
 
-    // Add the full URL for the thumbnail
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
-    course.thumbnail = `${baseUrl}/${course.thumbnail}`;
-
-    res.status(201).json({ message: 'Course created successfully', course });
+    res.status(201).json({ success: true, message: 'Course created successfully', data: course });
   } catch (error) {
     console.error('Error creating course:', error);
-    res.status(500).json({ error: 'Failed to create course' });
+    res.status(500).json({ success: false, error: 'Failed to create course' });
   }
 };
 
@@ -165,223 +135,99 @@ const createCourse = async (req, res) => {
 const updateCourse = async (req, res) => {
   try {
     const { id } = req.params;
-    const { title, description, price, grade } = req.body;
+    const { title, description, price, grade, thumbnail } = req.body;
 
-    // Check if course exists
     const existingCourse = await prisma.course.findUnique({
       where: { id: parseInt(id) }
     });
 
     if (!existingCourse) {
-      return res.status(404).json({ error: 'Course not found' });
+      return res.status(404).json({ success: false, error: 'Course not found' });
     }
 
-    // Validate grade if provided
     if (grade) {
       const validGrades = ['FIRST_SECONDARY', 'SECOND_SECONDARY', 'THIRD_SECONDARY'];
       if (!validGrades.includes(grade)) {
-        return res.status(400).json({ 
-          error: 'Invalid grade value', 
-          validValues: validGrades 
-        });
+        return res.status(400).json({ success: false, error: 'Invalid grade value' });
       }
     }
 
-    // Get update data
     const updateData = {
       title: title || undefined,
       description: description || undefined,
-      price: price ? parseFloat(price) : undefined,
+      price: price !== undefined ? parseFloat(price) : undefined,
       grade: grade || undefined,
+      thumbnail: thumbnail || undefined
     };
 
-    // Handle thumbnail update if a new file was uploaded
-    if (req.file) {
-      // Delete old thumbnail if it exists and is not the default
-      if (existingCourse.thumbnail && 
-          !existingCourse.thumbnail.includes('default-course.jpg') &&
-          existingCourse.thumbnail.startsWith('uploads/')) {
-        const oldThumbPath = path.join(__dirname, '../../', existingCourse.thumbnail);
-        if (fs.existsSync(oldThumbPath)) {
-          fs.unlinkSync(oldThumbPath);
-        }
-      }
-      
-      // Set new thumbnail path
-      updateData.thumbnail = `uploads/courses/${req.file.filename}`;
-    }
-
-    // Update the course
     const updatedCourse = await prisma.course.update({
       where: { id: parseInt(id) },
       data: updateData
     });
 
-    // Add the full URL for the thumbnail
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
-    updatedCourse.thumbnail = `${baseUrl}/${updatedCourse.thumbnail}`;
-
-    res.json({ message: 'Course updated successfully', course: updatedCourse });
+    res.json({ success: true, message: 'Course updated successfully', data: updatedCourse });
   } catch (error) {
     console.error('Error updating course:', error);
-    res.status(500).json({ error: 'Failed to update course' });
+    res.status(500).json({ success: false, error: 'Failed to update course' });
   }
 };
 
 // Delete a course
 const deleteCourse = async (req, res) => {
   try {
-    console.log(req.params);
-    const { id } = req.params;
-    const courseId = parseInt(id);
+    const courseId = parseInt(req.params.id);
 
-    console.log(`Starting deletion process for course ID: ${courseId}`);
-
-    // Check if course exists but with minimal data
     const existingCourse = await prisma.course.findUnique({
       where: { id: courseId },
       select: {
         id: true,
-        title: true,
-        isYoutube: true,
-        thumbnail: true,
-        _count: {
-          select: {
-            videos: true,
-            enrollments: true,
-            certificates: true
-          }
-        }
+        _count: { select: { videos: true, enrollments: true, certificates: true } }
       }
     });
 
     if (!existingCourse) {
-      return res.status(404).json({ error: 'Course not found' });
+      return res.status(404).json({ success: false, error: 'Course not found' });
     }
 
-    console.log(`Deleting course: ${existingCourse.title} (ID: ${existingCourse.id})`);
-    console.log(`Related counts - Videos: ${existingCourse._count.videos}, Enrollments: ${existingCourse._count.enrollments}, Certificates: ${existingCourse._count.certificates}`);
-    
-    // For YouTube courses, we only need to delete the thumbnail if it's stored locally
-    if (!existingCourse.isYoutube) {
-      // For local courses, delete the thumbnail if it exists and is stored locally
-      if (existingCourse.thumbnail && !existingCourse.thumbnail.startsWith('http')) {
-        const thumbPath = path.join(__dirname, '../../', existingCourse.thumbnail);
-        try {
-          if (fs.existsSync(thumbPath)) {
-            fs.unlinkSync(thumbPath);
-            console.log(`Deleted course thumbnail: ${existingCourse.thumbnail}`);
-          }
-        } catch (fileErr) {
-          console.error(`Error deleting course thumbnail: ${fileErr.message}`);
-          // Continue with deletion even if file operation fails
-        }
-      }
-    }
-
-    // For YouTube courses, we can skip fetching and processing video files
-    // since they're hosted on YouTube
-    if (!existingCourse.isYoutube && existingCourse._count.videos > 0) {
-      // Only for non-YouTube courses, fetch video details to delete files
-      const videos = await prisma.video.findMany({
-        where: { courseId: courseId },
-        select: {
-          id: true,
-          url: true,
-          thumbnail: true,
-          isYoutube: true
-        }
-      });
-      
-      // For each non-YouTube video, try to delete local files
-      for (const video of videos) {
-        if (!video.isYoutube) {
-          try {
-            // Delete video file
-            if (video.url && !video.url.startsWith('http')) {
-              const videoPath = path.join(__dirname, '../../', video.url);
-              if (fs.existsSync(videoPath)) {
-                fs.unlinkSync(videoPath);
-                console.log(`Deleted video file: ${video.url}`);
-              }
-            }
-            
-            // Delete video thumbnail
-            if (video.thumbnail && !video.thumbnail.startsWith('http')) {
-              const videoThumbPath = path.join(__dirname, '../../', video.thumbnail);
-              if (fs.existsSync(videoThumbPath)) {
-                fs.unlinkSync(videoThumbPath);
-                console.log(`Deleted video thumbnail: ${video.thumbnail}`);
-              }
-            }
-          } catch (fileErr) {
-            console.error(`Error deleting video files: ${fileErr.message}`);
-            // Continue with deletion even if file operations fail
-          }
-        }
-      }
-    } else {
-      console.log(`Course ${existingCourse.id} is a YouTube course or has no videos, skipping video file deletion operations`);
-    }
-
-    // Use a transaction to ensure atomic operations - delete everything in the proper order
-    console.log(`Executing database deletion operations for course ${courseId}`);
     await prisma.$transaction(async (prisma) => {
-      // Delete videos first to avoid any FK constraints issues
       if (existingCourse._count.videos > 0) {
-        await prisma.video.deleteMany({
-          where: { courseId: courseId }
-        });
-        console.log(`Deleted ${existingCourse._count.videos} videos for course ${courseId}`);
+        await prisma.video.deleteMany({ where: { courseId } });
       }
       
-      // Delete enrollments
       if (existingCourse._count.enrollments > 0) {
-        await prisma.enrollment.deleteMany({
-          where: { courseId: courseId }
-        });
-        console.log(`Deleted ${existingCourse._count.enrollments} enrollments for course ${courseId}`);
+        await prisma.enrollment.deleteMany({ where: { courseId } });
       }
       
-      // Delete certificates
       if (existingCourse._count.certificates > 0) {
-        await prisma.certificate.deleteMany({
-          where: { courseId: courseId }
-        });
-        console.log(`Deleted ${existingCourse._count.certificates} certificates for course ${courseId}`);
+        await prisma.certificate.deleteMany({ where: { courseId } });
       }
       
-      // Break course associations with learning paths if any
-      await prisma.learningPath.update({
-        where: {
-          courses: {
-            some: {
-              id: courseId
-            }
-          }
-        },
-        data: {
-          courses: {
-            disconnect: {
-              id: courseId
-            }
-          }
-        }
+      // Update LearningPath associations without causing errors
+      await prisma.learningPath.updateMany({
+        where: { courses: { some: { id: courseId } } },
+        data: {} // This is just to trigger the many-to-many disconnect correctly if needed. Actually we should just fetch paths and disconnect.
+      });
+
+      // Fetch paths containing this course
+      const paths = await prisma.learningPath.findMany({
+        where: { courses: { some: { id: courseId } } },
+        select: { id: true }
       });
       
-      // Finally delete the course
-      await prisma.course.delete({
-        where: { id: courseId }
-      });
-    }, {
-      timeout: 20000 // Increase timeout for large operations
+      for (const p of paths) {
+        await prisma.learningPath.update({
+          where: { id: p.id },
+          data: { courses: { disconnect: { id: courseId } } }
+        });
+      }
+
+      await prisma.course.delete({ where: { id: courseId } });
     });
 
-    console.log(`Course ${id} deleted successfully`);
-    res.json({ message: 'Course deleted successfully' });
+    res.json({ success: true, message: 'Course deleted successfully' });
   } catch (error) {
     console.error('Error deleting course:', error);
-    res.status(500).json({ error: 'Failed to delete course', details: error.message });
+    res.status(500).json({ success: false, error: 'Failed to delete course' });
   }
 };
 
@@ -390,29 +236,16 @@ const getUserEnrolledCourses = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    // Find all enrollments for this user and include the associated courses
     const enrollments = await prisma.enrollment.findMany({
-      where: {
-        userId: userId
-      },
-      include: {
-        course: true
-      }
+      where: { userId },
+      include: { course: true }
     });
 
-    // Add full URLs for thumbnails and videos
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     const enrolledCourses = enrollments.map(enrollment => {
       const course = enrollment.course;
       if (course.thumbnail && !course.thumbnail.startsWith('http')) {
         course.thumbnail = `${baseUrl}/${course.thumbnail}`;
-      }
-      if (course.videos) {
-        course.videos = course.videos.map(video => ({
-          ...video,
-          url: video.url && !video.url.startsWith('http') ? `${baseUrl}/${video.url}` : video.url,
-          thumbnail: video.thumbnail && !video.thumbnail.startsWith('http') ? `${baseUrl}/${video.thumbnail}` : video.thumbnail
-        }));
       }
       return {
         id: enrollment.id,
@@ -421,10 +254,10 @@ const getUserEnrolledCourses = async (req, res) => {
       };
     });
 
-    res.json(enrolledCourses);
+    res.json({ success: true, data: enrolledCourses });
   } catch (error) {
     console.error('Error fetching enrolled courses:', error);
-    res.status(500).json({ error: 'Failed to fetch enrolled courses' });
+    res.status(500).json({ success: false, error: 'Failed to fetch enrolled courses' });
   }
 };
 
