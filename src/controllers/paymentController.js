@@ -6,6 +6,14 @@ const prisma = require('../config/db');
  * @param {Object} res - Express response object
  */
 const processCoursePayment = async (req, res) => {
+  // [C-9] Payment gateway is a stub. Block in production until a real gateway is integrated.
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(403).json({
+      success: false,
+      error: 'Payment processing is not available. Please contact support.'
+    });
+  }
+
   try {
     const { courseId } = req.params;
     const { paymentMethod } = req.body;
