@@ -44,21 +44,25 @@ const createAssignment = async (req, res) => {
 
     // If it's an MCQ assignment, create the questions
     if (isMCQ === true && Array.isArray(questions) && questions.length > 0) {
-      // Create questions for the MCQ assignment
-      const createdQuestions = await Promise.all(
-        questions.map(async (question) => {
-          return await prisma.assignmentQuestion.create({
-            data: {
-              assignmentId: assignment.id,
-              text: question.text,
-              options: question.options,
-              correctOption: question.correctOption,
-              explanation: question.explanation,
-              points: question.points || 1
-            }
-          });
-        })
-      );
+      // Format question data for batch creation
+      const questionData = questions.map((question) => ({
+        assignmentId: assignment.id,
+        text: question.text,
+        options: question.options,
+        correctOption: question.correctOption,
+        explanation: question.explanation,
+        points: question.points || 1
+      }));
+
+      // Create questions for the MCQ assignment in a single batch operation
+      await prisma.assignmentQuestion.createMany({
+        data: questionData
+      });
+      
+      // Re-fetch the created questions to include in the response
+      const createdQuestions = await prisma.assignmentQuestion.findMany({
+        where: { assignmentId: assignment.id }
+      });
 
       // Return the assignment with questions
       return res.status(201).json({
@@ -270,7 +274,9 @@ const submitAssignment = async (req, res) => {
         });
       }
 
-      // Create answers for each question
+      const answersData = [];
+      
+      // Process answers for each question
       for (const answer of answers) {
         const question = assignment.AssignmentQuestion.find(q => q.id === parseInt(answer.questionId));
         
@@ -278,19 +284,23 @@ const submitAssignment = async (req, res) => {
         
         const isCorrect = parseInt(answer.selectedOption) === question.correctOption;
         
-        await prisma.assignmentAnswer.create({
-          data: {
-            userId: userId,
-            questionId: question.id,
-            selectedOption: parseInt(answer.selectedOption),
-            isCorrect: isCorrect
-          }
+        answersData.push({
+          userId: userId,
+          questionId: question.id,
+          selectedOption: parseInt(answer.selectedOption),
+          isCorrect: isCorrect
         });
 
         if (isCorrect) {
           correctAnswers += question.points;
         }
         totalPoints += question.points;
+      }
+      
+      if (answersData.length > 0) {
+        await prisma.assignmentAnswer.createMany({
+          data: answersData
+        });
       }
 
       // Calculate score as percentage
