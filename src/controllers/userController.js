@@ -8,8 +8,7 @@ const selectWithoutPassword = {
   phoneNumber: true,
   grade: true,
   role: true,
-  createdAt: true,
-  updatedAt: true
+  createdAt: true
 };
 
 // Helper function to handle errors
