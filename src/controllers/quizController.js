@@ -1,44 +1,7 @@
 const prisma = require('../config/db');
 const { performance } = require('perf_hooks');
 
-/**
- * Custom logger for API requests
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- * @param {Function} next - Express next middleware function
- */
-const requestLogger = (req, res, next) => {
-  // Store the start time
-  const startTime = performance.now();
-  const requestId = Date.now().toString(36) + Math.random().toString(36).substr(2);
-  
-  // Store original end method
-  const originalEnd = res.end;
-  
-  // Get request details
-  const { method, originalUrl, ip } = req;
-  const userAgent = req.get('user-agent') || 'unknown';
-  const userId = req.user ? req.user.id : 'unauthenticated';
-  
-  // Log request start
-  console.log(`[${new Date().toISOString()}] [${requestId}] ${method} ${originalUrl} - Started - User: ${userId} - IP: ${ip}`);
-  
-  // Override end method to log response
-  res.end = function(chunk, encoding) {
-    // Calculate request duration
-    const duration = performance.now() - startTime;
-    
-    // Log response details
-    console.log(
-      `[${new Date().toISOString()}] [${requestId}] ${method} ${originalUrl} - ${res.statusCode} - ${duration.toFixed(2)}ms - User: ${userId}`
-    );
-    
-    // Call original end method
-    return originalEnd.call(this, chunk, encoding);
-  };
-  
-  next();
-};
+// Logger has been moved to src/middlewares/logger.js
 
 /**
  * Get all quiz results for the authenticated user
@@ -47,7 +10,6 @@ const requestLogger = (req, res, next) => {
  */
 const getUserQuizResults = async (req, res) => {
   try {
-    const user = req.user.id;
     // Verify user authentication
     if (!req.user || !req.user.id) {
       return res.status(401).json({
@@ -547,6 +509,8 @@ const submitQuizAnswers = async (req, res) => {
     let totalPoints = 0;
     let earnedPoints = 0;
 
+    const answersData = [];
+
     for (const answer of answers) {
       if (!answer.questionId || answer.selectedOption === undefined) {
         return res.status(400).json({
@@ -570,14 +534,11 @@ const submitQuizAnswers = async (req, res) => {
       }
       totalPoints += question.points;
 
-      // Save the answer
-      const savedAnswer = await prisma.answer.create({
-        data: {
-          userId: userId,
-          questionId: questionId,
-          selectedOption: answer.selectedOption,
-          isCorrect: isCorrect
-        }
+      answersData.push({
+        userId: userId,
+        questionId: questionId,
+        selectedOption: answer.selectedOption,
+        isCorrect: isCorrect
       });
 
       results.push({
@@ -586,6 +547,11 @@ const submitQuizAnswers = async (req, res) => {
         isCorrect: isCorrect
       });
     }
+
+    // Save all answers in one batch
+    await prisma.answer.createMany({
+      data: answersData
+    });
 
     // Calculate the score
     const score = totalPoints > 0 ? (earnedPoints / totalPoints) * 100 : 0;
@@ -778,20 +744,41 @@ const getCourseQuizzes = async (req, res) => {
       ]
     });
 
-    // For each quiz, check if the user has taken it
-    const quizzesWithStatus = await Promise.all(quizzes.map(async (quiz) => {
-      // Check if the user has taken this quiz
-      const userAnswers = await prisma.answer.findMany({
-        where: {
-          userId: userId,
-          question: {
-            quizId: quiz.id
-          }
-        },
-        include: {
-          question: true
-        }
+    const quizIds = quizzes.map(q => q.id);
+    
+    // Fetch all answers for these quizzes for this user
+    const allUserAnswers = await prisma.answer.findMany({
+      where: {
+        userId: userId,
+        question: { quizId: { in: quizIds } }
+      },
+      include: { question: true }
+    });
+
+    // Group answers by quizId
+    const answersByQuiz = {};
+    for (const ans of allUserAnswers) {
+      const qId = ans.question.quizId;
+      if (!answersByQuiz[qId]) answersByQuiz[qId] = [];
+      answersByQuiz[qId].push(ans);
+    }
+
+    // Fetch all questions for quizzes the user has taken
+    const takenQuizIds = Object.keys(answersByQuiz).map(id => parseInt(id));
+    let questionsByQuiz = {};
+    if (takenQuizIds.length > 0) {
+      const allQuestions = await prisma.question.findMany({
+        where: { quizId: { in: takenQuizIds } }
       });
+      for (const q of allQuestions) {
+        if (!questionsByQuiz[q.quizId]) questionsByQuiz[q.quizId] = [];
+        questionsByQuiz[q.quizId].push(q);
+      }
+    }
+
+    // For each quiz, check if the user has taken it
+    const quizzesWithStatus = quizzes.map(quiz => {
+      const userAnswers = answersByQuiz[quiz.id] || [];
 
       let status = {
         taken: userAnswers.length > 0,
@@ -801,9 +788,7 @@ const getCourseQuizzes = async (req, res) => {
 
       if (userAnswers.length > 0) {
         // Calculate the score
-        const questions = await prisma.question.findMany({
-          where: { quizId: quiz.id }
-        });
+        const questions = questionsByQuiz[quiz.id] || [];
         
         const totalPoints = questions.reduce((sum, q) => sum + q.points, 0);
         const earnedPoints = userAnswers.reduce((sum, a) => a.isCorrect ? sum + a.question.points : sum, 0);
@@ -826,7 +811,7 @@ const getCourseQuizzes = async (req, res) => {
         createdAt: quiz.createdAt,
         status
       };
-    }));
+    });
 
     res.json(quizzesWithStatus);
   } catch (error) {
@@ -935,6 +920,5 @@ module.exports = {
   getQuizResults,
   getCourseQuizzes,
   getUserQuizResults,
-  getQuizStatus,
-  requestLogger
+  getQuizStatus
 };
