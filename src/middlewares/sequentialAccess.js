@@ -1,6 +1,4 @@
-const prisma = require('@prisma/client');
-const { PrismaClient } = prisma;
-const prismaClient = new PrismaClient();
+const prismaClient = require('../config/db');
 
 /**
  * Middleware to ensure sequential access to course content

@@ -1,12 +1,13 @@
-// routes/enrollmentRoutes.js
-
 const express = require('express');
 const { enrollUserInCourse, checkEnrollmentStatus } = require('../controllers/enrollmentController');
 const { authenticateToken } = require('../middlewares');
 
-const enrollrouter = express.Router();
+const enrollRouter = express.Router();
 
-enrollrouter.post('/api/enroll',authenticateToken, enrollUserInCourse);
-enrollrouter.post('/api/enrollment-status', authenticateToken, checkEnrollmentStatus);
+// POST /enroll/  — enroll authenticated user in a course
+enrollRouter.post('/', authenticateToken, enrollUserInCourse);
 
-module.exports = enrollrouter;
+// POST /enroll/status  — check authenticated user's enrollment status
+enrollRouter.post('/status', authenticateToken, checkEnrollmentStatus);
+
+module.exports = enrollRouter;
