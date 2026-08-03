@@ -14,7 +14,6 @@ const enrollmentRoutes = require('./src/routes/enrollmentRoutes');
 const videoProgressRoutes = require('./src/routes/videoProgressRoutes');
 const quizRoutes = require('./src/routes/quizRoutes');
 const assignmentRoutes = require('./src/routes/assignmentRoutes');
-
 const { requestLogger } = require('./src/controllers/quizController');
 const rateLimit = require('express-rate-limit');
 
@@ -68,7 +67,6 @@ app.use('/payments', PaymentRouter);
 app.use('/progress', videoProgressRoutes);
 app.use('/quizzes', quizRoutes);
 app.use('/assignments', assignmentRoutes);
-
 
 
 app.get('/', (req, res) => {

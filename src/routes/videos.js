@@ -1,5 +1,4 @@
 const express = require('express');
-const path = require('path');
 const { 
   getVideosByCourse, 
   getVideoById, 
@@ -12,9 +11,6 @@ const { handleVideoUpload } = require('../utils/fileUpload');
 
 const router = express.Router();
 
-// Serve uploaded videos statically
-router.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-
 // Get all videos for a course
 router.get('/course/:courseId', authenticateToken, getVideosByCourse);
 
@@ -22,7 +18,7 @@ router.get('/course/:courseId', authenticateToken, getVideosByCourse);
 router.get('/:id', authenticateToken, getVideoById);
 
 // Upload a new video to a course (admin only)
-router.post('/course/:courseId', authenticateToken, authorizeAdmin(), handleVideoUpload, uploadVideo);
+router.post('/course/:courseId', authenticateToken, authorizeAdmin, handleVideoUpload, uploadVideo);
 
 // Update a video (admin only)
 router.put('/:id', authenticateToken, authorizeAdmin, handleVideoUpload, updateVideo);
@@ -30,4 +26,4 @@ router.put('/:id', authenticateToken, authorizeAdmin, handleVideoUpload, updateV
 // Delete a video (admin only)
 router.delete('/:id', authenticateToken, authorizeAdmin, deleteVideo);
 
-module.exports = router;
+module.exports = router; 

@@ -71,8 +71,6 @@ model Video {
   createdAt   DateTime        @default(now())
 }
 
-
-
 model Enrollment {
   id          Int           @id @default(autoincrement())
   user        User          @relation(fields: [userId], references: [id])
