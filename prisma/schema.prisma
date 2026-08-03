@@ -8,23 +8,23 @@ datasource db {
 }
 
 model User {
-  id            Int             @id @default(autoincrement())
-  name          String?
-  email         String          @unique
-  phoneNumber   String?         @unique
-  password      String
-  role          Role            @default(STUDENT)
-  grade         Grade?          // Student's grade/year
-  courses       Course[]        @relation("AdminCourses") // Courses created by the admin
-  enrollments   Enrollment[]
-  payments      Payment[]
-  certificates  Certificate[]
-  videoProgress VideoProgress[]
-  quizAnswers   Answer[]
+  id                Int                @id @default(autoincrement())
+  name              String?
+  email             String             @unique
+  phoneNumber       String?            @unique
+  password          String
+  role              Role               @default(STUDENT)
+  grade             Grade? // Student's grade/year
+  courses           Course[]           @relation("AdminCourses") // Courses created by the admin
+  enrollments       Enrollment[]
+  payments          Payment[]
+  certificates      Certificate[]
+  videoProgress     VideoProgress[]
+  quizAnswers       Answer[]
   assignmentAnswers AssignmentAnswer[] // Answers to MCQ assignment questions
-  submissions   Submission[]    // Assignment submissions by the user
-  createdAt     DateTime        @default(now())
-  lastLoginAt   DateTime?
+  submissions       Submission[] // Assignment submissions by the user
+  createdAt         DateTime           @default(now())
+  lastLoginAt       DateTime?
 }
 
 model Course {
@@ -44,70 +44,78 @@ model Course {
   certificates      Certificate[]
   learningPaths     LearningPath[] @relation("CoursesInPath")
   prerequisite      LearningPath[] @relation("Prerequisites")
-  quizzes           Quiz[]         // Course can have multiple quizzes
+  quizzes           Quiz[] // Course can have multiple quizzes
   createdAt         DateTime       @default(now())
   category          String?
-  grade             Grade          // Required field for Egyptian secondary school year
+  grade             Grade // Required field for Egyptian secondary school year
+
+  @@index([teacherId])
+  @@index([grade])
 }
 
 model Video {
-  id          Int             @id @default(autoincrement())
-  title       String
-  url         String
-  thumbnail   String
-  course      Course          @relation(fields: [courseId], references: [id], onDelete: Cascade)
-  courseId    Int
-  duration    Int
+  id            Int             @id @default(autoincrement())
+  title         String
+  url           String
+  thumbnail     String
+  course        Course          @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  courseId      Int
+  duration      Int
   // YouTube specific fields
-  isYoutube   Boolean         @default(false)
-  youtubeId   String?
-  position    Int?
+  isYoutube     Boolean         @default(false)
+  youtubeId     String?
+  position      Int?
   // Additional metadata
-  videoProgress  VideoProgress[]
-  quizzes        Quiz[]          // Video can have lecture quizzes
-  assignments    Assignment[]    // Video can have assignments
-  description String?
-  transcript  String?         // For searchable video content
-  createdAt   DateTime        @default(now())
+  videoProgress VideoProgress[]
+  quizzes       Quiz[] // Video can have lecture quizzes
+  assignments   Assignment[] // Video can have assignments
+  description   String?
+  transcript    String? // For searchable video content
+  createdAt     DateTime        @default(now())
+
+  @@index([courseId])
 }
 
 model Enrollment {
-  id          Int           @id @default(autoincrement())
-  user        User          @relation(fields: [userId], references: [id])
+  id          Int       @id @default(autoincrement())
+  user        User      @relation(fields: [userId], references: [id])
   userId      Int
-  course      Course        @relation(fields: [courseId], references: [id])
+  course      Course    @relation(fields: [courseId], references: [id])
   courseId    Int
-  isPaid      Boolean       @default(false)  // Track if the user has paid for this course
-  paymentDate DateTime?     // Date when payment was processed
-  progress    Float         @default(0) // Overall progress percentage
-  startedAt   DateTime      @default(now())
-  completedAt DateTime?     // When the course was completed
-  isCompleted Boolean       @default(false)
-  lastAccess  DateTime      @default(now())
-  createdAt   DateTime      @default(now())
+  isPaid      Boolean   @default(false) // Track if the user has paid for this course
+  paymentDate DateTime? // Date when payment was processed
+  progress    Float     @default(0) // Overall progress percentage
+  startedAt   DateTime  @default(now())
+  completedAt DateTime? // When the course was completed
+  isCompleted Boolean   @default(false)
+  lastAccess  DateTime  @default(now())
+  createdAt   DateTime  @default(now())
+
+  @@index([userId])
+  @@index([courseId])
 }
 
 model Certificate {
-  id          Int      @id @default(autoincrement())
-  user        User     @relation(fields: [userId], references: [id])
-  userId      Int
-  course      Course   @relation(fields: [courseId], references: [id])
-  courseId    Int
-  issueDate   DateTime @default(now())
-  certificateNumber String    @unique
+  id                Int      @id @default(autoincrement())
+  user              User     @relation(fields: [userId], references: [id])
+  userId            Int
+  course            Course   @relation(fields: [courseId], references: [id])
+  courseId          Int
+  issueDate         DateTime @default(now())
+  certificateNumber String   @unique
   certificateUrl    String?
-  
+
   @@unique([userId, courseId])
 }
 
 model LearningPath {
-  id           Int      @id @default(autoincrement())
-  title        String
-  description  String
-  courses      Course[] @relation("CoursesInPath")
+  id            Int      @id @default(autoincrement())
+  title         String
+  description   String
+  courses       Course[] @relation("CoursesInPath")
   prerequisites Course[] @relation("Prerequisites")
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 }
 
 model Payment {
@@ -117,6 +125,8 @@ model Payment {
   amount    Float
   status    PaymentStatus
   createdAt DateTime      @default(now())
+
+  @@index([userId])
 }
 
 enum Role {
@@ -130,12 +140,10 @@ enum PaymentStatus {
   FAILED
 }
 
-
-
 enum Grade {
-  FIRST_SECONDARY  // اولى ثانوي
+  FIRST_SECONDARY // اولى ثانوي
   SECOND_SECONDARY // تانيه ثانوي
-  THIRD_SECONDARY  // تالته ثانوي
+  THIRD_SECONDARY // تالته ثانوي
 }
 
 // New model to track video completion
@@ -154,112 +162,115 @@ model VideoProgress {
 
 // New model for quizzes
 model Quiz {
-  id          Int        @id @default(autoincrement())
-  title       String
-  description String?
-  isFinal     Boolean    @default(false)  // Whether this is a final exam or lecture quiz
-  passingScore Float      @default(70.0)   // Percentage needed to pass (e.g., 70%)
+  id           Int        @id @default(autoincrement())
+  title        String
+  description  String?
+  isFinal      Boolean    @default(false) // Whether this is a final exam or lecture quiz
+  passingScore Float      @default(70.0) // Percentage needed to pass (e.g., 70%)
   // Relations - a quiz belongs to either a course (final) or a video (lecture)
-  course      Course?    @relation(fields: [courseId], references: [id], onDelete: Cascade)
-  courseId    Int?
-  video       Video?     @relation(fields: [videoId], references: [id], onDelete: Cascade)
-  videoId     Int?
-  questions   Question[]
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
+  course       Course?    @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  courseId     Int?
+  video        Video?     @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  videoId      Int?
+  questions    Question[]
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@index([courseId])
+  @@index([videoId])
 }
 
 // New model for quiz questions
 model Question {
-  id          Int      @id @default(autoincrement())
-  quiz        Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
-  quizId      Int
-  text        String   @db.Text
-  options     Json     // Array of possible answers stored as JSON
-  correctOption Int     // Index of the correct option
-  explanation String?  @db.Text
-  points      Int      @default(1)
-  answers     Answer[]
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id            Int      @id @default(autoincrement())
+  quiz          Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  quizId        Int
+  text          String   @db.Text
+  options       Json // Array of possible answers stored as JSON
+  correctOption Int // Index of the correct option
+  explanation   String?  @db.Text
+  points        Int      @default(1)
+  answers       Answer[]
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 }
 
 // New model for student answers
 model Answer {
-  id          Int       @id @default(autoincrement())
-  user        User      @relation(fields: [userId], references: [id])
-  userId      Int
-  question    Question  @relation(fields: [questionId], references: [id], onDelete: Cascade)
-  questionId  Int
+  id             Int      @id @default(autoincrement())
+  user           User     @relation(fields: [userId], references: [id])
+  userId         Int
+  question       Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  questionId     Int
   selectedOption Int
-  isCorrect   Boolean
-  submittedAt DateTime  @default(now())
+  isCorrect      Boolean
+  submittedAt    DateTime @default(now())
 
   @@unique([userId, questionId])
 }
 
 // New model for assignments
 model Assignment {
-  id          Int         @id @default(autoincrement())
-  title       String
-  description String?     @db.Text
-  video       Video       @relation(fields: [videoId], references: [id], onDelete: Cascade)
-  videoId     Int
-  dueDate     DateTime?
-  isMCQ       Boolean     @default(false)
-  passingScore Float      @default(70.0)   // Percentage needed to pass MCQ assignments
-  submissions Submission[]
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @updatedAt
+  id           Int          @id @default(autoincrement())
+  title        String
+  description  String?      @db.Text
+  video        Video        @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  videoId      Int
+  dueDate      DateTime?
+  isMCQ        Boolean      @default(false)
+  passingScore Float        @default(70.0) // Percentage needed to pass MCQ assignments
+  submissions  Submission[]
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
 
   AssignmentQuestion AssignmentQuestion[]
 }
 
 // New model for assignment questions (for MCQ assignments)
 model AssignmentQuestion {
-  id          Int      @id @default(autoincrement())
-  assignment  Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
-  assignmentId Int
-  text        String   @db.Text
-  options     Json     // Array of possible answers stored as JSON
-  correctOption Int     // Index of the correct option
-  explanation String?  @db.Text
-  points      Int      @default(1)
-  answers     AssignmentAnswer[]
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id            Int                @id @default(autoincrement())
+  assignment    Assignment         @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  assignmentId  Int
+  text          String             @db.Text
+  options       Json // Array of possible answers stored as JSON
+  correctOption Int // Index of the correct option
+  explanation   String?            @db.Text
+  points        Int                @default(1)
+  answers       AssignmentAnswer[]
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
 }
 
 // New model for student answers to assignment questions
 model AssignmentAnswer {
-  id          Int       @id @default(autoincrement())
-  user        User      @relation(fields: [userId], references: [id])
-  userId      Int
-  question    AssignmentQuestion  @relation(fields: [questionId], references: [id], onDelete: Cascade)
-  questionId  Int
+  id             Int                @id @default(autoincrement())
+  user           User               @relation(fields: [userId], references: [id])
+  userId         Int
+  question       AssignmentQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  questionId     Int
   selectedOption Int
-  isCorrect   Boolean
-  submittedAt DateTime  @default(now())
+  isCorrect      Boolean
+  submittedAt    DateTime           @default(now())
 
   @@unique([userId, questionId])
 }
 
 // New model for assignment submissions
 model Submission {
-  id          Int       @id @default(autoincrement())
-  user        User      @relation(fields: [userId], references: [id])
-  userId      Int
-  assignment  Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  id           Int              @id @default(autoincrement())
+  user         User             @relation(fields: [userId], references: [id])
+  userId       Int
+  assignment   Assignment       @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
   assignmentId Int
-  content     String?   @db.Text
-  fileUrl     String?   
-  status      SubmissionStatus @default(PENDING)
-  grade       Float?
-  feedback    String?   @db.Text
-  submittedAt DateTime  @default(now())
-  gradedAt    DateTime?
+  content      String?          @db.Text
+  fileUrl      String?
+  status       SubmissionStatus @default(PENDING)
+  grade        Float?
+  feedback     String?          @db.Text
+  submittedAt  DateTime         @default(now())
+  gradedAt     DateTime?
   // For MCQ assignments
-  mcqScore    Float?    // Score for MCQ assignments (percentage)
+  mcqScore     Float? // Score for MCQ assignments (percentage)
 
   @@unique([userId, assignmentId])
 }
