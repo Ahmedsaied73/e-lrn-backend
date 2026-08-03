@@ -7,7 +7,6 @@ const {
   deleteVideo 
 } = require('../controllers/videosController');
 const { authenticateToken, authorizeAdmin } = require('../middlewares');
-const { handleVideoUpload } = require('../utils/fileUpload');
 
 const router = express.Router();
 
@@ -18,10 +17,10 @@ router.get('/course/:courseId', authenticateToken, getVideosByCourse);
 router.get('/:id', authenticateToken, getVideoById);
 
 // Upload a new video to a course (admin only)
-router.post('/course/:courseId', authenticateToken, authorizeAdmin, handleVideoUpload, uploadVideo);
+router.post('/course/:courseId', authenticateToken, authorizeAdmin, uploadVideo);
 
 // Update a video (admin only)
-router.put('/:id', authenticateToken, authorizeAdmin, handleVideoUpload, updateVideo);
+router.put('/:id', authenticateToken, authorizeAdmin, updateVideo);
 
 // Delete a video (admin only)
 router.delete('/:id', authenticateToken, authorizeAdmin, deleteVideo);

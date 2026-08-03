@@ -14,13 +14,14 @@ const enrollmentRoutes = require('./src/routes/enrollmentRoutes');
 const videoProgressRoutes = require('./src/routes/videoProgressRoutes');
 const quizRoutes = require('./src/routes/quizRoutes');
 const assignmentRoutes = require('./src/routes/assignmentRoutes');
-const { requestLogger } = require('./src/controllers/quizController');
+const { logger } = require('./src/middlewares/index');
+const requestLogger = logger();
 const rateLimit = require('express-rate-limit');
 
 const { setupDefaultAdmin } = require('./src/config/setupAdmin');
 const path = require('path');
 const app = express();
-const port = 3005;
+const port = process.env.PORT || 3005;
 const events = require('events');
 events.EventEmitter.defaultMaxListeners = 15;
 
@@ -42,19 +43,25 @@ app.use(cookieParser()); // Add cookie-parser middleware
 // Add request logger middleware to log all requests
 app.use(requestLogger);
 
-// // Set up rate limiter: maximum of 100 requests per 15 minutes per IP
-// const limiter = rateLimit({
-//   windowMs: 15 * 60 * 1000, // 15 minutes
-//   max: 100, // limit each IP to 100 requests per windowMs
-//   message: 'Too many requests from this IP, please try again later.'
-// });
+// Set up rate limiter: maximum of 100 requests per 15 minutes per IP
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: 'Too many requests from this IP, please try again later.'
+});
 
-// // Apply rate limiter to all requests
-// app.use(limiter);
+// Stricter rate limiter for auth routes
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10, // Limit each IP to 10 login requests per windowMs
+  message: 'Too many login attempts from this IP, please try again later.'
+});
 
-// Serve uploaded files statically
-// app.use('/enroll' , enrollRouter); // Add the enrollment router
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+// Apply rate limiter to all requests
+app.use(limiter);
+
+// Apply strict limiter to auth routes specifically
+app.use('/auth/login', authLimiter);
 app.use("/user", Userrouter);
 app.use('/enroll',enrollmentRoutes);
 app.use('/auth', Authrouter);

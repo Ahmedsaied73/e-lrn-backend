@@ -75,14 +75,7 @@ const logger = (options = {}) => {
     // Log request
     console.log(`[REQUEST] ${requestData.method} ${requestData.url} - User: ${requestData.userId}`);
     
-    // Capture response data
-    const originalSend = res.send;
-    res.send = function(body) {
-      res.send = originalSend;
-      res.responseBody = body;
-      return res.send(body);
-    };
-    
+
     // Log response when finished
     res.on('finish', () => {
       const responseTime = Date.now() - startTime;
