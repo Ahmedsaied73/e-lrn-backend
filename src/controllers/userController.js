@@ -1,29 +1,35 @@
 const prisma = require('../config/db');
 const bcrypt = require('bcrypt');
 
-// Helper function to find a user by ID
-const findUserById = async (id) => {
-  return await prisma.user.findUnique({
-    where: { id: parseInt(id, 10) }
-  });
+const selectWithoutPassword = {
+  id: true,
+  name: true,
+  email: true,
+  phoneNumber: true,
+  grade: true,
+  role: true,
+  createdAt: true,
+  updatedAt: true
 };
 
 // Helper function to handle errors
 const handleError = (res, error, message) => {
   console.error(message, error);
-  res.status(500).json({ error: 'Internal server error.' });
+  res.status(500).json({ success: false, error: 'Internal server error.' });
 };
 
 // get my data as a user
 const getUser = async (req, res) => {
   try {
-    const user = await findUserById(req.user.id);
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: selectWithoutPassword
+    });
 
     if (!user) {
-      return res.status(404).json({ error: 'User not found.' });
+      return res.status(404).json({ success: false, error: 'User not found.' });
     }
-    const data = { phoneNumber: user.phoneNumber, createdAt: user.createdAt, updatedAt: user.updatedAt, email: user.email, name:user.name, role: user.role, id: user.id, grade: user.grade }
-    res.json(data);
+    res.json({ success: true, data: user });
   } catch (error) {
     handleError(res, error, 'Error fetching user data:');
   }
@@ -34,15 +40,17 @@ const deleteUser = async (req, res) => {
   const { userId } = req.params;
 
   try {
-    const user = await findUserById(userId);
+    const user = await prisma.user.findUnique({
+      where: { id: parseInt(userId, 10) }
+    });
 
     if (!user) {
-      return res.status(404).json({ error: 'User not found.' });
+      return res.status(404).json({ success: false, error: 'User not found.' });
     }
 
     // Prevent admin from deleting themselves
     if (parseInt(userId, 10) === req.user.id) {
-      return res.status(400).json({ error: 'Cannot delete your own admin account.' });
+      return res.status(400).json({ success: false, error: 'Cannot delete your own admin account.' });
     }
 
     // Delete the user
@@ -50,36 +58,38 @@ const deleteUser = async (req, res) => {
       where: { id: parseInt(userId, 10) }
     });
 
-    res.json({ message: 'User deleted successfully.' });
+    res.json({ success: true, message: 'User deleted successfully.' });
   } catch (error) {
     handleError(res, error, 'Error deleting user:');
   }
 };
 
 // update user
-async function updateUser(req, res) {
+const updateUser = async (req, res) => {
   const { userId } = req.params;
   const { name, email, password } = req.body;
-  const requesterId = req.user.id; // Assuming req.user is set by authentication middleware
-  const requesterRole = req.user.role; // Assuming req.user.role is set by authentication middleware
+  const requesterId = req.user.id;
+  const requesterRole = req.user.role;
 
   try {
     // Check if the requester is the user themselves or an admin
     if (requesterId !== parseInt(userId) && requesterRole !== 'ADMIN') {
-      return res.status(403).json({ message: "You do not have permission to update this user's data." });
+      return res.status(403).json({ success: false, error: "You do not have permission to update this user's data." });
     }
 
     // Update user data
+    const updateData = {};
+    if (name) updateData.name = name;
+    if (email) updateData.email = email;
+    if (password) updateData.password = await bcrypt.hash(password, 10);
+
     const updatedUser = await prisma.user.update({
       where: { id: parseInt(userId) },
-      data: {
-        name: name || undefined,
-        email: email || undefined,
-        password: password ? await bcrypt.hash(password, 10) : undefined
-      }
+      data: updateData,
+      select: selectWithoutPassword
     });
 
-    res.json({ message: "User data updated successfully", user: updatedUser });
+    res.json({ success: true, message: "User data updated successfully", data: updatedUser });
   } catch (error) {
     handleError(res, error, 'An error occurred while updating user data');
   }
@@ -90,40 +100,53 @@ const getUserById = async (req, res) => {
   const { userId } = req.params;
 
   try {
-    // Check if the requester is an admin
-    if (req.user.role !== 'ADMIN') {
-      return res.status(403).json({ message: "You do not have permission to access this user's data." });
-    }
-
     // Get user data
-    const user = await findUserById(userId);
+    const user = await prisma.user.findUnique({
+      where: { id: parseInt(userId, 10) },
+      select: selectWithoutPassword
+    });
 
     if (!user) {
-      return res.status(404).json({ message: 'User not found.' });
+      return res.status(404).json({ success: false, error: 'User not found.' });
     }
 
-    res.json({ user });
+    res.json({ success: true, data: user });
   } catch (error) {
     handleError(res, error, 'An error occurred while retrieving user data');
   }
-}
+};
 
-// Get all users (admin only)
+// Get all users (admin only, with pagination)
 const getAllUsers = async (req, res) => {
   try {
-    // Check if the requester is an admin
-    if (req.user.role !== 'ADMIN') {
-      return res.status(403).json({ message: "You do not have permission to access all users' data." });
-    }
+    const page = parseInt(req.query.page) || 1;
+    const take = parseInt(req.query.limit) || 20;
+    const skip = (page - 1) * take;
 
     // Get all users data
-    const users = await prisma.user.findMany();
+    const [users, total] = await Promise.all([
+      prisma.user.findMany({
+        skip,
+        take,
+        select: selectWithoutPassword
+      }),
+      prisma.user.count()
+    ]);
 
-    res.json({ users });
+    res.json({ 
+      success: true, 
+      data: users,
+      meta: {
+        total,
+        page,
+        limit: take,
+        totalPages: Math.ceil(total / take)
+      }
+    });
   } catch (error) {
     handleError(res, error, 'An error occurred while retrieving users data');
   }
-}
+};
 
 module.exports = {
   deleteUser,
