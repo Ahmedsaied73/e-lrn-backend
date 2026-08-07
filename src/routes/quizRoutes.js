@@ -8,7 +8,7 @@ const {
   getUserQuizResults,
   getQuizStatus
 } = require('../controllers/quizController');
-const { authenticateToken, authorizeAdmin } = require('../middlewares');
+const { authenticateToken, authorizeAdmin } = require('../middlewares/index');
 
 const router = express.Router();
 

@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { authenticateToken, authorizeAdmin } = require('../middlewares');
+const { authenticateToken, authorizeAdmin } = require('../middlewares/index');
 const { importYoutubePlaylist, syncYoutubeCourse } = require('../controllers/youtubeController');
 
 // Import a YouTube playlist as a course (admin only)
