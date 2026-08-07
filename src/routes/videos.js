@@ -6,7 +6,7 @@ const {
   updateVideo, 
   deleteVideo 
 } = require('../controllers/videosController');
-const { authenticateToken, authorizeAdmin } = require('../middlewares');
+const { authenticateToken, authorizeAdmin } = require('../middlewares/index');
 
 const router = express.Router();
 

@@ -23,6 +23,7 @@ model User {
   quizAnswers       Answer[]
   assignmentAnswers AssignmentAnswer[] // Answers to MCQ assignment questions
   submissions       Submission[] // Assignment submissions by the user
+  refreshToken      String?            @db.Text
   createdAt         DateTime           @default(now())
   lastLoginAt       DateTime?
 }

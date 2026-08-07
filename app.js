@@ -28,15 +28,32 @@ events.EventEmitter.defaultMaxListeners = 15;
 // Initialize default admin on startup
 setupDefaultAdmin().catch(console.error);
 
-// Configure CORS to allow requests from any origin
+// Define allowed frontend origins
+const allowedOrigins = [
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  process.env.FRONTEND_URL,
+].filter(Boolean);
+
+// Configure CORS for HttpOnly cookie credential support
 app.use(cors({
-    origin: '*', // Allow all origins
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Allow all methods
-    allowedHeaders: ['Content-Type', 'Authorization'], // Allow these headers
-    exposedHeaders: ['Content-Length', 'X-Total-Count'], // Expose these headers
-    credentials: true, // Allow cookies
-    maxAge: 86400 // Cache preflight request results for 24 hours (in seconds)
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    } else {
+      return callback(new Error(`CORS policy does not allow access from ${origin}`));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  exposedHeaders: ['Set-Cookie'],
+  maxAge: 86400
 }));
+
 
 app.use(express.json());
 app.use(cookieParser()); // Add cookie-parser middleware

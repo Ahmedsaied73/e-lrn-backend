@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { authenticateToken } = require('../middlewares');
+const { authenticateToken } = require('../middlewares/index');
 const { checkCourseAccess, checkVideoAccess } = require('../middlewares/accessControl');
 const { ensureSequentialAccess } = require('../middlewares/sequentialAccess');
 const videoStreamController = require('../controllers/videoStreamController');

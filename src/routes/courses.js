@@ -7,7 +7,7 @@ const {
   deleteCourse,
   getUserEnrolledCourses
 } = require('../controllers/coursesController');
-const { authenticateToken, authorizeAdmin } = require('../middlewares');
+const { authenticateToken, authorizeAdmin } = require('../middlewares/index');
 
 const router = express.Router();
 

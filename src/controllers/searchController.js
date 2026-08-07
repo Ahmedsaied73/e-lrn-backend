@@ -201,7 +201,7 @@ const searchContent = async (req, res) => {
       },
       totalResults: courses.length + videos.length,
       availableCategories: categories,
-      availableGrades: Object.values(await prisma.$enum.values.Grade),
+      availableGrades: ['FIRST_SECONDARY', 'SECOND_SECONDARY', 'THIRD_SECONDARY'],
       courses,
       videos
     });

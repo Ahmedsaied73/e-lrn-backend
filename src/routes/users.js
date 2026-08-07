@@ -1,6 +1,6 @@
 const express = require('express');
 const Userrouter = express.Router();
-const { authenticateToken, authorizeAdmin } = require('../middlewares');
+const { authenticateToken, authorizeAdmin } = require('../middlewares/index');
 const { deleteUser , updateUser , getUser , getUserById , getAllUsers } = require('../controllers/userController');
 const prisma = require('../config/db');
 

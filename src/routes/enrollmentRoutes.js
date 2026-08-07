@@ -1,6 +1,6 @@
 const express = require('express');
 const { enrollUserInCourse, checkEnrollmentStatus } = require('../controllers/enrollmentController');
-const { authenticateToken } = require('../middlewares');
+const { authenticateToken } = require('../middlewares/index');
 
 const enrollRouter = express.Router();
 
