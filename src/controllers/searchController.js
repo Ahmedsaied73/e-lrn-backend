@@ -267,7 +267,6 @@ const getTrendingCourses = async (req, res) => {
       thumbnail: course.thumbnail && !course.thumbnail.startsWith('http') 
         ? `${baseUrl}/${course.thumbnail}` 
         : course.thumbnail,
-      isYoutube: course.isYoutube,
       teacherId: course.teacherId,
       teacher: course.teacher,
       enrollmentCount: course._count.enrollments,
@@ -351,7 +350,6 @@ const getRecommendedCourses = async (req, res) => {
       thumbnail: course.thumbnail && !course.thumbnail.startsWith('http') 
         ? `${baseUrl}/${course.thumbnail}` 
         : course.thumbnail,
-      isYoutube: course.isYoutube,
       teacherId: course.teacherId,
       teacher: course.teacher,
       videoCount: course._count.videos
