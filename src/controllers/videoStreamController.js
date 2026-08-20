@@ -1,12 +1,4 @@
 const prisma = require('../config/db');
-const { 
-  getYoutubeStreamUrl, 
-  getHLSStreamInfo 
-} = require('../utils/youtubeApi');
-const { 
-  generatePlayerHTML, 
-  generatePlayerScript 
-} = require('../utils/youtubePlayerUtils');
 
 /**
  * Generate a streaming URL for a video
@@ -30,8 +22,6 @@ const getVideoStreamUrl = async (req, res) => {
       return res.status(404).json({ error: 'Video not found' });
     }
     
-    // Note: Access check is now handled by middleware
-    
     // Set options based on query parameters
     const options = {
       autoplay: autoplay === '1' ? 1 : 0,
@@ -39,35 +29,16 @@ const getVideoStreamUrl = async (req, res) => {
       playbackQuality: quality || 'default'
     };
     
-    // Prepare response based on video type
-    let response;
+    // Regular video file
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const streamUrl = video.url && video.url.startsWith('http') ? video.url : `${baseUrl}/${video.url || ''}`;
     
-    if (video.isYoutube) {
-      // Get stream URL for YouTube video
-      const youtubeUrl = getYoutubeStreamUrl(video.youtubeId, options);
-      
-      response = {
-        videoId: parseInt(videoId),
-        title: video.title,
-        isYoutube: true,
-        youtubeId: video.youtubeId,
-        streamUrl: youtubeUrl,
-        embedHtml: `<iframe width="640" height="360" src="${youtubeUrl}" frameborder="0" allowfullscreen></iframe>`,
-        options
-      };
-    } else {
-      // Regular video file
-      const baseUrl = `${req.protocol}://${req.get('host')}`;
-      const streamUrl = video.url.startsWith('http') ? video.url : `${baseUrl}/${video.url}`;
-      
-      response = {
-        videoId: parseInt(videoId),
-        title: video.title,
-        isYoutube: false,
-        streamUrl,
-        options
-      };
-    }
+    const response = {
+      videoId: parseInt(videoId),
+      title: video.title,
+      streamUrl,
+      options
+    };
     
     res.json(response);
   } catch (error) {
@@ -98,8 +69,6 @@ const getVideoEmbedCode = async (req, res) => {
       return res.status(404).json({ error: 'Video not found' });
     }
     
-    // Note: Access check is now handled by middleware
-    
     // Options for embedding
     const options = {
       width: parseInt(width),
@@ -108,40 +77,19 @@ const getVideoEmbedCode = async (req, res) => {
       controls: controls === '0' ? 0 : 1
     };
     
-    // Prepare response based on video type
-    let response;
+    // Regular video file
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const videoUrl = video.url && video.url.startsWith('http') ? video.url : `${baseUrl}/${video.url || ''}`;
+    const thumbnailUrl = video.thumbnail && video.thumbnail.startsWith('http') ? video.thumbnail : `${baseUrl}/${video.thumbnail || ''}`;
     
-    if (video.isYoutube) {
-      // Get YouTube embed code
-      const youtubeUrl = getYoutubeStreamUrl(video.youtubeId, options);
-      const embedHtml = `<iframe width="${options.width}" height="${options.height}" src="${youtubeUrl}" frameborder="0" allowfullscreen></iframe>`;
-      const playerScript = generatePlayerScript(video.youtubeId, options);
-      
-      response = {
-        videoId: parseInt(videoId),
-        title: video.title,
-        isYoutube: true,
-        youtubeId: video.youtubeId,
-        embedHtml,
-        playerScript,
-        options
-      };
-    } else {
-      // Regular video file
-      const baseUrl = `${req.protocol}://${req.get('host')}`;
-      const videoUrl = video.url.startsWith('http') ? video.url : `${baseUrl}/${video.url}`;
-      const thumbnailUrl = video.thumbnail.startsWith('http') ? video.thumbnail : `${baseUrl}/${video.thumbnail}`;
-      
-      const embedHtml = `<video id="player-${videoId}" width="${options.width}" height="${options.height}" ${options.controls ? 'controls' : ''} ${options.autoplay ? 'autoplay' : ''} poster="${thumbnailUrl}"><source src="${videoUrl}" type="video/mp4"></video>`;
-      
-      response = {
-        videoId: parseInt(videoId),
-        title: video.title,
-        isYoutube: false,
-        embedHtml,
-        options
-      };
-    }
+    const embedHtml = `<video id="player-${videoId}" width="${options.width}" height="${options.height}" ${options.controls ? 'controls' : ''} ${options.autoplay ? 'autoplay' : ''} poster="${thumbnailUrl}"><source src="${videoUrl}" type="video/mp4"></video>`;
+    
+    const response = {
+      videoId: parseInt(videoId),
+      title: video.title,
+      embedHtml,
+      options
+    };
     
     res.json(response);
   } catch (error) {
@@ -175,45 +123,11 @@ const getCoursePlayer = async (req, res) => {
       return res.status(404).json({ error: 'Course not found' });
     }
     
-    // Note: Access check is now handled by middleware
-    
-    // Prepare response based on course type
-    if (course.isYoutube && course.videos.length > 0) {
-      // Get first video for initial player
-      const initialVideo = course.videos[0];
-      
-      // Generate HTML for the player
-      const playerHtml = generatePlayerHTML(initialVideo.youtubeId, { width: 800, height: 450 });
-      
-      // Prepare playlist data
-      const playlist = course.videos.map(video => ({
-        id: video.id,
-        title: video.title,
-        youtubeId: video.youtubeId,
-        thumbnail: video.thumbnail,
-        duration: video.duration,
-        position: video.position || 0
-      }));
-      
-      // Generate playlist HTML and script
-      const playlistHtml = `<div class="course-playlist"><!-- Playlist HTML --></div>`;
-      const playerScript = generatePlayerScript(initialVideo.youtubeId, { playlist });
-      
-      res.json({
-        courseId: parseInt(courseId),
-        title: course.title,
-        isYoutube: true,
-        initialVideoId: initialVideo.id,
-        embedHtml: playerHtml,
-        playlistHtml,
-        playerScript,
-        playlist
-      });
-    } else {
-      // Regular videos
-      // (Implementation would be similar but for regular video files)
-      res.status(501).json({ error: 'Regular video course player not implemented yet' });
-    }
+    res.json({
+      courseId: parseInt(courseId),
+      title: course.title,
+      videos: course.videos
+    });
   } catch (error) {
     console.error('Error generating course player:', error);
     res.status(500).json({ error: 'Failed to generate course player' });
@@ -240,5 +154,6 @@ function formatDuration(seconds) {
 module.exports = {
   getVideoStreamUrl,
   getVideoEmbedCode,
-  getCoursePlayer
-}; 
+  getCoursePlayer,
+  formatDuration
+};
