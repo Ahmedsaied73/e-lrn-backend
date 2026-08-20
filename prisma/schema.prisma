@@ -29,26 +29,24 @@ model User {
 }
 
 model Course {
-  id                Int            @id @default(autoincrement())
-  title             String
-  description       String
-  price             Float
-  thumbnail         String
-  // YouTube specific fields
-  isYoutube         Boolean        @default(false)
-  youtubePlaylistId String?
+  id            Int            @id @default(autoincrement())
+  title         String
+  description   String
+  price         Float
+  thumbnail     String
   // Relations
-  teacher           User           @relation("AdminCourses", fields: [teacherId], references: [id])
-  teacherId         Int
-  videos            Video[]
-  enrollments       Enrollment[]
-  certificates      Certificate[]
-  learningPaths     LearningPath[] @relation("CoursesInPath")
-  prerequisite      LearningPath[] @relation("Prerequisites")
-  quizzes           Quiz[] // Course can have multiple quizzes
-  createdAt         DateTime       @default(now())
-  category          String?
-  grade             Grade // Required field for Egyptian secondary school year
+  teacher       User           @relation("AdminCourses", fields: [teacherId], references: [id])
+  teacherId     Int
+  videos        Video[]
+  bunnyVideos   BunnyVideo[] // Bunny Stream videos (separate from local Video)
+  enrollments   Enrollment[]
+  certificates  Certificate[]
+  learningPaths LearningPath[] @relation("CoursesInPath")
+  prerequisite  LearningPath[] @relation("Prerequisites")
+  quizzes       Quiz[] // Course can have multiple quizzes
+  createdAt     DateTime       @default(now())
+  category      String?
+  grade         Grade // Required field for Egyptian secondary school year
 
   @@index([teacherId])
   @@index([grade])
@@ -62,9 +60,6 @@ model Video {
   course        Course          @relation(fields: [courseId], references: [id], onDelete: Cascade)
   courseId      Int
   duration      Int
-  // YouTube specific fields
-  isYoutube     Boolean         @default(false)
-  youtubeId     String?
   position      Int?
   // Additional metadata
   videoProgress VideoProgress[]
@@ -133,6 +128,14 @@ model Payment {
 enum Role {
   STUDENT
   ADMIN
+}
+
+enum VideoStatus {
+  PENDING
+  UPLOADING
+  PROCESSING
+  READY
+  FAILED
 }
 
 enum PaymentStatus {
@@ -280,4 +283,35 @@ enum SubmissionStatus {
   PENDING
   GRADED
   REJECTED
+}
+
+// Bunny.net Stream video model — standalone, separate from YouTube/local Video model.
+// VideoProgress, Quiz, and Assignment continue to reference the old Video model.
+// This model can grow independently and old Video can be removed later without impact.
+model BunnyVideo {
+  id                 Int         @id @default(autoincrement())
+  courseId           Int
+  title              String
+  // Bunny identifiers — bunnyVideoId is set atomically when the row is created
+  // (row is only inserted after Bunny video object exists, so never null in practice)
+  bunnyVideoId       String      @unique
+  bunnyLibraryId     String
+  // State machine: PENDING → UPLOADING → PROCESSING → READY | FAILED
+  status             VideoStatus @default(PENDING)
+  // Populated by webhook after Bunny encoding completes
+  duration           Int?
+  width              Int?
+  height             Int?
+  processingProgress Int?        @default(0)
+  thumbnailUrl       String?
+  // Set when status = FAILED; records the failure reason for inspection/retry
+  failureReason      String?     @db.Text
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+
+  course Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  // Query patterns: list by course, filter by status, webhook lookup by bunnyVideoId (unique index)
+  @@index([courseId])
+  @@index([status])
 }
