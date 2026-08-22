@@ -30,8 +30,7 @@ const ensureSequentialAccess = async (req, res, next) => {
     const enrollment = await prismaClient.enrollment.findFirst({
       where: {
         userId: userId,
-        courseId: requestedVideo.courseId,
-        isPaid: true
+        courseId: requestedVideo.courseId
       }
     });
 
@@ -41,10 +40,13 @@ const ensureSequentialAccess = async (req, res, next) => {
       });
     }
 
-    // Get all videos in the course ordered by position/order
+    // Get all videos in the course ordered by position/order (with fallback to id)
     const courseVideos = await prismaClient.video.findMany({
       where: { courseId: requestedVideo.courseId },
-      orderBy: { position: 'asc' }
+      orderBy: [
+        { position: 'asc' },
+        { id: 'asc' }
+      ]
     });
 
     // Find the index of the requested video

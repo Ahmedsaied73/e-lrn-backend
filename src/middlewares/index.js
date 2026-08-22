@@ -27,21 +27,35 @@ const authenticateToken = (req, res, next) => {
 };
 
 /**
- * Role-based authorization middleware factory.
- * @param {string|string[]} allowedRoles - Roles permitted to access the route. Defaults to ['ADMIN'].
+/**
+ * Role-based authorization middleware.
+ * Supports both factory usage `authorizeAdmin(['ADMIN'])` or `authorizeAdmin()`
+ * and direct middleware usage `router.post('/', authenticateToken, authorizeAdmin, handler)`.
  */
-const authorizeAdmin = (allowedRoles) => {
-  const roles = Array.isArray(allowedRoles) ? allowedRoles : ['ADMIN'];
+const authorizeAdmin = (arg1, arg2, arg3) => {
+  // Direct middleware usage: authorizeAdmin(req, res, next)
+  if (arg1 && arg2 && typeof arg3 === 'function') {
+    const req = arg1;
+    const res = arg2;
+    const next = arg3;
+    if (!req.user || !req.user.role) {
+      return res.status(403).json({ success: false, error: 'Access denied. User not authenticated properly.' });
+    }
+    if (req.user.role !== 'ADMIN') {
+      return res.status(403).json({ success: false, error: 'Access denied. Insufficient privileges.' });
+    }
+    return next();
+  }
 
+  // Factory usage: authorizeAdmin(allowedRoles)
+  const roles = Array.isArray(arg1) ? arg1 : ['ADMIN'];
   return (req, res, next) => {
     if (!req.user || !req.user.role) {
       return res.status(403).json({ success: false, error: 'Access denied. User not authenticated properly.' });
     }
-
     if (!roles.includes(req.user.role)) {
       return res.status(403).json({ success: false, error: 'Access denied. Insufficient privileges.' });
     }
-
     next();
   };
 };

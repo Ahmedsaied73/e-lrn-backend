@@ -48,12 +48,12 @@ const checkCourseAccess = async (req, res, next) => {
       return res.status(403).json({ error: 'You must be enrolled in this course to access content' });
     }
     
-    // If course is paid and user hasn't paid, deny access
+    // Payment feature disabled — active enrollment grants access
     if (course.price > 0 && !enrollment.isPaid) {
-      return res.status(403).json({ 
-        error: 'Payment required to access this content',
-        courseId: courseId,
-        price: course.price
+      // Auto-grant isPaid if enrollment exists
+      await prisma.enrollment.update({
+        where: { id: enrollment.id },
+        data: { isPaid: true }
       });
     }
     
@@ -114,12 +114,12 @@ const checkVideoAccess = async (req, res, next) => {
       return res.status(403).json({ error: 'You must be enrolled in this course to access videos' });
     }
     
-    // If course is paid and user hasn't paid, deny access
+    // Payment feature disabled — active enrollment grants access
     if (video.course.price > 0 && !enrollment.isPaid) {
-      return res.status(403).json({ 
-        error: 'Payment required to access this content',
-        courseId: video.course.id,
-        price: video.course.price
+      // Auto-grant isPaid if enrollment exists
+      await prisma.enrollment.update({
+        where: { id: enrollment.id },
+        data: { isPaid: true }
       });
     }
     
