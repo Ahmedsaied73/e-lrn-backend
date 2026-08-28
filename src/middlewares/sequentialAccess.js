@@ -76,70 +76,8 @@ const ensureSequentialAccess = async (req, res, next) => {
       });
     }
 
-    // Check if the previous video has an associated quiz
-    const previousVideoQuiz = await prismaClient.quiz.findFirst({
-      where: {
-        videoId: previousVideo.id
-      }
-    });
+    // NOTE: Quiz gate will be enforced by quizService.evaluateGate() — wired in Phase 5
 
-    // If there's a quiz for the previous video, check if user has passed it
-    if (previousVideoQuiz) {
-      // Get all questions for the quiz to calculate total points
-      const quizQuestions = await prismaClient.question.findMany({
-        where: { quizId: previousVideoQuiz.id }
-      });
-      
-      // Get user's answers for this quiz
-      const userAnswers = await prismaClient.answer.findMany({
-        where: {
-          userId: userId,
-          question: {
-            quizId: previousVideoQuiz.id
-          }
-        },
-        include: {
-          question: true
-        }
-      });
-
-      // If user hasn't attempted the quiz at all
-      if (userAnswers.length === 0) {
-        return res.status(403).json({ 
-          message: 'You must complete the quiz for the previous video before proceeding',
-          quizId: previousVideoQuiz.id,
-          videoId: previousVideo.id
-        });
-      }
-
-      // Calculate user's score
-      let earnedPoints = 0;
-      let totalPoints = 0;
-      
-      quizQuestions.forEach(question => {
-        totalPoints += question.points;
-      });
-      
-      userAnswers.forEach(answer => {
-        if (answer.isCorrect) {
-          earnedPoints += answer.question.points;
-        }
-      });
-      
-      const score = (earnedPoints / totalPoints) * 100;
-      
-      // Check if user passed the quiz
-      if (score < previousVideoQuiz.passingScore) {
-        return res.status(403).json({ 
-          message: 'You must pass the quiz for the previous video before proceeding',
-          quizId: previousVideoQuiz.id,
-          videoId: previousVideo.id,
-          yourScore: score,
-          requiredScore: previousVideoQuiz.passingScore
-        });
-      }
-    }
-    
     // Check if the previous video has an associated assignment
     const previousVideoAssignment = await prismaClient.assignment.findFirst({
       where: {

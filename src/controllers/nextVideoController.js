@@ -59,72 +59,8 @@ const getNextVideo = async (req, res) => {
           message: 'You must complete the current video before accessing the next one',
           currentVideoId: parseInt(videoId)
         });
-      }
-
-      // Check if the current video has an associated quiz
-      const currentVideoQuiz = await prisma.quiz.findFirst({
-        where: {
-          videoId: parseInt(videoId)
-        }
-      });
-
-      // If there's a quiz for the current video, check if user has passed it
-      if (currentVideoQuiz) {
-        // Get all questions for the quiz to calculate total points
-        const quizQuestions = await prisma.question.findMany({
-          where: { quizId: currentVideoQuiz.id }
-        });
-        
-        // Get user's answers for this quiz
-        const userAnswers = await prisma.answer.findMany({
-          where: {
-            userId: userId,
-            question: {
-              quizId: currentVideoQuiz.id
-            }
-          },
-          include: {
-            question: true
-          }
-        });
-
-        // If user hasn't attempted the quiz at all
-        if (userAnswers.length === 0) {
-          return res.status(403).json({ 
-            message: 'You must complete the quiz for the current video before proceeding',
-            quizId: currentVideoQuiz.id,
-            videoId: parseInt(videoId)
-          });
-        }
-
-        // Calculate user's score
-        let earnedPoints = 0;
-        let totalPoints = 0;
-        
-        quizQuestions.forEach(question => {
-          totalPoints += question.points;
-        });
-        
-        userAnswers.forEach(answer => {
-          if (answer.isCorrect) {
-            earnedPoints += answer.question.points;
-          }
-        });
-        
-        const score = (earnedPoints / totalPoints) * 100;
-        
-        // Check if user passed the quiz
-        if (score < currentVideoQuiz.passingScore) {
-          return res.status(403).json({ 
-            message: 'You must pass the quiz for the current video before proceeding',
-            quizId: currentVideoQuiz.id,
-            videoId: parseInt(videoId),
-            yourScore: score,
-            requiredScore: currentVideoQuiz.passingScore
-          });
-        }
-      }
     }
+    // NOTE: Quiz gate will be enforced by quizService.evaluateGate() — wired in Phase 5
 
     // Return the next video information
     return res.status(200).json({

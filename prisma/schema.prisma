@@ -20,7 +20,8 @@ model User {
   payments          Payment[]
   certificates      Certificate[]
   videoProgress     VideoProgress[]
-  quizAnswers       Answer[]
+  quizAttempts      QuizAttempt[]      // SurveyJS quiz attempts
+  gateExemptions    GateExemption[]    // Admin-granted quiz gate bypasses
   assignmentAnswers AssignmentAnswer[] // Answers to MCQ assignment questions
   submissions       Submission[] // Assignment submissions by the user
   refreshToken      String?            @db.Text
@@ -43,7 +44,6 @@ model Course {
   certificates  Certificate[]
   learningPaths LearningPath[] @relation("CoursesInPath")
   prerequisite  LearningPath[] @relation("Prerequisites")
-  quizzes       Quiz[] // Course can have multiple quizzes
   createdAt     DateTime       @default(now())
   category      String?
   grade         Grade // Required field for Egyptian secondary school year
@@ -63,7 +63,7 @@ model Video {
   position      Int?
   // Additional metadata
   videoProgress VideoProgress[]
-  quizzes       Quiz[] // Video can have lecture quizzes
+  quiz          Quiz?          // SurveyJS quiz (one optional quiz per video)
   assignments   Assignment[] // Video can have assignments
   description   String?
   transcript    String? // For searchable video content
@@ -164,53 +164,74 @@ model VideoProgress {
   @@unique([userId, videoId])
 }
 
-// New model for quizzes
-model Quiz {
-  id           Int        @id @default(autoincrement())
-  title        String
-  description  String?
-  isFinal      Boolean    @default(false) // Whether this is a final exam or lecture quiz
-  passingScore Float      @default(70.0) // Percentage needed to pass (e.g., 70%)
-  // Relations - a quiz belongs to either a course (final) or a video (lecture)
-  course       Course?    @relation(fields: [courseId], references: [id], onDelete: Cascade)
-  courseId     Int?
-  video        Video?     @relation(fields: [videoId], references: [id], onDelete: Cascade)
-  videoId      Int?
-  questions    Question[]
-  createdAt    DateTime   @default(now())
-  updatedAt    DateTime   @updatedAt
+// ─── SurveyJS Quiz Models ────────────────────────────────────────────────────
 
-  @@index([courseId])
+model Quiz {
+  id           Int           @id @default(autoincrement())
+  videoId      Int           @unique               // 1-to-1: one quiz per video
+  title        String
+  timeLimitSec Int?                                // null = untimed; e.g. 600 = 10 min
+  passingScore Int           @default(50)          // percentage required to pass (default 50%)
+  surveyJson   Json                                // SurveyJS student-facing definition (no secrets)
+  answerKey    Json                                // SERVER-ONLY: { qName: { type, correctValue?, modelAnswer?, points } }
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  video        Video         @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  attempts     QuizAttempt[]
+
   @@index([videoId])
 }
 
-// New model for quiz questions
-model Question {
-  id            Int      @id @default(autoincrement())
-  quiz          Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
+model QuizAttempt {
+  id            Int               @id @default(autoincrement())
   quizId        Int
-  text          String   @db.Text
-  options       Json // Array of possible answers stored as JSON
-  correctOption Int // Index of the correct option
-  explanation   String?  @db.Text
-  points        Int      @default(1)
-  answers       Answer[]
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  userId        Int
+  attemptNumber Int               @default(1)
+  status        QuizAttemptStatus @default(IN_PROGRESS)
+  startedAt     DateTime          @default(now())
+  deadlineAt    DateTime?                             // server-authoritative timer deadline
+  submittedAt   DateTime?
+  autoSubmitted Boolean           @default(false)
+  responses     Json?                                 // Student response map: { [qName]: value }
+  mcqEarned     Int?
+  essayEarned   Int?
+  totalPoints   Int?
+  earnedPoints  Int?
+  scorePercent  Float?
+  essayFeedback Json?                                 // { [qName]: { points, feedback } }
+  essayGradedBy Int?
+  essayGradedAt DateTime?
+
+  quiz          Quiz              @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  user          User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, quizId])
+  @@index([quizId])
+  @@index([userId])
 }
 
-// New model for student answers
-model Answer {
-  id             Int      @id @default(autoincrement())
-  user           User     @relation(fields: [userId], references: [id])
-  userId         Int
-  question       Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
-  questionId     Int
-  selectedOption Int
-  isCorrect      Boolean
-  submittedAt    DateTime @default(now())
+enum QuizAttemptStatus {
+  IN_PROGRESS
+  SUBMITTED
+  GRADING
+  GRADED
+  EXPIRED
+}
 
-  @@unique([userId, questionId])
+// Admin-granted bypass for the sequential quiz gate (force-advance a student past a quiz)
+model GateExemption {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  videoId   Int                             // video that owns the quiz being waived
+  grantedBy Int                             // admin userId who created this exemption
+  reason    String?
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, videoId])
+  @@index([videoId])
 }
 
 // New model for assignments
@@ -286,7 +307,7 @@ enum SubmissionStatus {
 }
 
 // Bunny.net Stream video model — standalone, separate from YouTube/local Video model.
-// VideoProgress, Quiz, and Assignment continue to reference the old Video model.
+// VideoProgress and Assignment continue to reference the old Video model.
 // This model can grow independently and old Video can be removed later without impact.
 model BunnyVideo {
   id                 Int         @id @default(autoincrement())

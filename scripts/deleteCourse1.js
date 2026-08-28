@@ -11,7 +11,6 @@ async function main() {
       bunnyVideos: true,
       enrollments: true,
       certificates: true,
-      quizzes: true,
     }
   });
 
@@ -21,22 +20,13 @@ async function main() {
   }
 
   console.log(`Found Course id 1: "${course.title}". Proceeding with deletion...`);
-  console.log(`Associated records: ${course.videos.length} legacy videos, ${course.bunnyVideos.length} bunny videos, ${course.enrollments.length} enrollments, ${course.quizzes.length} quizzes.`);
+  console.log(`Associated records: ${course.videos.length} legacy videos, ${course.bunnyVideos.length} bunny videos, ${course.enrollments.length} enrollments.`);
 
   await prisma.$transaction(async (tx) => {
     // 1. Delete associated video progress, answers, submissions for videos belonging to this course
     for (const v of course.videos) {
       await tx.videoProgress.deleteMany({ where: { videoId: v.id } });
-      
-      const quizzes = await tx.quiz.findMany({ where: { videoId: v.id } });
-      for (const q of quizzes) {
-        const questions = await tx.question.findMany({ where: { quizId: q.id } });
-        for (const qu of questions) {
-          await tx.answer.deleteMany({ where: { questionId: qu.id } });
-        }
-        await tx.question.deleteMany({ where: { quizId: q.id } });
-      }
-      await tx.quiz.deleteMany({ where: { videoId: v.id } });
+      // Legacy quiz/question/answer tables are dropped — no cascade needed
 
       const assignments = await tx.assignment.findMany({ where: { videoId: v.id } });
       for (const a of assignments) {
@@ -50,17 +40,7 @@ async function main() {
       await tx.assignment.deleteMany({ where: { videoId: v.id } });
     }
 
-    // 2. Delete course-level quizzes
-    for (const q of course.quizzes) {
-      const questions = await tx.question.findMany({ where: { quizId: q.id } });
-      for (const qu of questions) {
-        await tx.answer.deleteMany({ where: { questionId: qu.id } });
-      }
-      await tx.question.deleteMany({ where: { quizId: q.id } });
-    }
-    await tx.quiz.deleteMany({ where: { courseId } });
-
-    // 3. Delete Bunny videos
+    // 2. Delete Bunny videos
     await tx.bunnyVideo.deleteMany({ where: { courseId } });
 
     // 4. Delete legacy videos

@@ -11,7 +11,6 @@ const SearchRouter = require('./src/routes/searchRoutes');
 const PaymentRouter = require('./src/routes/paymentRoutes');
 const enrollmentRoutes = require('./src/routes/enrollmentRoutes');
 const videoProgressRoutes = require('./src/routes/videoProgressRoutes');
-const quizRoutes = require('./src/routes/quizRoutes');
 const assignmentRoutes = require('./src/routes/assignmentRoutes');
 const { logger } = require('./src/middlewares/index');
 const requestLogger = logger();
@@ -106,7 +105,6 @@ app.use('/stream', StreamRouter);
 app.use('/search', SearchRouter);
 app.use('/payments', PaymentRouter);
 app.use('/progress', videoProgressRoutes);
-app.use('/quizzes', quizRoutes);
 app.use('/assignments', assignmentRoutes);
 
 // ── Bunny Stream routes ────────────────────────────────────────────────────────
