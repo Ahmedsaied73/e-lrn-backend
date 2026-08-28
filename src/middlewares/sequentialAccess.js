@@ -1,4 +1,5 @@
 const prismaClient = require('../config/db');
+const quizService = require('../services/quizService');
 
 /**
  * Middleware to ensure sequential access to course content
@@ -57,26 +58,17 @@ const ensureSequentialAccess = async (req, res, next) => {
       return next();
     }
 
-    // Get the previous video
-    const previousVideo = courseVideos[currentVideoIndex - 1];
-
-    // Check if user has completed the previous video
-    const previousVideoProgress = await prismaClient.videoProgress.findFirst({
-      where: {
-        userId: userId,
-        videoId: previousVideo.id,
-        completed: true
-      }
-    });
-
-    if (!previousVideoProgress) {
-      return res.status(403).json({ 
-        message: 'You must complete the previous video before accessing this one',
-        previousVideoId: previousVideo.id
+    // Check sequential gate: video completion + quiz pass (or gate exemption)
+    const gate = await quizService.evaluateGate(userId, parseInt(videoId), req.user.role);
+    if (!gate.allowed) {
+      return res.status(403).json({
+        message: gate.reason,
+        previousVideoId: gate.previousVideoId,
+        quizId: gate.quizId,
+        yourScore: gate.bestScore,
+        requiredScore: gate.required,
       });
     }
-
-    // NOTE: Quiz gate will be enforced by quizService.evaluateGate() — wired in Phase 5
 
     // Check if the previous video has an associated assignment
     const previousVideoAssignment = await prismaClient.assignment.findFirst({

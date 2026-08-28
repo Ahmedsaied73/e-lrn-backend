@@ -12,6 +12,7 @@ const PaymentRouter = require('./src/routes/paymentRoutes');
 const enrollmentRoutes = require('./src/routes/enrollmentRoutes');
 const videoProgressRoutes = require('./src/routes/videoProgressRoutes');
 const assignmentRoutes = require('./src/routes/assignmentRoutes');
+const quizRoutes = require('./src/routes/quizRoutes');
 const { logger } = require('./src/middlewares/index');
 const requestLogger = logger();
 const rateLimit = require('express-rate-limit');
@@ -106,6 +107,7 @@ app.use('/search', SearchRouter);
 app.use('/payments', PaymentRouter);
 app.use('/progress', videoProgressRoutes);
 app.use('/assignments', assignmentRoutes);
+app.use('/quizzes', quizRoutes);
 
 // ── Bunny Stream routes ────────────────────────────────────────────────────────
 // /courses prefix: handles POST /courses/:courseId/videos (create)

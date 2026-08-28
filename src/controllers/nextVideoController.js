@@ -1,4 +1,5 @@
 const prisma = require('../config/db');
+const quizService = require('../services/quizService');
 
 /**
  * Get the next video in a course sequence
@@ -43,24 +44,17 @@ const getNextVideo = async (req, res) => {
     // Get the next video
     const nextVideo = courseVideos[currentVideoIndex + 1];
 
-    // For non-admin users, check if they've completed the current video
-    if (req.user.role !== 'ADMIN') {
-      // Check if user has completed the current video
-      const currentVideoProgress = await prisma.videoProgress.findFirst({
-        where: {
-          userId: userId,
-          videoId: parseInt(videoId),
-          completed: true
-        }
+    // Evaluate sequential gate: completion of current video + quiz pass (or exemption)
+    const gate = await quizService.evaluateGate(userId, nextVideo.id, req.user.role);
+    if (!gate.allowed) {
+      return res.status(403).json({
+        message: gate.reason,
+        currentVideoId: parseInt(videoId),
+        quizId: gate.quizId,
+        yourScore: gate.bestScore,
+        requiredScore: gate.required,
       });
-
-      if (!currentVideoProgress) {
-        return res.status(403).json({ 
-          message: 'You must complete the current video before accessing the next one',
-          currentVideoId: parseInt(videoId)
-        });
     }
-    // NOTE: Quiz gate will be enforced by quizService.evaluateGate() — wired in Phase 5
 
     // Return the next video information
     return res.status(200).json({
