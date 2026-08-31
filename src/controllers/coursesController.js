@@ -49,19 +49,41 @@ const getAllCourses = async (req, res) => {
 };
 
 // Get a specific course by ID
+// Aggregates everything the Course page needs — course, videos, the authenticated
+// user's enrollment, and their video progress (scoped to this course's videos) —
+// into one response, so the frontend no longer needs separate calls to
+// /enroll/status and per-video progress endpoints for Course init.
 const getCourseById = async (req, res) => {
   try {
     const { id } = req.params;
-    
+    const userId = req.user.id;
+
+    // Single Prisma call: videos + this user's progress per video + this user's
+    // enrollment (if any) are all fetched via filtered relation includes, so no
+    // additional per-video or per-user round trips are needed (no N+1).
     const course = await prisma.course.findUnique({
       where: { id: parseInt(id) },
       include: {
         teacher: { select: { id: true, name: true, email: true } },
         videos: {
-          select: { id: true, title: true, url: true, thumbnail: true, duration: true }
+          orderBy: { position: 'asc' },
+          select: {
+            id: true,
+            title: true,
+            url: true,
+            thumbnail: true,
+            duration: true,
+            position: true,
+            // Scoped to the authenticated user only
+            videoProgress: {
+              where: { userId },
+              select: { completed: true, watchedAt: true }
+            }
+          }
         },
+        // Scoped to the authenticated user only — never expose other users' enrollments
         enrollments: {
-          select: { id: true, userId: true, createdAt: true }
+          where: { userId }
         }
       }
     });
@@ -71,20 +93,39 @@ const getCourseById = async (req, res) => {
     }
 
     const baseUrl = `${req.protocol}://${req.get('host')}`;
-    
+
     if (course.thumbnail && !course.thumbnail.startsWith('http')) {
       course.thumbnail = `${baseUrl}/${course.thumbnail}`;
     }
-    
-    if (course.videos) {
-      course.videos = course.videos.map(video => ({
-        ...video,
-        url: video.url && !video.url.startsWith('http') ? `${baseUrl}/${video.url}` : video.url,
-        thumbnail: video.thumbnail && !video.thumbnail.startsWith('http') ? `${baseUrl}/${video.thumbnail}` : video.thumbnail
-      }));
-    }
 
-    res.json({ success: true, data: course });
+    // Derive videos + progress from the same fetched relation (no extra queries)
+    const videos = course.videos.map(({ videoProgress, ...video }) => ({
+      ...video,
+      url: video.url && !video.url.startsWith('http') ? `${baseUrl}/${video.url}` : video.url,
+      thumbnail: video.thumbnail && !video.thumbnail.startsWith('http') ? `${baseUrl}/${video.thumbnail}` : video.thumbnail
+    }));
+
+    // Existing "no progress record" representation (see videoProgressController):
+    // completed: false, watchedAt: null
+    const progress = course.videos.map(video => ({
+      videoId: video.id,
+      completed: video.videoProgress[0] ? video.videoProgress[0].completed : false,
+      watchedAt: video.videoProgress[0] ? video.videoProgress[0].watchedAt : null
+    }));
+
+    const enrollment = course.enrollments[0] || null;
+
+    const { videos: _rawVideos, enrollments: _rawEnrollments, ...courseData } = course;
+
+    res.json({
+      success: true,
+      data: {
+        course: courseData,
+        videos,
+        enrollment,
+        progress
+      }
+    });
   } catch (error) {
     console.error('Error fetching course:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch course' });
