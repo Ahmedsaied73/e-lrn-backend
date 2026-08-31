@@ -137,29 +137,30 @@ All errors returned by the API follow a predictable structure:
 
 ### 3. Courses Routes (`/courses`)
 
-#### `GET /courses`
-- **Auth**: Public / Authenticated
-- **Query Parameters**:
-  - `page` (`integer`, optional, default: `1`)
-  - `limit` (`integer`, optional, default: `20`)
-- **Response (`200 OK`)**:
-  ```json
-  {
-    "success": true,
-    "data": [
-      {
-        "id": 1,
-        "title": "Secondary Physics 101",
-        "description": "Comprehensive Physics Course",
-        "price": 150.0,
-        "thumbnail": "https://example.com/thumb.jpg",
-        "grade": "FIRST_SECONDARY"
-      }
-    ],
-    "meta": { "total": 1, "page": 1, "limit": 20, "totalPages": 1 }
-  }
-  ```
+## `GET /courses/:id` — What Changed
 
+**Before:** returned only `course` (with `videos` nested inside it, and an `enrollments` array containing *every* user's enrollment for the course — a data leak).
+
+**Now:** returns `course`, `videos`, `enrollment`, and `progress` as separate top-level fields under the existing `{ success, data }` envelope:
+
+```json
+{
+  "success": true,
+  "data": {
+    "course": { /* same fields as before, minus videos/enrollments */ },
+    "videos": [ { "id": 1, "title": "...", "url": "...", "thumbnail": "...", "duration": 1200, "position": 1 } ],
+    "enrollment": { /* the authenticated user's own enrollment row, or null */ },
+    "progress": [ { "videoId": 1, "completed": true, "watchedAt": "2023-06-01T10:00:00.000Z" } ]
+  }
+}
+```
+
+**Key changes:**
+- **Security fix:** `enrollment` is now scoped to the authenticated user only (`req.user.id`), instead of leaking every enrollee's `id`/`userId`/`createdAt`.
+- **New:** `progress` — this user's completion status per video in the course. Missing records default to `{ completed: false, watchedAt: null }` (existing convention from `videoProgressController`).
+- **New:** `videos[].position`, now ordered by `position` ascending.
+- **No change:** route, auth middleware, error responses (401/404/500), or thumbnail/URL absolutization logic.
+- **Frontend impact:** `/enroll/status` and `/video-progress/course/:courseId` no longer need to be called separately for Course-page init — this endpoint now returns both. Both endpoints still exist and work as before for other uses.
 #### `POST /courses`
 - **Auth**: Admin Only
 - **Request Body** (`application/json`):
