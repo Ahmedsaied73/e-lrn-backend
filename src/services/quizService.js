@@ -24,6 +24,10 @@ const bunny = require('../integrations/bunny/bunnyStreamClient');
 function validateSurveyJson(surveyJson) {
   const errors = [];
 
+  if (!surveyJson || typeof surveyJson !== 'object' || Array.isArray(surveyJson)) {
+    return { ok: false, errors: ['surveyJson must be a JSON object'] };
+  }
+
   // Size check
   const raw = JSON.stringify(surveyJson);
   if (Buffer.byteLength(raw, 'utf8') > MAX_SURVEY_JSON_BYTES) {

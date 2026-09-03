@@ -10,6 +10,11 @@ const prisma = require('../config/db');
 const quizService = require('../services/quizService');
 const { STATUS } = require('../config/quizConfig');
 
+function parseInteger(value) {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
 // ─── Student Endpoints ────────────────────────────────────────────────────────
 
 /**
@@ -19,11 +24,11 @@ const { STATUS } = require('../config/quizConfig');
  */
 async function getQuizMeta(req, res) {
   try {
-    const videoId = parseInt(req.params.videoId, 10);
+    const videoId = parseInteger(req.params.videoId);
     const userId = req.user.id;
     const userRole = req.user.role;
 
-    if (isNaN(videoId)) {
+    if (videoId === null || videoId <= 0) {
       return res.status(400).json({ success: false, error: 'Invalid video ID' });
     }
 
@@ -130,11 +135,11 @@ async function getQuizMeta(req, res) {
  */
 async function startQuiz(req, res) {
   try {
-    const videoId = parseInt(req.params.videoId, 10);
+    const videoId = parseInteger(req.params.videoId);
     const userId = req.user.id;
     const userRole = req.user.role;
 
-    if (isNaN(videoId)) {
+    if (videoId === null || videoId <= 0) {
       return res.status(400).json({ success: false, error: 'Invalid video ID' });
     }
 
@@ -193,11 +198,11 @@ async function startQuiz(req, res) {
  */
 async function saveQuizAttempt(req, res) {
   try {
-    const attemptId = parseInt(req.params.id, 10);
+    const attemptId = parseInteger(req.params.id);
     const userId = req.user.id;
     const { responses } = req.body || {};
 
-    if (isNaN(attemptId)) {
+    if (attemptId === null || attemptId <= 0) {
       return res.status(400).json({ success: false, error: 'Invalid attempt ID' });
     }
 
@@ -223,11 +228,11 @@ async function saveQuizAttempt(req, res) {
  */
 async function submitQuiz(req, res) {
   try {
-    const attemptId = parseInt(req.params.id, 10);
+    const attemptId = parseInteger(req.params.id);
     const userId = req.user.id;
     const { answers, autoSubmitted } = req.body;
 
-    if (isNaN(attemptId)) {
+    if (attemptId === null || attemptId <= 0) {
       return res.status(400).json({ success: false, error: 'Invalid attempt ID' });
     }
 
@@ -262,11 +267,11 @@ async function submitQuiz(req, res) {
  */
 async function getQuizResult(req, res) {
   try {
-    const attemptId = parseInt(req.params.id, 10);
+    const attemptId = parseInteger(req.params.id);
     const userId = req.user.id;
     const userRole = req.user.role;
 
-    if (isNaN(attemptId)) {
+    if (attemptId === null || attemptId <= 0) {
       return res.status(400).json({ success: false, error: 'Invalid attempt ID' });
     }
 
@@ -352,10 +357,10 @@ async function getQuizResult(req, res) {
  */
 async function getStudentAttempts(req, res) {
   try {
-    const videoId = parseInt(req.params.videoId, 10);
+    const videoId = parseInteger(req.params.videoId);
     const userId = req.user.id;
 
-    if (isNaN(videoId)) {
+    if (videoId === null || videoId <= 0) {
       return res.status(400).json({ success: false, error: 'Invalid video ID' });
     }
 
@@ -408,10 +413,10 @@ async function getStudentAttempts(req, res) {
  */
 async function upsertQuiz(req, res) {
   try {
-    const videoId = parseInt(req.params.videoId, 10);
-    const { title, timeLimitSec, passingScore, surveyJson, answerKey: rawKey } = req.body;
+    const videoId = parseInteger(req.params.videoId);
+    const { title, timeLimitSec, passingScore, surveyJson, answerKey: rawKey } = req.body || {};
 
-    if (isNaN(videoId)) {
+    if (videoId === null || videoId <= 0) {
       return res.status(400).json({ success: false, error: 'Invalid video ID' });
     }
 
@@ -435,7 +440,7 @@ async function upsertQuiz(req, res) {
     }
 
     // Validate and build Answer Key
-    if (!rawKey || typeof rawKey !== 'object') {
+    if (!rawKey || typeof rawKey !== 'object' || Array.isArray(rawKey)) {
       return res.status(400).json({ success: false, error: 'answerKey object is required' });
     }
 
@@ -448,8 +453,17 @@ async function upsertQuiz(req, res) {
       });
     }
 
-    const timeLimit = timeLimitSec ? parseInt(timeLimitSec, 10) : null;
-    const passScore = passingScore ? parseInt(passingScore, 10) : 50;
+    const hasTimeLimit = timeLimitSec !== undefined && timeLimitSec !== null && timeLimitSec !== '';
+    const timeLimit = hasTimeLimit ? parseInteger(timeLimitSec) : null;
+    if (hasTimeLimit && (timeLimit === null || timeLimit <= 0)) {
+      return res.status(400).json({ success: false, error: 'timeLimitSec must be a positive integer' });
+    }
+
+    const hasPassingScore = passingScore !== undefined && passingScore !== null && passingScore !== '';
+    const passScore = hasPassingScore ? parseInteger(passingScore) : 50;
+    if (passScore === null || passScore < 0 || passScore > 100) {
+      return res.status(400).json({ success: false, error: 'passingScore must be an integer from 0 to 100' });
+    }
 
     const quiz = await prisma.quiz.upsert({
       where: { videoId },
@@ -487,8 +501,8 @@ async function upsertQuiz(req, res) {
  */
 async function deleteQuiz(req, res) {
   try {
-    const quizId = parseInt(req.params.quizId, 10);
-    if (isNaN(quizId)) {
+    const quizId = parseInteger(req.params.quizId);
+    if (quizId === null || quizId <= 0) {
       return res.status(400).json({ success: false, error: 'Invalid quiz ID' });
     }
 
@@ -512,15 +526,18 @@ async function deleteQuiz(req, res) {
  */
 async function listQuizAttempts(req, res) {
   try {
-    const quizId = parseInt(req.params.quizId, 10);
+    const quizId = parseInteger(req.params.quizId);
     const { status } = req.query;
 
-    if (isNaN(quizId)) {
+    if (quizId === null || quizId <= 0) {
       return res.status(400).json({ success: false, error: 'Invalid quiz ID' });
     }
 
     const where = { quizId };
     if (status) {
+      if (!Object.values(STATUS).includes(status)) {
+        return res.status(400).json({ success: false, error: 'Invalid attempt status filter' });
+      }
       where.status = status;
     }
 
@@ -546,16 +563,20 @@ async function listQuizAttempts(req, res) {
  */
 async function gradeAttempt(req, res) {
   try {
-    const attemptId = parseInt(req.params.id, 10);
+    const attemptId = parseInteger(req.params.id);
     const adminId = req.user.id;
     const { essayScores, essayFeedback } = req.body;
 
-    if (isNaN(attemptId)) {
+    if (attemptId === null || attemptId <= 0) {
       return res.status(400).json({ success: false, error: 'Invalid attempt ID' });
     }
 
-    if (!essayScores || typeof essayScores !== 'object') {
+    if (!essayScores || typeof essayScores !== 'object' || Array.isArray(essayScores)) {
       return res.status(400).json({ success: false, error: 'essayScores object is required' });
+    }
+
+    if (essayFeedback !== undefined && (essayFeedback === null || typeof essayFeedback !== 'object' || Array.isArray(essayFeedback))) {
+      return res.status(400).json({ success: false, error: 'essayFeedback must be an object' });
     }
 
     const updated = await quizService.gradeEssayAttempt(adminId, attemptId, essayScores, essayFeedback || {});
@@ -578,8 +599,8 @@ async function gradeAttempt(req, res) {
  */
 async function resetAttempt(req, res) {
   try {
-    const attemptId = parseInt(req.params.id, 10);
-    if (isNaN(attemptId)) {
+    const attemptId = parseInteger(req.params.id);
+    if (attemptId === null || attemptId <= 0) {
       return res.status(400).json({ success: false, error: 'Invalid attempt ID' });
     }
 
@@ -604,18 +625,19 @@ async function resetAttempt(req, res) {
  */
 async function grantExemption(req, res) {
   try {
-    const videoId = parseInt(req.params.videoId, 10);
+    const videoId = parseInteger(req.params.videoId);
     const adminId = req.user.id;
     const { userId, reason } = req.body;
 
-    if (isNaN(videoId) || !userId) {
+    const parsedUserId = parseInteger(userId);
+    if (videoId === null || videoId <= 0 || parsedUserId === null || parsedUserId <= 0) {
       return res.status(400).json({ success: false, error: 'videoId and userId are required' });
     }
 
     const exemption = await prisma.gateExemption.upsert({
-      where: { userId_videoId: { userId: parseInt(userId, 10), videoId } },
+      where: { userId_videoId: { userId: parsedUserId, videoId } },
       create: {
-        userId: parseInt(userId, 10),
+        userId: parsedUserId,
         videoId,
         grantedBy: adminId,
         reason: reason || null,
@@ -643,12 +665,19 @@ async function grantExemption(req, res) {
  */
 async function revokeExemption(req, res) {
   try {
-    const exemptionId = parseInt(req.params.exemptionId, 10);
-    if (isNaN(exemptionId)) {
+    const exemptionId = parseInteger(req.params.exemptionId);
+    if (exemptionId === null || exemptionId <= 0) {
       return res.status(400).json({ success: false, error: 'Invalid exemption ID' });
     }
 
-    await prisma.gateExemption.delete({ where: { id: exemptionId } });
+    try {
+      await prisma.gateExemption.delete({ where: { id: exemptionId } });
+    } catch (error) {
+      if (error.code === 'P2025') {
+        return res.status(404).json({ success: false, error: 'Exemption not found' });
+      }
+      throw error;
+    }
 
     return res.status(200).json({ success: true, message: 'Exemption revoked successfully' });
   } catch (error) {
