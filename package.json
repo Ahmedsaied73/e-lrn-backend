@@ -5,7 +5,8 @@
   "main": "index.js",
   "scripts": {
     "dev": "nodemon app.js",
-    "db:setup": "prisma migrate deploy && prisma generate"
+    "db:setup": "prisma migrate deploy && prisma generate",
+    "upload:course": "node scripts/uploadCourseFolder.js"
   },
   "keywords": [],
   "author": "",
