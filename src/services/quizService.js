@@ -361,6 +361,11 @@ async function startAttempt(userId, quizId) {
  * @returns {Promise<object>} Updated attempt
  */
 async function submitAttempt(userId, attemptId, responses, autoSubmitted = false) {
+  const serialized = JSON.stringify(responses);
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_SURVEY_JSON_BYTES) {
+    throw Object.assign(new Error('Responses exceed the maximum allowed size.'), { statusCode: 413 });
+  }
+
   const attempt = await prisma.quizAttempt.findUnique({
     where: { id: attemptId },
     include: { quiz: true },

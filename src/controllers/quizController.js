@@ -231,7 +231,7 @@ async function submitQuiz(req, res) {
       return res.status(400).json({ success: false, error: 'Invalid attempt ID' });
     }
 
-    if (!answers || typeof answers !== 'object') {
+    if (!answers || typeof answers !== 'object' || Array.isArray(answers)) {
       return res.status(400).json({ success: false, error: 'answers must be an object map of question responses' });
     }
 
