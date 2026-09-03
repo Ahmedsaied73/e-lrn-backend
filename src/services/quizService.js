@@ -415,6 +415,41 @@ async function submitAttempt(userId, attemptId, responses, autoSubmitted = false
 }
 
 /**
+ * Save responses for an owned, in-progress attempt without grading or changing
+ * its lifecycle status. The caller must still submit to trigger grading.
+ *
+ * @param {number} userId
+ * @param {number} attemptId
+ * @param {object} responses - { [qName]: value }
+ * @returns {Promise<object>} Updated attempt identifier
+ */
+async function saveAttempt(userId, attemptId, responses) {
+  const serialized = JSON.stringify(responses);
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_SURVEY_JSON_BYTES) {
+    throw Object.assign(new Error('Responses exceed the maximum allowed size.'), { statusCode: 413 });
+  }
+
+  const attempt = await prisma.quizAttempt.findUnique({
+    where: { id: attemptId },
+    select: { id: true, userId: true, status: true },
+  });
+
+  if (!attempt) throw Object.assign(new Error('Attempt not found'), { statusCode: 404 });
+  if (attempt.userId !== userId) throw Object.assign(new Error('Forbidden'), { statusCode: 403 });
+  if (attempt.status !== STATUS.IN_PROGRESS) {
+    throw Object.assign(new Error(`Attempt is already ${attempt.status}`), { statusCode: 409 });
+  }
+
+  const updated = await prisma.quizAttempt.update({
+    where: { id: attemptId },
+    data: { responses },
+    select: { id: true },
+  });
+
+  return updated;
+}
+
+/**
  * Grade essay questions for a submitted attempt.
  * Called by admin. Computes final scorePercent and sets status to GRADED.
  *
@@ -502,6 +537,7 @@ module.exports = {
   evaluateGate,
   startAttempt,
   submitAttempt,
+  saveAttempt,
   gradeEssayAttempt,
   uploadQuestionImage,
 };

@@ -13,6 +13,7 @@ const { authenticateToken, authorizeAdmin } = require('../middlewares/index');
 const {
   getQuizMeta,
   startQuiz,
+  saveQuizAttempt,
   submitQuiz,
   getQuizResult,
   getStudentAttempts,
@@ -35,6 +36,9 @@ router.get('/videos/:videoId/meta', getQuizMeta);
 
 // Start or resume an attempt -> returns sanitized surveyJson & deadlineAt
 router.post('/videos/:videoId/start', startQuiz);
+
+// Save in-progress responses without grading or changing attempt status
+router.patch('/attempts/:id/save', saveQuizAttempt);
 
 // Submit answers for grading
 router.post('/attempts/:id/submit', submitQuiz);

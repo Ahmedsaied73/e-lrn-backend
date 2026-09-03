@@ -176,6 +176,7 @@ async function startQuiz(req, res) {
         startedAt: attempt.startedAt,
         deadlineAt: attempt.deadlineAt,
         resumed,
+        responses: resumed ? attempt.responses || null : null,
         quiz: safeQuiz,
       },
     });
@@ -183,6 +184,36 @@ async function startQuiz(req, res) {
     console.error('[QuizController] startQuiz error:', error);
     const statusCode = error.statusCode || 500;
     return res.status(statusCode).json({ success: false, error: error.message });
+  }
+}
+
+/**
+ * PATCH /quizzes/attempts/:id/save
+ * Saves responses for an in-progress owned attempt without grading it.
+ */
+async function saveQuizAttempt(req, res) {
+  try {
+    const attemptId = parseInt(req.params.id, 10);
+    const userId = req.user.id;
+    const { responses } = req.body || {};
+
+    if (isNaN(attemptId)) {
+      return res.status(400).json({ success: false, error: 'Invalid attempt ID' });
+    }
+
+    if (!responses || typeof responses !== 'object' || Array.isArray(responses)) {
+      return res.status(400).json({ success: false, error: 'responses must be an object map of question responses' });
+    }
+
+    const saved = await quizService.saveAttempt(userId, attemptId, responses);
+    return res.status(200).json({
+      success: true,
+      data: { attemptId: saved.id, saved: true },
+    });
+  } catch (error) {
+    console.error('[QuizController] saveQuizAttempt error:', error);
+    const statusCode = error.statusCode || 500;
+    return res.status(statusCode).json({ success: false, error: error.message || 'Unable to save attempt' });
   }
 }
 
@@ -629,6 +660,7 @@ async function revokeExemption(req, res) {
 module.exports = {
   getQuizMeta,
   startQuiz,
+  saveQuizAttempt,
   submitQuiz,
   getQuizResult,
   getStudentAttempts,
