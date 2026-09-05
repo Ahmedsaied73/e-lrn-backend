@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken');
+const { jwt: jwtConfig } = require('../config/env');
 const logger = require('./logger');
 
 /**
@@ -18,7 +19,12 @@ const authenticateToken = (req, res, next) => {
   }
 
   try {
-    const decoded = jwt.verify(token, process.env.JWTSECRET);
+    const decoded = jwt.verify(token, jwtConfig.secret);
+    // Reject refresh tokens (and any token with a missing type claim) — only
+    // 'access' tokens may authenticate API routes.
+    if (decoded.type !== 'access') {
+      return res.status(401).json({ success: false, error: 'Invalid or expired token.' });
+    }
     req.user = decoded;
     next();
   } catch (error) {

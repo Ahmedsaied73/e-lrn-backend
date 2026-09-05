@@ -1,11 +1,13 @@
 const jwt = require('jsonwebtoken');
-// Function to create a JWT
+
+// JWT 'type' claim distinguishes access vs refresh tokens so a stolen refresh
+// token can never authenticate API routes (middleware rejects type !== 'access').
 function createToken(payload, secret, expiresIn = '1h') {
-    return jwt.sign(payload, secret, { expiresIn });
+    return jwt.sign({ ...payload, type: 'access' }, secret, { expiresIn });
 }
-// Function to create a refresh token with a 7-day expiration
-function createRefreshToken(payload, secret) {
-    return createToken(payload, secret, '7d');
+// Refresh token with a 7-day expiration and an explicit 'refresh' type claim
+function createRefreshToken(payload, secret, expiresIn = '7d') {
+    return jwt.sign({ ...payload, type: 'refresh' }, secret, { expiresIn });
 }
 
 module.exports = {

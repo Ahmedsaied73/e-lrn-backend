@@ -1,6 +1,7 @@
 const prisma = require('../config/db');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const { jwt: jwtConfig } = require('../config/env');
 const { createToken, createRefreshToken } = require('../utils');
 const { accessTokenCookieOptions, refreshTokenCookieOptions } = require('../config/cookie');
 
@@ -27,8 +28,8 @@ async function login(req, res) {
     }
 
     const payload = { id: user.id, email: user.email, name: user.name, role: user.role };
-    const token = createToken(payload, process.env.JWTSECRET);
-    const refreshToken = createRefreshToken(payload, process.env.JWTSECRET);
+    const token = createToken(payload, jwtConfig.secret);
+    const refreshToken = createRefreshToken(payload, jwtConfig.refreshSecret);
 
     // Save refresh token in DB for revocation support
     await prisma.user.update({
@@ -36,11 +37,12 @@ async function login(req, res) {
       data: { refreshToken }
     });
 
-    // Set HttpOnly Cookies on Response
+    // Set HttpOnly Cookies on Response. Tokens are NEVER returned in the body —
+    // the browser holds them in cookies (cookie-only auth model).
     res.cookie('accessToken', token, accessTokenCookieOptions);
     res.cookie('refreshToken', refreshToken, refreshTokenCookieOptions);
 
-    return res.json({ success: true, data: { user: payload, token, refreshToken } });
+    return res.json({ success: true, data: { user: payload } });
   } catch (error) {
     console.error('Login error:', error);
     return res.status(500).json({ success: false, error: 'An error occurred during login.' });
@@ -74,8 +76,8 @@ async function register(req, res) {
     });
 
     const payload = { id: newUser.id, email: newUser.email, name: newUser.name, phoneNumber: newUser.phoneNumber, grade: newUser.grade, role: newUser.role };
-    const token = createToken(payload, process.env.JWTSECRET);
-    const refreshToken = createRefreshToken(payload, process.env.JWTSECRET);
+    const token = createToken(payload, jwtConfig.secret);
+    const refreshToken = createRefreshToken(payload, jwtConfig.refreshSecret);
 
     // Save refresh token in DB for revocation support
     await prisma.user.update({
@@ -83,11 +85,11 @@ async function register(req, res) {
       data: { refreshToken }
     });
 
-    // Set HttpOnly Cookies on Response
+    // Set HttpOnly Cookies on Response. Tokens are NEVER returned in the body.
     res.cookie('accessToken', token, accessTokenCookieOptions);
     res.cookie('refreshToken', refreshToken, refreshTokenCookieOptions);
 
-    return res.status(201).json({ success: true, message: 'User registered successfully.', data: { user: payload, token, refreshToken } });
+    return res.status(201).json({ success: true, message: 'User registered successfully.', data: { user: payload } });
   } catch (error) {
     console.error('Registration error:', error);
     return res.status(500).json({ success: false, error: 'An error occurred during registration.' });
@@ -99,7 +101,7 @@ async function logout(req, res) {
     const token = req.cookies && req.cookies.refreshToken;
     if (token) {
       try {
-        const decoded = jwt.verify(token, process.env.JWTSECRET);
+        const decoded = jwt.verify(token, jwtConfig.refreshSecret);
         await prisma.user.update({
           where: { id: decoded.id },
           data: { refreshToken: null }
@@ -124,7 +126,13 @@ async function refreshToken(req, res) {
   if (!token) return res.status(401).json({ success: false, error: 'Refresh token not provided.' });
 
   try {
-    const decoded = jwt.verify(token, process.env.JWTSECRET);
+    const decoded = jwt.verify(token, jwtConfig.refreshSecret);
+
+    // Reject access tokens that were handed to the refresh endpoint
+    if (decoded.type !== 'refresh') {
+      return res.status(403).json({ success: false, error: 'Invalid or revoked refresh token.' });
+    }
+
     const user = await prisma.user.findUnique({ where: { id: decoded.id } });
 
     if (!user || user.refreshToken !== token) {
@@ -132,11 +140,20 @@ async function refreshToken(req, res) {
     }
 
     const payload = { id: user.id, email: user.email, name: user.name, role: user.role };
-    const newToken = createToken(payload, process.env.JWTSECRET);
+    const newToken = createToken(payload, jwtConfig.secret);
+
+    // ROTATE: issue a new refresh token, persist it, and re-set the cookie so a
+    // replayed/reuse-detected token becomes invalid immediately.
+    const newRefreshToken = createRefreshToken(payload, jwtConfig.refreshSecret);
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { refreshToken: newRefreshToken }
+    });
 
     res.cookie('accessToken', newToken, accessTokenCookieOptions);
+    res.cookie('refreshToken', newRefreshToken, refreshTokenCookieOptions);
 
-    return res.json({ success: true, message: 'Token refreshed successfully.', data: { token: newToken, refreshToken: token } });
+    return res.json({ success: true, message: 'Token refreshed successfully.' });
   } catch (error) {
     console.error('Token refresh error:', error);
     return res.status(401).json({ success: false, error: 'Invalid refresh token.' });

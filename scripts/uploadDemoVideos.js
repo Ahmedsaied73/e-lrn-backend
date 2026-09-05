@@ -13,6 +13,19 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Extract accessToken/refreshToken cookies from a Set-Cookie response so the
+// script can authenticate via the same cookie-only path the browser uses.
+function extractCookies(response) {
+  const raw = (typeof response.headers.getSetCookie === 'function' && response.headers.getSetCookie()) || [];
+  const single = response.headers.get('set-cookie');
+  const all = raw.length ? raw : single ? [single] : [];
+  const names = new Set(['accessToken', 'refreshToken']);
+  return all
+    .map((c) => c.split(';')[0])
+    .filter((pair) => names.has(pair.split('=')[0].trim()))
+    .join('; ');
+}
+
 async function waitForServer() {
   console.log('Connecting to server at http://localhost:3005 ...');
   for (let i = 0; i < 15; i++) {
@@ -54,8 +67,11 @@ async function main() {
   if (!loginData.success) {
     throw new Error(`Login failed: ${JSON.stringify(loginData)}`);
   }
-  const token = loginData.data.token;
-  console.log(`✓ Logged in successfully. Token acquired.`);
+  const cookieHeader = extractCookies(loginRes);
+  if (!cookieHeader) {
+    throw new Error('Login succeeded but no cookies were returned. Cookie-only auth is required.');
+  }
+  console.log(`✓ Logged in successfully. Session cookies acquired.`);
 
   console.log('\n3. Creating Course in DB...');
   const coursePayload = {
@@ -70,7 +86,7 @@ async function main() {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
+      Cookie: cookieHeader,
     },
     body: JSON.stringify(coursePayload),
   });
@@ -88,7 +104,7 @@ async function main() {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
+      Cookie: cookieHeader,
     },
     body: JSON.stringify({ title: 'Lesson 1 - 22222222222' }),
   });
@@ -107,7 +123,7 @@ async function main() {
   const v1UploadRes = await fetch(`${BASE_URL}/videos/${video1Id}/upload`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${token}`,
+      Cookie: cookieHeader,
     },
     body: v1FormData,
   });
@@ -123,7 +139,7 @@ async function main() {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
+      Cookie: cookieHeader,
     },
     body: JSON.stringify({ title: 'Lesson 2 - Blank Screen HD 720p' }),
   });
@@ -142,7 +158,7 @@ async function main() {
   const v2UploadRes = await fetch(`${BASE_URL}/videos/${video2Id}/upload`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${token}`,
+      Cookie: cookieHeader,
     },
     body: v2FormData,
   });

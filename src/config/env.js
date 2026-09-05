@@ -28,11 +28,32 @@ for (const varName of REQUIRED_BUNNY_VARS) {
   }
 }
 
+// ── Refresh token secret resolution ─────────────────────────────────────────
+// Refresh tokens must use a dedicated secret, NOT the access-token secret.
+// Production refuses to start on a placeholder; development falls back to
+// JWTSECRET (with a warning) so the server still boots.
+const REFRESH_PLACEHOLDER_RE = /your_|placeholder|change_me|example|TODO/i;
+function resolveRefreshSecret() {
+  const candidate = process.env.REFRESH_TOKEN_SECRET;
+  const looksPlaceholder = Boolean(candidate) && REFRESH_PLACEHOLDER_RE.test(candidate);
+
+  if (looksPlaceholder) {
+    if (process.env.NODE_ENV === 'production') {
+      console.error('[FATAL] REFRESH_TOKEN_SECRET looks like a placeholder. Set a real value in production.');
+      process.exit(1);
+    }
+    console.warn('[WARN] REFRESH_TOKEN_SECRET looks like a placeholder — falling back to JWTSECRET. Set a real value.');
+    return process.env.JWTSECRET;
+  }
+
+  return candidate || process.env.JWTSECRET;
+}
+
 const config = {
   jwt: {
     secret: process.env.JWTSECRET,
     expiry: process.env.JWT_EXPIRY || '1h',
-    refreshSecret: process.env.REFRESH_TOKEN_SECRET || process.env.JWTSECRET,
+    refreshSecret: resolveRefreshSecret(),
     refreshExpiry: process.env.REFRESH_TOKEN_EXPIRY || '7d'
   },
   admin: {
