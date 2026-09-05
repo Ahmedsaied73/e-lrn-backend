@@ -172,6 +172,7 @@ model Quiz {
   title        String
   timeLimitSec Int?                                // null = untimed; e.g. 600 = 10 min
   passingScore Int           @default(50)          // percentage required to pass (default 50%)
+  maxAttempts  Int           @default(3)           // max retakes per student; 409 once exhausted
   surveyJson   Json                                // SurveyJS student-facing definition (no secrets)
   answerKey    Json                                // SERVER-ONLY: { qName: { type, correctValue?, modelAnswer?, points } }
   createdAt    DateTime      @default(now())

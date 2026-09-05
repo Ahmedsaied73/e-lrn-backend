@@ -9,7 +9,7 @@
  */
 
 const prisma = require('../config/db');
-const { ALLOWED_QUESTION_TYPES, MAX_SURVEY_JSON_BYTES, GRACE_SEC, STATUS } = require('../config/quizConfig');
+const { ALLOWED_QUESTION_TYPES, MAX_SURVEY_JSON_BYTES, GRACE_SEC, DEFAULT_MAX_ATTEMPTS, STATUS } = require('../config/quizConfig');
 const bunny = require('../integrations/bunny/bunnyStreamClient');
 
 // ─── Validation ───────────────────────────────────────────────────────────────
@@ -137,6 +137,7 @@ function sanitizeForStudent(quiz) {
     title: quiz.title,
     timeLimitSec: quiz.timeLimitSec,
     passingScore: quiz.passingScore,
+    maxAttempts: quiz.maxAttempts,
     surveyJson: quiz.surveyJson,
     // answerKey intentionally excluded
   };
@@ -380,6 +381,19 @@ async function startAttempt(userId, quizId) {
     } else {
       return { attempt: inProgress, quiz, resumed: true };
     }
+  }
+
+  // Enforce max attempts — EXPIRED attempts (e.g. network drop / timeout) do
+  // NOT consume a retake, so only real started attempts count against the cap.
+  const maxAttempts = quiz.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+  const attemptsUsed = await prisma.quizAttempt.count({
+    where: { userId, quizId, status: { not: STATUS.EXPIRED } },
+  });
+  if (attemptsUsed >= maxAttempts) {
+    throw Object.assign(
+      new Error(`You have used all ${maxAttempts} allowed attempts for this quiz`),
+      { statusCode: 409 }
+    );
   }
 
   // Determine next attempt number

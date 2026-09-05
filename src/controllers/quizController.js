@@ -100,6 +100,11 @@ async function getQuizMeta(req, res) {
       : null;
     const passed = bestScore !== null && bestScore >= quiz.passingScore;
 
+    // Retake limiter — EXPIRED attempts (network drops/timeouts) don't burn a retake
+    const maxAttempts = quiz.maxAttempts;
+    const attemptsUsed = attempts.filter(a => a.status !== STATUS.EXPIRED).length;
+    const atMaxAttempts = attemptsUsed >= maxAttempts;
+
     return res.status(200).json({
       success: true,
       data: {
@@ -110,6 +115,9 @@ async function getQuizMeta(req, res) {
         title: quiz.title,
         timeLimitSec: quiz.timeLimitSec,
         passingScore: quiz.passingScore,
+        maxAttempts,
+        attemptsUsed,
+        atMaxAttempts,
         unlocked: videoCompleted,
         attempted: attempts.length > 0,
         totalAttempts: attempts.length,
@@ -409,12 +417,12 @@ async function getStudentAttempts(req, res) {
 /**
  * POST /quizzes/videos/:videoId
  * Upserts a quiz definition for a video.
- * Body: { title, timeLimitSec?, passingScore?, surveyJson, answerKey }
+ * Body: { title, timeLimitSec?, passingScore?, maxAttempts?, surveyJson, answerKey }
  */
 async function upsertQuiz(req, res) {
   try {
     const videoId = parseInteger(req.params.videoId);
-    const { title, timeLimitSec, passingScore, surveyJson, answerKey: rawKey } = req.body || {};
+    const { title, timeLimitSec, passingScore, maxAttempts, surveyJson, answerKey: rawKey } = req.body || {};
 
     if (videoId === null || videoId <= 0) {
       return res.status(400).json({ success: false, error: 'Invalid video ID' });
@@ -459,10 +467,16 @@ async function upsertQuiz(req, res) {
       return res.status(400).json({ success: false, error: 'timeLimitSec must be a positive integer' });
     }
 
-    const hasPassingScore = passingScore !== undefined && passingScore !== null && passingScore !== '';
+const hasPassingScore = passingScore !== undefined && passingScore !== null && passingScore !== '';
     const passScore = hasPassingScore ? parseInteger(passingScore) : 50;
     if (passScore === null || passScore < 0 || passScore > 100) {
       return res.status(400).json({ success: false, error: 'passingScore must be an integer from 0 to 100' });
+    }
+
+    const hasMaxAttempts = maxAttempts !== undefined && maxAttempts !== null && maxAttempts !== '';
+    const maxAttemptsValue = hasMaxAttempts ? parseInteger(maxAttempts) : 3;
+    if (maxAttemptsValue === null || maxAttemptsValue < 1 || maxAttemptsValue > 10) {
+      return res.status(400).json({ success: false, error: 'maxAttempts must be an integer from 1 to 10' });
     }
 
     const quiz = await prisma.quiz.upsert({
@@ -472,6 +486,7 @@ async function upsertQuiz(req, res) {
         title: title.trim(),
         timeLimitSec: timeLimit,
         passingScore: passScore,
+        maxAttempts: maxAttemptsValue,
         surveyJson,
         answerKey: keyValidation.answerKey,
       },
@@ -479,6 +494,7 @@ async function upsertQuiz(req, res) {
         title: title.trim(),
         timeLimitSec: timeLimit,
         passingScore: passScore,
+        maxAttempts: maxAttemptsValue,
         surveyJson,
         answerKey: keyValidation.answerKey,
       },
