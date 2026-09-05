@@ -164,6 +164,15 @@ const getAssignment = async (req, res) => {
       });
     }
 
+    // Security: never leak answer keys (correctOption/explanation) to students
+    // who have NOT submitted yet — they could read the keys before attempting.
+    if (!submission && req.user.role !== 'ADMIN') {
+      assignment.AssignmentQuestion = assignment.AssignmentQuestion.map((question) => {
+        const { correctOption, explanation, ...safeQuestion } = question;
+        return safeQuestion;
+      });
+    }
+
     // Return assignment with submission status
     res.json({
       ...assignment,
