@@ -5,6 +5,7 @@ Status: EXECUTING | Date: 2026-09-05 | Branch: Dev (backend + frontend paired)
 ## Progress log
 
 - ✅ BE auth hardening (`ea97a4c`) — env secret resolution, .env real secret, type claims, rotation, no body tokens, script cookie-auth
+- ✅ BE auth follow-up (`14cafce`) — jti nonce on refresh tokens (fixes same-second rotation producing identical tokens, verified live)
 - ✅ FE auth pairing (`3b6a1fe`) — authService no-token, isLoggedIn from /user/me, api-client cookie-only refresh
 - ✅ #3 answer-key leak (`eee12cb`)
 - ✅ #4 progress precondition + structured 403 codes (`b100650`)

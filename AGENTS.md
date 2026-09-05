@@ -158,7 +158,7 @@ Sealed plan: `plans/security-round1.md`. All changes paired backend ↔ frontend
 - **Cookie-only**: login/register/refresh NEVER return `token`/`refreshToken` in the body — only HttpOnly cookies (`accessToken` 15min, `refreshToken` 7d, path `/auth`).
 - **Dedicated refresh secret**: `REFRESH_TOKEN_SECRET` in `.env` (real value set locally; `.env` is gitignored). `src/config/env.js` resolves it, refuses to start in production on a placeholder, and warns + falls back to `JWTSECRET` in dev.
 - **`type` claims**: access tokens carry `{ type: 'access' }`, refresh tokens `{ type: 'refresh' }`. `authenticateToken` rejects anything not `type:'access'`; the refresh endpoint rejects non-refresh tokens.
-- **Rotation**: `/auth/refresh-token` issues a new refresh token, persists it to DB, re-sets the refresh cookie. The old token dies immediately.
+- **Rotation**: `/auth/refresh-token` issues a new refresh token, persists it to DB, re-sets the refresh cookie. The old token dies immediately. Refresh tokens include a `jti` nonce (`createRefreshToken`), so rotation can never produce a byte-identical token within the same second.
 - **Legacy**: tokens issued before this change (no `type`) are rejected → clients get one forced re-login. Frontend `authService` sets `isLoggedIn` from a successful `/user/me`, not from a body token. `lib/api-client.ts` keeps the in-memory Bearer store as a compat shim but never populates it.
 - **Scripts**: `scripts/uploadDemoVideos.js` authenticates by extracting `set-cookie` cookies (no bearer token). Login-response consumers inside a cookie-less client are broken by design.
 
