@@ -70,10 +70,13 @@ const ensureSequentialAccess = async (req, res, next) => {
       });
     }
 
+    // The previous video in this course's sequence (index is > 0 here)
+    const previousVideoId = courseVideos[currentVideoIndex - 1].id;
+
     // Check if the previous video has an associated assignment
     const previousVideoAssignment = await prismaClient.assignment.findFirst({
       where: {
-        videoId: previousVideo.id
+        videoId: previousVideoId
       }
     });
 
@@ -94,7 +97,7 @@ const ensureSequentialAccess = async (req, res, next) => {
         return res.status(403).json({ 
           message: 'You must submit the assignment for the previous video before proceeding',
           assignmentId: previousVideoAssignment.id,
-          videoId: previousVideo.id
+          videoId: previousVideoId
         });
       }
       
@@ -103,7 +106,7 @@ const ensureSequentialAccess = async (req, res, next) => {
         return res.status(403).json({ 
           message: 'Your assignment submission is still pending review. Please wait for it to be graded before proceeding.',
           assignmentId: previousVideoAssignment.id,
-          videoId: previousVideo.id,
+          videoId: previousVideoId,
           submissionId: userSubmission.id
         });
       }
@@ -113,7 +116,7 @@ const ensureSequentialAccess = async (req, res, next) => {
         return res.status(403).json({ 
           message: 'Your assignment submission was rejected. Please review the feedback and resubmit.',
           assignmentId: previousVideoAssignment.id,
-          videoId: previousVideo.id,
+          videoId: previousVideoId,
           submissionId: userSubmission.id
         });
       }
