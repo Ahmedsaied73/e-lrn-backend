@@ -28,10 +28,40 @@ const markVideoCompleted = async (req, res) => {
     const videoId = parseBunnyVideoId(req.body?.videoId);
     if (!videoId) return res.status(400).json({ error: 'Invalid video ID format' });
 
-    const { video, enrollment } = await findBunnyVideoWithEnrollment(videoId, req.user.id, req.user.role);
-    if (!video) return res.status(404).json({ error: 'Video not found' });
+const { video, enrollment } = await findBunnyVideoWithEnrollment(videoId, req.user.id, req.user.role);
+    if (!video) return res.status(404).json({ error: 'Video not found', code: 'VIDEO_NOT_FOUND' });
     if (!enrollment && req.user.role !== 'ADMIN') {
-      return res.status(403).json({ error: 'You must be enrolled in this course to mark progress' });
+      return res.status(403).json({ error: 'You must be enrolled in this course to mark progress', code: 'NOT_ENROLLED' });
+    }
+
+    // Sequential unlock precondition: only the currently-unlocked video may be
+    // completed — the first video, or a video whose direct predecessor is done.
+    if (req.user.role !== 'ADMIN') {
+      const courseVideos = await prisma.bunnyVideo.findMany({
+        where: { courseId: video.courseId, status: 'READY' },
+        orderBy: [{ position: 'asc' }, { createdAt: 'asc' }],
+        select: { id: true },
+      });
+
+      const currentIndex = courseVideos.findIndex((v) => v.id === videoId);
+      if (currentIndex === -1) {
+        return res.status(404).json({ error: 'Video not found', code: 'VIDEO_NOT_FOUND' });
+      }
+
+      if (currentIndex > 0) {
+        const previousVideoId = courseVideos[currentIndex - 1].id;
+        const previousProgress = await prisma.bunnyVideoProgress.findUnique({
+          where: { userId_bunnyVideoId: { userId: req.user.id, bunnyVideoId: previousVideoId } },
+        });
+
+        if (!previousProgress || !previousProgress.completed) {
+          return res.status(403).json({
+            error: 'You must complete the previous video before completing this one.',
+            code: 'VIDEO_NOT_UNLOCKED',
+            previousVideoId,
+          });
+        }
+      }
     }
 
     const videoProgress = await prisma.bunnyVideoProgress.upsert({

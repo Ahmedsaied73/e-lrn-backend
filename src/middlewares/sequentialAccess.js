@@ -36,8 +36,9 @@ const ensureSequentialAccess = async (req, res, next) => {
     });
 
     if (!enrollment) {
-      return res.status(403).json({ 
-        message: 'You must be enrolled in this course to access this video'
+      return res.status(403).json({
+        message: 'You must be enrolled in this course to access this video',
+        code: 'NOT_ENROLLED'
       });
     }
 
@@ -63,6 +64,7 @@ const ensureSequentialAccess = async (req, res, next) => {
     if (!gate.allowed) {
       return res.status(403).json({
         message: gate.reason,
+        code: 'SEQUENTIAL_GATE',
         previousVideoId: gate.previousVideoId,
         quizId: gate.quizId,
         yourScore: gate.bestScore,
@@ -96,6 +98,7 @@ const ensureSequentialAccess = async (req, res, next) => {
       if (!userSubmission) {
         return res.status(403).json({ 
           message: 'You must submit the assignment for the previous video before proceeding',
+          code: 'ASSIGNMENT_REQUIRED',
           assignmentId: previousVideoAssignment.id,
           videoId: previousVideoId
         });
@@ -105,6 +108,7 @@ const ensureSequentialAccess = async (req, res, next) => {
       if (userSubmission.status === 'PENDING') {
         return res.status(403).json({ 
           message: 'Your assignment submission is still pending review. Please wait for it to be graded before proceeding.',
+          code: 'ASSIGNMENT_PENDING',
           assignmentId: previousVideoAssignment.id,
           videoId: previousVideoId,
           submissionId: userSubmission.id
@@ -115,6 +119,7 @@ const ensureSequentialAccess = async (req, res, next) => {
       if (userSubmission.status === 'REJECTED') {
         return res.status(403).json({ 
           message: 'Your assignment submission was rejected. Please review the feedback and resubmit.',
+          code: 'ASSIGNMENT_REJECTED',
           assignmentId: previousVideoAssignment.id,
           videoId: previousVideoId,
           submissionId: userSubmission.id

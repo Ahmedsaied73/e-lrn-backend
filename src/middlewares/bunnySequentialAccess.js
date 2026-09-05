@@ -9,6 +9,7 @@ async function ensureBunnySequentialAccess(req, res, next) {
 
     return res.status(403).json({
       message: gate.reason,
+      code: 'SEQUENTIAL_GATE',
       previousVideoId: gate.previousVideoId,
       quizId: gate.quizId,
       yourScore: gate.bestScore,
