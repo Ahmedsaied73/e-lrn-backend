@@ -147,4 +147,38 @@ All 11 confirmed bugs are **fixed and committed on `Dev`** (see `plans/bug-fix-p
 | 3.2 | `getCookieConfig()` removed from `src/utils.js` | `src/utils.js` |
 | 3.3 | Empty placeholders removed: `src/routes/videoProcessing.js`, `src/controllers/videoProcessingController.js`, `src/middlewares.js` | deleted |
 
-**Pending (user-managed)**: The three migrations above are authored and committed but **not yet applied**. Run `npx prisma migrate dev` (applies all pending + regenerates Prisma client) before testing. Frontend type updates (position, maxAttempts, 409 handling) are committed on the frontend `Dev` branch (`e5d825a`).
+**Applied**: The three schema migrations above were applied by the user (`prisma migrate status` reports up to date, 24/24) and the Prisma client is in sync. Frontend commits for that round: `e5d825a` (types/QuizIntroCard, maxAttempts + position).
+
+## Security round 1 (Sept 2026) — cookie-only auth + CRITICAL fixes
+
+Sealed plan: `plans/security-round1.md`. All changes paired backend ↔ frontend.
+
+### Auth model (BREAKING for clients)
+
+- **Cookie-only**: login/register/refresh NEVER return `token`/`refreshToken` in the body — only HttpOnly cookies (`accessToken` 15min, `refreshToken` 7d, path `/auth`).
+- **Dedicated refresh secret**: `REFRESH_TOKEN_SECRET` in `.env` (real value set locally; `.env` is gitignored). `src/config/env.js` resolves it, refuses to start in production on a placeholder, and warns + falls back to `JWTSECRET` in dev.
+- **`type` claims**: access tokens carry `{ type: 'access' }`, refresh tokens `{ type: 'refresh' }`. `authenticateToken` rejects anything not `type:'access'`; the refresh endpoint rejects non-refresh tokens.
+- **Rotation**: `/auth/refresh-token` issues a new refresh token, persists it to DB, re-sets the refresh cookie. The old token dies immediately.
+- **Legacy**: tokens issued before this change (no `type`) are rejected → clients get one forced re-login. Frontend `authService` sets `isLoggedIn` from a successful `/user/me`, not from a body token. `lib/api-client.ts` keeps the in-memory Bearer store as a compat shim but never populates it.
+- **Scripts**: `scripts/uploadDemoVideos.js` authenticates by extracting `set-cookie` cookies (no bearer token). Login-response consumers inside a cookie-less client are broken by design.
+
+### Fixes in this round
+
+| Finding | Fix | Where |
+|---------|-----|-------|
+| #1 refresh secret placeholder | real `REFRESH_TOKEN_SECRET` + claims + rotation | `env.js`, `utils.js`, `authController.js`, `middlewares/index.js` |
+| #3 answer-key leak | `getAssignment` strips `correctOption`/`explanation` for students pre-submission (admins/post-submit see full) | `src/controllers/assignmentController.js` |
+| #4 progress trusts client | `markVideoCompleted` requires the video to be the current unlocked index (first, or previous completed) → 403 `VIDEO_NOT_UNLOCKED` | `src/controllers/videoProgressController.js` |
+| #10 brittle gate 403 | structured `code`s: `NOT_ENROLLED`, `SEQUENTIAL_GATE`, `ASSIGNMENT_REQUIRED/PENDING/REJECTED`, `VIDEO_NOT_UNLOCKED`, `VIDEO_NOT_FOUND` | `sequentialAccess.js`, `bunnySequentialAccess.js`, `videoProgressController.js` |
+| #2 admin routes unguarded (FE) | `app/admin/layout.tsx` role-guards all `/admin/**` (non-ADMIN → redirect) | FE |
+| Assignments FE-only hide | dispatch wiring for assignments removed (`course/[id]/page.tsx` + `video/[video]/page.tsx`), profile link removed | FE — **🔶 the two `app/course/[id]/*` edits are UNCOMMITTED, riding inside the user's WIP working tree**; `me/user/page.tsx` + guard committed |
+
+**Committed on backend `Dev`**: `ea97a4c` (auth BE), `eee12cb` (#3), `b100650` (#4 + codes), plan file in `ea97a4c`. **Frontend `Dev`**: `3b6a1fe` (auth pairing), `44932ce` (admin guard), `dad5a86` (profile link).
+
+### Essay grading — deliberately unchanged
+
+Passing a quiz with an essay still **requires an admin-graded essay** (score% uses `mcqEarned/(mcq+essay)`). A perfect MCQ score alone can be blocked pending grading. Accepted behavior until an AI-grader is built (user decision).
+
+### Out of scope (deferred)
+
+CSP/security headers (#7), `/courses/enrolled` response shape (#9), paywall stays free, admin site work beyond the layout guard.

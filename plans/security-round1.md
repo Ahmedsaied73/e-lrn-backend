@@ -1,6 +1,17 @@
 # Security Round 1 — Cookie-Only Auth + CRITICAL Fixes
 
-Status: PLANNED (plan sealed) | Date: 2026-09-05 | Branch: Dev (backend + frontend paired)
+Status: EXECUTING | Date: 2026-09-05 | Branch: Dev (backend + frontend paired)
+
+## Progress log
+
+- ✅ BE auth hardening (`ea97a4c`) — env secret resolution, .env real secret, type claims, rotation, no body tokens, script cookie-auth
+- ✅ FE auth pairing (`3b6a1fe`) — authService no-token, isLoggedIn from /user/me, api-client cookie-only refresh
+- ✅ #3 answer-key leak (`eee12cb`)
+- ✅ #4 progress precondition + structured 403 codes (`b100650`)
+- ✅ FE admin guard (`44932ce`)
+- ✅ FE profile assignments link removed (`dad5a86`)
+- 🔶 FE course-page assignment hide (video page + course page dispatch) — UNCOMMITTED, riding in user WIP tree
+- ⏳ Memory docs updated; final smoke + AGENTS.md commit pending
 
 ## Goal
 
