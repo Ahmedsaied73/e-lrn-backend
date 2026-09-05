@@ -1,35 +1,20 @@
 const jwt = require('jsonwebtoken');
-// Function to create a JWT
-function createToken(payload, secret, expiresIn = '1h') {
-    return jwt.sign(payload, secret, { expiresIn });
-}
-// Function to create a refresh token with a 7-day expiration
-function createRefreshToken(payload, secret) {
-    return createToken(payload, secret, '7d');
-}
+const { randomUUID } = require('crypto');
 
-// Function to get cookie configuration based on environment
-function getCookieConfig(isRefreshToken = false) {
-    // Check if we're in production mode
-    const isProduction = process.env.NODE_ENV === 'production';
-    
-    // Base cookie configuration
-    const cookieConfig = {
-        httpOnly: true,
-        sameSite: 'strict',
-        // Only set secure: true in production
-        secure: isProduction,
-        // Set appropriate expiry time
-        maxAge: isRefreshToken 
-            ? 7 * 24 * 60 * 60 * 1000 // 7 days in milliseconds for refresh token
-            : 60 * 60 * 1000 // 1 hour in milliseconds for access token
-    };
-    
-    return cookieConfig;
+// JWT 'type' claim distinguishes access vs refresh tokens so a stolen refresh
+// token can never authenticate API routes (middleware rejects type !== 'access').
+function createToken(payload, secret, expiresIn = '1h') {
+    return jwt.sign({ ...payload, type: 'access' }, secret, { expiresIn });
+}
+// Refresh token with a 7-day expiration and an explicit 'refresh' type claim.
+// The random jti guarantees every issued refresh token is unique — without it,
+// two signings within the same second yield identical tokens (same iat), which
+// silently defeats token rotation (a rotated token would equal the old one).
+function createRefreshToken(payload, secret, expiresIn = '7d') {
+    return jwt.sign({ ...payload, type: 'refresh', jti: randomUUID() }, secret, { expiresIn });
 }
 
 module.exports = {
     createToken,
-    createRefreshToken,
-    getCookieConfig
+    createRefreshToken
 };

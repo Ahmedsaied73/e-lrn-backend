@@ -1,0 +1,313 @@
+From ce4ea5c9dd204cc52dd59bd8660745c45098dbf9 Mon Sep 17 00:00:00 2001
+From: Claude <claude@anthropic.com>
+Date: Wed, 12 Aug 2026 23:59:19 +0000
+Subject: [PATCH 1/2] feat: aggregate course+videos+enrollment+progress in GET
+ /courses/:id
+
+Modifies the existing getCourseById controller only. No new route,
+no auth/middleware changes, no schema changes.
+
+- Single Prisma query: videos and the authenticated user's enrollment
+  are fetched via filtered relation includes (enrollments: { where:
+  { userId } }, videos.videoProgress: { where: { userId } }), so no
+  N+1 and no extra round trips beyond the one findUnique call.
+- Enrollment is now resolved strictly from req.user.id (existing auth
+  context) and scoped to that user only. This also fixes a pre-existing
+  leak where the old query returned *all* enrollments (id/userId/
+  createdAt) for the course to any authenticated viewer.
+- Response payload reshaped to { course, videos, enrollment, progress }
+  under the existing { success, data } envelope, matching the objective
+  ('course + videos + enrollment + progress' as four logical parts).
+  Course object no longer nests videos/enrollments since those are now
+  top-level.
+- progress[] covers every video in the course; videos with no
+  VideoProgress row use the same empty representation already used by
+  videoProgressController (completed: false, watchedAt: null).
+- Videos are ordered by position asc (existing field, same convention
+  already used in nextVideoController/sequentialAccess) and now include
+  position in the response so the Course page can render/order them
+  correctly.
+- Thumbnail/video URL absolutization logic preserved as-is.
+- 404/500 error handling preserved as-is; route still only guarded by
+  authenticateToken (the same guard already on this route) since course
+  viewing was never enrollment-gated - only video streaming is, via
+  checkVideoAccess/checkCourseAccess on /stream, which is untouched.
+---
+ src/controllers/coursesController.js | 67 ++++++++++++++++++++++------
+ 1 file changed, 54 insertions(+), 13 deletions(-)
+
+diff --git a/src/controllers/coursesController.js b/src/controllers/coursesController.js
+index 0029894..abd02b1 100644
+--- a/src/controllers/coursesController.js
++++ b/src/controllers/coursesController.js
+@@ -49,19 +49,41 @@ const getAllCourses = async (req, res) => {
+ };
+ 
+ // Get a specific course by ID
++// Aggregates everything the Course page needs — course, videos, the authenticated
++// user's enrollment, and their video progress (scoped to this course's videos) —
++// into one response, so the frontend no longer needs separate calls to
++// /enroll/status and per-video progress endpoints for Course init.
+ const getCourseById = async (req, res) => {
+   try {
+     const { id } = req.params;
+-    
++    const userId = req.user.id;
++
++    // Single Prisma call: videos + this user's progress per video + this user's
++    // enrollment (if any) are all fetched via filtered relation includes, so no
++    // additional per-video or per-user round trips are needed (no N+1).
+     const course = await prisma.course.findUnique({
+       where: { id: parseInt(id) },
+       include: {
+         teacher: { select: { id: true, name: true, email: true } },
+         videos: {
+-          select: { id: true, title: true, url: true, thumbnail: true, duration: true }
++          orderBy: { position: 'asc' },
++          select: {
++            id: true,
++            title: true,
++            url: true,
++            thumbnail: true,
++            duration: true,
++            position: true,
++            // Scoped to the authenticated user only
++            videoProgress: {
++              where: { userId },
++              select: { completed: true, watchedAt: true }
++            }
++          }
+         },
++        // Scoped to the authenticated user only — never expose other users' enrollments
+         enrollments: {
+-          select: { id: true, userId: true, createdAt: true }
++          where: { userId }
+         }
+       }
+     });
+@@ -71,20 +93,39 @@ const getCourseById = async (req, res) => {
+     }
+ 
+     const baseUrl = `${req.protocol}://${req.get('host')}`;
+-    
++
+     if (course.thumbnail && !course.thumbnail.startsWith('http')) {
+       course.thumbnail = `${baseUrl}/${course.thumbnail}`;
+     }
+-    
+-    if (course.videos) {
+-      course.videos = course.videos.map(video => ({
+-        ...video,
+-        url: video.url && !video.url.startsWith('http') ? `${baseUrl}/${video.url}` : video.url,
+-        thumbnail: video.thumbnail && !video.thumbnail.startsWith('http') ? `${baseUrl}/${video.thumbnail}` : video.thumbnail
+-      }));
+-    }
+ 
+-    res.json({ success: true, data: course });
++    // Derive videos + progress from the same fetched relation (no extra queries)
++    const videos = course.videos.map(({ videoProgress, ...video }) => ({
++      ...video,
++      url: video.url && !video.url.startsWith('http') ? `${baseUrl}/${video.url}` : video.url,
++      thumbnail: video.thumbnail && !video.thumbnail.startsWith('http') ? `${baseUrl}/${video.thumbnail}` : video.thumbnail
++    }));
++
++    // Existing "no progress record" representation (see videoProgressController):
++    // completed: false, watchedAt: null
++    const progress = course.videos.map(video => ({
++      videoId: video.id,
++      completed: video.videoProgress[0] ? video.videoProgress[0].completed : false,
++      watchedAt: video.videoProgress[0] ? video.videoProgress[0].watchedAt : null
++    }));
++
++    const enrollment = course.enrollments[0] || null;
++
++    const { videos: _rawVideos, enrollments: _rawEnrollments, ...courseData } = course;
++
++    res.json({
++      success: true,
++      data: {
++        course: courseData,
++        videos,
++        enrollment,
++        progress
++      }
++    });
+   } catch (error) {
+     console.error('Error fetching course:', error);
+     res.status(500).json({ success: false, error: 'Failed to fetch course' });
+-- 
+2.43.0
+
+
+From 64de67646380775e0d2de3ca33b923291b7b5a0f Mon Sep 17 00:00:00 2001
+From: Claude <claude@anthropic.com>
+Date: Thu, 13 Aug 2026 00:23:25 +0000
+Subject: [PATCH 2/2] docs: add API doc for the aggregated GET /courses/:id
+ response
+
+Documents the new response contract (course/videos/enrollment/progress),
+the enrollment-leak fix, the 'empty progress' representation reused from
+videoProgressController, and a migration note for frontend call sites
+that previously hit /enroll/status and /video-progress/course/:courseId
+separately.
+---
+ docs/COURSE_AGGREGATE_ENDPOINT.md | 147 ++++++++++++++++++++++++++++++
+ 1 file changed, 147 insertions(+)
+ create mode 100644 docs/COURSE_AGGREGATE_ENDPOINT.md
+
+diff --git a/docs/COURSE_AGGREGATE_ENDPOINT.md b/docs/COURSE_AGGREGATE_ENDPOINT.md
+new file mode 100644
+index 0000000..855a0ba
+--- /dev/null
++++ b/docs/COURSE_AGGREGATE_ENDPOINT.md
+@@ -0,0 +1,147 @@
++# GET /courses/:id — Aggregated Course Page Response
++
++## Summary
++
++`GET /courses/:id` now returns everything the Course page needs in a single
++response: the course, its videos, the authenticated user's enrollment (if
++any), and that user's video-progress records (scoped to this course).
++
++Frontend no longer needs to separately call enrollment-status or per-video
++progress endpoints when initializing the Course page.
++
++- **Route:** unchanged — still `GET /courses/:id`
++- **Auth:** unchanged — `authenticateToken` only (same as before; course
++  viewing has never been enrollment-gated, only video streaming is)
++- **Envelope:** unchanged — `{ success, data }` / `{ success: false, error }`
++- **Excluded:** quizzes, assignments, and any other unrelated resource
++
++## Authentication
++
++**Required.** Send the access token via the `accessToken`/`token` cookie or
++an `Authorization: Bearer <token>` header, per existing auth conventions.
++
++## Request
++
++```
++GET /courses/:id
++```
++
++| Param | Type   | Description        |
++|-------|--------|---------------------|
++| `id`  | number | Course ID (path)   |
++
++## Response — 200 OK
++
++```json
++{
++  "success": true,
++  "data": {
++    "course": {
++      "id": 1,
++      "title": "Introduction to JavaScript",
++      "description": "Learn the basics of JavaScript programming",
++      "price": 49.99,
++      "thumbnail": "https://api.example.com/uploads/thumbnails/js-intro.jpg",
++      "isYoutube": false,
++      "youtubePlaylistId": null,
++      "teacherId": 4,
++      "teacher": { "id": 4, "name": "Mona Youssef", "email": "mona@example.com" },
++      "createdAt": "2023-01-15T12:00:00.000Z",
++      "category": "Programming",
++      "grade": "THIRD_SECONDARY"
++    },
++    "videos": [
++      {
++        "id": 10,
++        "title": "Variables and Data Types",
++        "url": "https://api.example.com/uploads/videos/v1.mp4",
++        "thumbnail": "https://api.example.com/uploads/thumbnails/v1.jpg",
++        "duration": 1200,
++        "position": 1
++      },
++      {
++        "id": 11,
++        "title": "Functions and Scope",
++        "url": "https://api.example.com/uploads/videos/v2.mp4",
++        "thumbnail": "https://api.example.com/uploads/thumbnails/v2.jpg",
++        "duration": 1500,
++        "position": 2
++      }
++    ],
++    "enrollment": {
++      "id": 77,
++      "userId": 42,
++      "courseId": 1,
++      "isPaid": true,
++      "paymentDate": "2023-02-01T09:00:00.000Z",
++      "progress": 50,
++      "startedAt": "2023-02-01T09:00:00.000Z",
++      "completedAt": null,
++      "isCompleted": false,
++      "lastAccess": "2023-06-10T18:22:00.000Z",
++      "createdAt": "2023-02-01T09:00:00.000Z"
++    },
++    "progress": [
++      { "videoId": 10, "completed": true, "watchedAt": "2023-06-01T10:00:00.000Z" },
++      { "videoId": 11, "completed": false, "watchedAt": null }
++    ]
++  }
++}
++```
++
++### Field notes
++
++- **`course`** — same fields as before, minus the `videos` and `enrollments`
++  arrays that used to be nested inside it (those are now their own top-level
++  keys below).
++- **`videos`** — the course's videos, ordered by `position` ascending (same
++  field/convention already used by `nextVideoController` and
++  `sequentialAccess`). `url`/`thumbnail` are absolutized the same way as
++  before.
++- **`enrollment`** — the **authenticated user's own** enrollment row for this
++  course, or `null` if they aren't enrolled. Resolved from the JWT (`req.user.id`)
++  only — never from a client-supplied user ID.
++  - ⚠️ **Behavior change:** previously this endpoint returned an array of
++    *every* user's enrollment (`id`, `userId`, `createdAt`) for the course to
++    anyone who could view the course. That was a data leak and has been
++    fixed — `enrollment` is now a single object (or `null`), scoped to the
++    caller.
++- **`progress`** — one entry per video in the course, for the authenticated
++  user only. A video the user hasn't started has no `VideoProgress` row, so
++  it's represented as `{ completed: false, watchedAt: null }` — the same
++  "empty" shape already used by `videoProgressController`'s
++  `checkVideoCompletion`/`getCourseVideoProgress`, not a new convention.
++
++## Error responses
++
++Unchanged from before:
++
++| Status | Condition                                  |
++|--------|---------------------------------------------|
++| 401    | No/invalid/expired token                    |
++| 404    | `{ "success": false, "error": "Course not found" }` |
++| 500    | `{ "success": false, "error": "Failed to fetch course" }` |
++
++Non-enrolled users are **not** blocked from viewing a course (no change here)
++— they simply get `enrollment: null` and `progress` entries all showing
++`completed: false`.
++
++## Migrating existing frontend code
++
++Old pattern (multiple requests):
++
++```
++GET /courses/:id                 → course (with nested videos + all enrollments)
++GET /enroll/status (body: {courseId}) → this user's enrollment
++GET /video-progress/course/:courseId  → this user's progress
++```
++
++New pattern (one request):
++
++```
++GET /courses/:id → { course, videos, enrollment, progress }
++```
++
++The standalone `/enroll/*` and `/video-progress/*` endpoints still exist and
++work as before (untouched) — the Course page just doesn't need to call them
++separately anymore for initial load.
+-- 
+2.43.0
+

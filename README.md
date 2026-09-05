@@ -1,148 +1,133 @@
 # E-Learning Platform
 
-A comprehensive e-learning platform with course management, video streaming, user progress tracking, and YouTube integration.
+Backend API for an e-learning platform built for Egyptian secondary school students. Courses contain streaming videos (Bunny.net Stream), SurveyJS quizzes, and assignments. Students progress sequentially through course content; admins manage everything.
+
+**Stack**: Express, MySQL 8.0 (Prisma ORM), Bunny.net Stream, JWT cookies, Busboy.
+**Port**: 3005
 
 ## Features
 
-- **User Authentication**: Secure login, registration, and password reset functionality
-- **Role-Based Access Control**: Different permissions for students, teachers, and administrators
-- **Course Management**: Create, update, and delete courses with detailed information
-- **Video Content**: Upload videos or integrate with YouTube playlists
-- **Payment System**: Process payments for course enrollment
-- **Progress Tracking**: Monitor student progress through courses and track video completion
-- **Quiz System**: Create and manage quizzes for lectures and final exams with automatic grading
-- **Assignment System**: Create and grade assignments for each video with file submission support
-- **Sequential Learning**: Enforces structured learning path where students must complete prerequisites
-  - Requires completion of current video before accessing the next
-  - Mandatory quiz completion with passing score before proceeding
-  - Required assignment submission and approval before moving to next video
-  - 'Next Lecture' feature guides students through the course sequence
-- **Search Functionality**: Advanced search with filtering options
-- **Responsive Design**: Works on desktop and mobile devices
+- **JWT cookie auth** — httpOnly `accessToken`/`refreshToken` cookies with refresh-token rotation
+- **Role-based access** — `ADMIN` and `STUDENT` roles
+- **Course management** — create, update, delete courses (per Egyptian secondary grade)
+- **Bunny.net Stream video pipeline** — binary upload (streamed, no temp files), encoding status webhooks, signed embed playback, background reconciliation of stuck videos
+- **Dual video systems** — modern `BunnyVideo` (quizzes + progress + sequential gate) and legacy `Video` (assignments), both supported by the sequential gate
+- **Quiz system (SurveyJS)** — MCQs auto-graded at submit, essay grading by admin, time limits, max retakes (default 3), best graded score counts
+- **Assignment system** — MCQ + text/file submissions for legacy videos, admin grading with feedback
+- **Sequential learning** — students must finish a video (and quiz pass if present, or assignment if present) before the next unlocks; `evaluateGate()` in `src/services/quizService.js` is the single source of truth
+- **Search** — courses filterable by category and grade
+- **Background jobs** — 10-minute reconciliation of Bunny videos stuck in `PROCESSING`
 
 ## Getting Started
 
 ### Prerequisites
 
-- Node.js (v14 or higher)
-- MySQL database
-- YouTube API key (for YouTube integration)
-
-### Required Packages
-
-The following packages are required for the project:
-
-```bash
-# Core packages
-npm install express prisma @prisma/client jsonwebtoken bcrypt
-
-# Middleware and utilities
-npm install cors dotenv multer morgan cookie-parser
-
-# Validation
-npm install zod
-```
+- Node.js 18+
+- MySQL 8.0
 
 ### Installation
 
-1. Clone the repository
-   ```bash
-   git clone https://github.com/yourusername/e-learning-platform.git
-   cd e-learning-platform
-   ```
+```bash
+npm install
+cp .env.example .env
+```
 
-2. Install dependencies
-   ```bash
-   npm install
-   ```
+Fill in the `.env` file (see below). This project uses **CommonJS** and **dotenv**.
 
-3. Set up environment variables
-   ```bash
-   cp .env.example .env
-   ```
-   Edit the `.env` file with your database credentials and other configuration options.
+### Run database migrations
 
-4. Run database migrations
-   ```bash
-   npx prisma migrate dev --name "add_quiz_and_video_progress"
-   ```
-   
-   This will create the necessary database tables for:
-   - VideoProgress: Tracks which videos a user has completed
-   - Quiz: Stores quiz metadata (title, description, passing score)
-   - Question: Stores individual quiz questions with options and correct answers
-   - Answer: Records user responses to quiz questions
+```bash
+npm run db:setup
+```
 
-5. Start the server
-   ```bash
-   npm start
-   ```
-   For development:
-   ```bash
-   npm run dev
-   ```
+Equivalent to `prisma migrate deploy && prisma generate`. During development you can also use `npx prisma migrate dev --name <name>` to create and apply a new migration, and `npx prisma studio` to browse the database.
+
+### Start the server
+
+```bash
+npm run dev      # nodemon, watches app.js
+```
+
+There is **no `npm start`** script defined — use `node app.js` or `npm run dev`.
+
+### Environment variables
+
+| Variable | Purpose |
+|----------|---------|
+| `DATABASE_URL` | Prisma/MySQL connection string |
+| `FRONTEND_URL` | Allowed CORS origin |
+| `JWTSECRET` / `JWT_EXPIRY` | Access-token signing (default 1h) |
+| `REFRESH_TOKEN_SECRET` / `REFRESH_TOKEN_EXPIRY` | Refresh-token signing (default 7d) |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | Auto-created admin on startup (via `src/config/setupAdmin.js`) |
+| `BUNNY_STREAM_LIBRARY_ID` | Numeric Bunny library ID |
+| `BUNNY_STREAM_API_KEY` | Full-access Bunny API key (upload/delete) |
+| `BUNNY_STREAM_READ_ONLY_API_KEY` | Read-only key; also the webhook signing secret |
+| `BUNNY_STREAM_TOKEN_KEY` | Bunny embed token-authentication key |
+| `BUNNY_STREAM_TOKEN_TTL_SECONDS` | Playback token TTL (default 21600 = 6h) |
+| `BUNNY_VIDEO_MAX_BYTES` | Max upload size (default 5GB) |
+
+All critical env vars fail fast at startup if missing (`src/config/env.js`).
 
 ## Admin Access
 
-Administrators have special privileges in the platform:
+The default admin is auto-created on startup from `ADMIN_EMAIL`/`ADMIN_PASSWORD`. Admins:
 
-1. **Auto-enrollment in all courses**: Admins are automatically given access to all course content without requiring explicit enrollment.
+- Bypass the sequential video gate and enrollment checks
+- Can create/manage courses, videos, quizzes, assignments, and users
+- Can grant quiz-gate exemptions via `GateExemption`
 
-2. **Course management**: Only admins can create, edit, and delete courses and videos.
+## Database
 
-### Default Admin Account
+Single Prisma schema at `prisma/schema.prisma` (MySQL, `Autoincrement()` IDs). Key models:
 
-A default administrator account is automatically created when the application starts:
+- `User` (role ADMIN/STUDENT, grade is required — `FIRST_SECONDARY`/`SECOND_SECONDARY`/`THIRD_SECONDARY`)
+- `Course` (per-grade)
+- `Video` (legacy: URL reference, assignments) and `BunnyVideo` (Bunny Stream, `position` for ordering, 1:1 quiz)
+- `VideoProgress` / `BunnyVideoProgress`
+- `Quiz` / `QuizAttempt` (SurveyJS)
+- `GateExemption`
+- `Assignment` / `AssignmentQuestion` / `AssignmentAnswer` / `Submission`
 
-- **Email**: admin@elearning.com
-- **Password**: admin123
-- **Role**: ADMIN
-
-This admin account is used to create and manage all courses on the platform.
-
-## Enrollment and Payment Management
-
-The platform includes scripts to manually manage enrollment and payment status:
-
-### Mark Enrollment as Paid
-
-To manually mark a user enrollment as paid:
+To apply schema changes:
 
 ```bash
-npm run script:mark-paid -- --userId=<userId> --courseId=<courseId>
+npx prisma migrate dev --name <name>
+npx prisma migrate deploy    # production
+npx prisma generate
 ```
 
-or:
+## API
 
-```bash
-npm run script:mark-paid -- --enrollmentId=<enrollmentId>
-```
+Registered route mount points in `app.js`:
 
-### Auto-Enroll Admins in All Courses
+- `/auth` — login, register, refresh
+- `/courses` — course CRUD, `GET /courses/:id/bunny-videos`, `PUT /courses/:id/reorder`
+- `/videos` — legacy video CRUD + `/stream`, Bunny upload/playback/delete
+- `/quizzes` — meta, start, save, submit, result, admin upsert/grade
+- `/assignments` — assignment CRUD + submissions
+- `/progress` — video progress (legacy + Bunny)
+- `/enrollments`, `/payments`, `/users`, `/search`
+- `/webhooks/bunny/stream` — Bunny status webhook (HMAC-verified, mounted **before** `express.json()`)
 
-To automatically enroll all admin users in all courses:
+Response envelope for newer endpoints: `{ success: true, data }`. Legacy endpoints return raw objects.
 
-```bash
-npm run script:enroll-admins
-```
+## Reconcile Job
 
-Optional flags:
-- `--markAsPaid=true|false` (default: true) - Mark all enrollments as paid
-- `--force=true|false` (default: false) - Skip confirmation prompt
+`src/jobs/reconcileStaleVideos.js` polls Bunny every 10 minutes and marks videos stuck in `PROCESSING` longer than 30 minutes as `FAILED` so they can be re-uploaded.
 
-## YouTube Integration
+## Scripts
 
-The platform supports importing YouTube playlists as courses:
+- `npm run upload:course` — `node scripts/uploadCourseFolder.js`
+- `scripts/markEnrollmentAsPaid.js`, `scripts/enrollAdminsInAllCourses.js`, `scripts/checkDbTables.js`, `scripts/testQuizFlow.js`, `scripts/testQuizLogic.js`, `scripts/uploadDemoVideos.js`, `scripts/testBunnyIntegration.js`
 
-1. Ensure you have a valid YouTube API key in your `.env` file
-2. Use the admin interface to import a playlist by its ID
-3. Set a price for the course (optional)
-4. The platform will automatically import all videos from the playlist
+## Key Conventions
 
-## API Documentation
-
-For detailed information about available endpoints, request parameters, and response formats, see [API Documentation](API-DOCUMENTATION.md).
+- **CommonJS** modules (`require`/`module.exports`)
+- **Error handling** — Bunny service layer throws `AppError` (`src/utils/AppError.js`) → global handler returns `{ success: false, error, code }`; quiz service uses ad-hoc errors with `statusCode`; legacy routes use raw `res.status().json()`
+- **Bunny HTTP calls** go only through `src/integrations/bunny/bunnyStreamClient.js`
+- **Sequential gate** — `quizService.evaluateGate()` is the single source of truth, works for both `Video` and `BunnyVideo`
+- **Payments disabled** — enrollments auto-mark as paid; the payment controller returns 403 in production
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the MIT License — see the LICENSE file for details.

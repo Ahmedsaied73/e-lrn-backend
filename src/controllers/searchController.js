@@ -38,8 +38,8 @@ const searchContent = async (req, res) => {
     if (query) {
       courseWhereClause.AND.push({
         OR: [
-          { title: { contains: query, mode: 'insensitive' } },
-          { description: { contains: query, mode: 'insensitive' } }
+          { title: { contains: query } },
+          { description: { contains: query } }
         ]
       });
     }
@@ -145,8 +145,8 @@ const searchContent = async (req, res) => {
       // For videos, we need to join with courses to apply the same filters
       const videoWhereClause = {
         OR: [
-          { title: { contains: query, mode: 'insensitive' } },
-          { description: { contains: query, mode: 'insensitive' } }
+          { title: { contains: query } },
+          { description: { contains: query } }
         ],
         course: {}
       };
@@ -267,7 +267,6 @@ const getTrendingCourses = async (req, res) => {
       thumbnail: course.thumbnail && !course.thumbnail.startsWith('http') 
         ? `${baseUrl}/${course.thumbnail}` 
         : course.thumbnail,
-      isYoutube: course.isYoutube,
       teacherId: course.teacherId,
       teacher: course.teacher,
       enrollmentCount: course._count.enrollments,
@@ -351,7 +350,6 @@ const getRecommendedCourses = async (req, res) => {
       thumbnail: course.thumbnail && !course.thumbnail.startsWith('http') 
         ? `${baseUrl}/${course.thumbnail}` 
         : course.thumbnail,
-      isYoutube: course.isYoutube,
       teacherId: course.teacherId,
       teacher: course.teacher,
       videoCount: course._count.videos

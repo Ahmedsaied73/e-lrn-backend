@@ -1,924 +1,727 @@
+﻿'use strict';
+
+/**
+ * quizController.js
+ * Thin HTTP adapters for Quiz endpoints.
+ * Handles request parsing, authentication context, calls quizService, and formats responses.
+ */
+
 const prisma = require('../config/db');
-const { performance } = require('perf_hooks');
+const quizService = require('../services/quizService');
+const { STATUS } = require('../config/quizConfig');
 
-// Logger has been moved to src/middlewares/logger.js
+function parseInteger(value) {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+// ─── Student Endpoints ────────────────────────────────────────────────────────
 
 /**
- * Get all quiz results for the authenticated user
- * @param {Object} req - Express request object with authenticated user
- * @param {Object} res - Express response object
+ * GET /quizzes/videos/:videoId/meta
+ * Returns metadata driving the "بدء الاختبار" button:
+ * exists, unlocked (video completed), attempted, passed, bestScore, timeLimitSec, inProgressAttempt
  */
-const getUserQuizResults = async (req, res) => {
+async function getQuizMeta(req, res) {
   try {
-    // Verify user authentication
-    if (!req.user || !req.user.id) {
-      return res.status(401).json({
-        error: 'Unauthorized - User not authenticated'
-      });
-    }
-
+    const videoId = parseInteger(req.params.videoId);
     const userId = req.user.id;
-    if (isNaN(userId)) {
-      return res.status(400).json({
-        error: 'Invalid user ID format'
-      });
+    const userRole = req.user.role;
+
+    if (videoId === null || videoId <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid video ID' });
     }
 
-    // Get all answers submitted by this user, grouped by quiz
-    const userAnswers = await prisma.answer.findMany({
-      where: {
-        userId: userId
-      },
+    const video = await prisma.bunnyVideo.findUnique({
+      where: { id: videoId },
       include: {
-        question: {
-          include: {
-            quiz: {
-              include: {
-                course: {
-                  select: {
-                    id: true,
-                    title: true
-                  }
-                },
-                video: {
-                  select: {
-                    id: true,
-                    title: true,
-                    courseId: true
-                  }
-                }
-              }
-            }
-          }
-        }
+        quiz: true,
+        course: { select: { id: true } },
       },
-      orderBy: {
-        submittedAt: 'desc'
-      }
     });
 
-    if (!userAnswers || userAnswers.length === 0) {
-      return res.status(404).json({
-        message: 'No quiz results found',
-        count: 0,
-        results: []
-    });
+    if (!video) {
+      return res.status(404).json({ success: false, error: 'Video not found' });
     }
 
-    // Group answers by quiz
-    const quizResults = {};
-    
-    for (const answer of userAnswers) {
-      const quizId = answer.question.quizId;
-      
-      if (!quizResults[quizId]) {
-        // Initialize quiz result object
-        const quiz = answer.question.quiz;
-        quizResults[quizId] = {
-          quizId: quizId,
-          title: quiz.title,
-          description: quiz.description,
-          isFinal: quiz.isFinal,
-          passingScore: quiz.passingScore,
-          courseId: quiz.courseId || (quiz.video ? quiz.video.courseId : null),
-          courseTitle: quiz.course ? quiz.course.title : (quiz.video ? quiz.video.title : null),
-          videoId: quiz.videoId,
-          videoTitle: quiz.video ? quiz.video.title : null,
-          submittedAt: answer.submittedAt,
-          answers: [],
-          correctAnswers: 0,
-          totalQuestions: 0,
-          earnedPoints: 0,
-          totalPoints: 0,
-          score: 0,
-          passed: false
-        };
-      }
-      
-      // Add answer to the quiz result
-      quizResults[quizId].answers.push({
-        questionId: answer.questionId,
-        questionText: answer.question.text,
-        selectedOption: answer.selectedOption,
-        correctOption: answer.question.correctOption,
-        isCorrect: answer.isCorrect,
-        points: answer.question.points,
-        explanation: answer.question.explanation
+    // Check enrollment if student
+    if (userRole !== 'ADMIN') {
+      const enrollment = await prisma.enrollment.findFirst({
+        where: { userId, courseId: video.courseId },
       });
-      
-      // Update statistics
-      if (answer.isCorrect) {
-        quizResults[quizId].correctAnswers++;
-        quizResults[quizId].earnedPoints += answer.question.points;
+      if (!enrollment) {
+        return res.status(403).json({ success: false, error: 'You are not enrolled in this course' });
       }
-      quizResults[quizId].totalQuestions++;
-      quizResults[quizId].totalPoints += answer.question.points;
-    }
-    
-    // Calculate scores and determine pass/fail status
-    for (const quizId in quizResults) {
-      const result = quizResults[quizId];
-      result.score = result.totalPoints > 0 ? (result.earnedPoints / result.totalPoints) * 100 : 0;
-      result.passed = result.score >= result.passingScore;
     }
 
-    // Convert to array and sort by submission date (newest first)
-    const resultsArray = Object.values(quizResults).sort((a, b) => 
-      new Date(b.submittedAt) - new Date(a.submittedAt)
-    );
-
-    res.json({
-      message: 'Quiz results retrieved successfully',
-      count: resultsArray.length,
-      results: resultsArray
-    });
-  } catch (error) {
-    console.error('Error getting user quiz results:', error);
-    res.status(500).json({ error: 'Failed to get quiz results' });
-  }
-};
-
-/**
- * Create a new quiz (admin only)
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- */
-const createQuiz = async (req, res) => {
-  try {
-    const { 
-      title, 
-      description, 
-      isFinal, 
-      courseId, 
-      videoId, 
-      passingScore,
-      questions 
-    } = req.body;
-
-    // Validate required fields
-    if (!title) {
-      return res.status(400).json({ error: 'Quiz title is required' });
-    }
-
-    if (!questions || !Array.isArray(questions) || questions.length === 0) {
-      return res.status(400).json({ error: 'At least one question is required' });
-    }
-
-    // A quiz must be associated with either a course (final exam) or a video (lecture quiz)
-    if (isFinal && !courseId) {
-      return res.status(400).json({ error: 'Course ID is required for final exams' });
-    }
-
-    if (!isFinal && !videoId) {
-      return res.status(400).json({ error: 'Video ID is required for lecture quizzes' });
-    }
-
-    // Prepare validation queries
-    const validationPromises = [];
-    
-    if (courseId) {
-      validationPromises.push(
-        prisma.course.findUnique({
-          where: { id: parseInt(courseId) },
-          select: { id: true } // Only select ID for faster query
-        }).then(course => {
-          if (!course) throw new Error('Course not found');
-          return true;
-        })
-      );
-    }
-    
-    if (videoId) {
-      validationPromises.push(
-        prisma.video.findUnique({
-          where: { id: parseInt(videoId) },
-          select: { id: true } // Only select ID for faster query
-        }).then(video => {
-          if (!video) throw new Error('Video not found');
-          return true;
-        })
-      );
-    }
-    
-    // Run validation queries in parallel
-    await Promise.all(validationPromises);
-
-    // Validate all questions before transaction
-    questions.forEach((question, index) => {
-      if (!question.text || !question.options || !Array.isArray(question.options)) {
-        throw new Error(`Question at index ${index} must have text and an array of options`);
-      }
-
-      if (question.correctOption === undefined || question.correctOption < 0 || 
-          question.correctOption >= question.options.length) {
-        throw new Error(`Question at index ${index} must have a valid correctOption index`);
-      }
-    });
-
-    // Create the quiz using a transaction with optimized batch operations
-    const quiz = await prisma.$transaction(async (prisma) => {
-      // Create the quiz
-      const newQuiz = await prisma.quiz.create({
+    if (!video.quiz) {
+      return res.status(200).json({
+        success: true,
         data: {
-          title,
-          description,
-          isFinal: isFinal || false,
-          passingScore: passingScore ? parseFloat(passingScore) : 70.0,
-          courseId: courseId ? parseInt(courseId) : null,
-          videoId: videoId ? parseInt(videoId) : null
-        }
-      });
-
-      // Prepare question data for batch creation
-      const questionData = questions.map(question => ({
-        quizId: newQuiz.id,
-        text: question.text,
-        options: question.options,
-        correctOption: question.correctOption,
-        explanation: question.explanation || null,
-        points: question.points || 1
-      }));
-
-      // Create all questions in a single batch operation
-      await prisma.question.createMany({
-        data: questionData
-      });
-
-      return newQuiz;
-    });
-
-    // Fetch the created quiz with its questions
-    const quizWithQuestions = await prisma.quiz.findUnique({
-      where: { id: quiz.id },
-      include: {
-        questions: {
-          select: {
-            id: true,
-            text: true,
-            options: true,
-            points: true,
-            // Don't include correctOption in the response
-          }
-        }
-      }
-    });
-
-    res.status(201).json({
-      message: 'Quiz created successfully',
-      quiz: quizWithQuestions
-    });
-  } catch (error) {
-    console.error('Error creating quiz:', error);
-    res.status(500).json({ error: 'Failed to create quiz', details: error.message });
-  }
-};
-
-/**
- * Get a quiz by ID (without correct answers)
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- */
-const getQuiz = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const userId = req.user.id;
-
-    // Fetch the quiz
-    const quiz = await prisma.quiz.findUnique({
-      where: { id: parseInt(id) },
-      include: {
-        questions: {
-          select: {
-            id: true,
-            text: true,
-            options: true,
-            points: true
-            // Don't include correctOption in the response
-          }
+          exists: false,
+          videoId,
+          videoTitle: video.title,
         },
-        course: {
-          select: {
-            id: true,
-            title: true
-          }
-        },
-        video: {
-          select: {
-            id: true,
-            title: true,
-            courseId: true
-          }
-        }
-      }
-    });
-
-    if (!quiz) {
-      return res.status(404).json({ error: 'Quiz not found' });
-    }
-
-    // For lecture quizzes, verify the user has completed the video
-    if (!quiz.isFinal && quiz.videoId) {
-      // Get the user's role
-      const user = await prisma.user.findUnique({
-        where: { id: userId },
-        select: { role: true }
-      });
-
-      const isAdmin = user && user.role === 'ADMIN';
-
-      if (!isAdmin) {
-        // Check if the user has completed the video
-        const videoProgress = await prisma.videoProgress.findUnique({
-          where: {
-            userId_videoId: {
-              userId: userId,
-              videoId: quiz.videoId
-            }
-          }
-        });
-
-        if (!videoProgress || !videoProgress.completed) {
-          return res.status(403).json({
-            error: 'You must complete the video before taking the quiz',
-            videoId: quiz.videoId
-          });
-        }
-      }
-    }
-
-    // For final exams, verify the user has completed all videos in the course
-    if (quiz.isFinal && quiz.courseId) {
-      // Get the user's role
-      const user = await prisma.user.findUnique({
-        where: { id: userId },
-        select: { role: true }
-      });
-
-      const isAdmin = user && user.role === 'ADMIN';
-
-      if (!isAdmin) {
-        // Get all videos in the course
-        const courseVideos = await prisma.video.findMany({
-          where: { courseId: quiz.courseId },
-          select: { id: true }
-        });
-
-        const videoIds = courseVideos.map(v => v.id);
-
-        // Count completed videos for this user in this course
-        const completedVideosCount = await prisma.videoProgress.count({
-          where: {
-            userId: userId,
-            videoId: { in: videoIds },
-            completed: true
-          }
-        });
-
-        // If the user hasn't completed all videos, don't allow access to the final exam
-        if (completedVideosCount < videoIds.length) {
-          return res.status(403).json({
-            error: 'You must complete all videos before taking the final exam',
-            completedVideos: completedVideosCount,
-            totalVideos: videoIds.length
-          });
-        }
-      }
-    }
-
-    // Check if the user has already taken this quiz
-    const userAnswers = await prisma.answer.findMany({
-      where: {
-        userId: userId,
-        question: {
-          quizId: parseInt(id)
-        }
-      },
-      include: {
-        question: true
-      }
-    });
-
-    // If the user has already answered some questions, include that information
-    if (userAnswers.length > 0) {
-      // Calculate the score
-      const totalPoints = quiz.questions.reduce((sum, q) => sum + q.points, 0);
-      const earnedPoints = userAnswers.reduce((sum, a) => a.isCorrect ? sum + a.question.points : sum, 0);
-      const score = totalPoints > 0 ? (earnedPoints / totalPoints) * 100 : 0;
-
-      return res.json({
-        ...quiz,
-        alreadyTaken: true,
-        score: score,
-        passed: score >= quiz.passingScore
       });
     }
 
-    res.json(quiz);
-  } catch (error) {
-    console.error('Error fetching quiz:', error);
-    res.status(500).json({ error: 'Failed to fetch quiz' });
-  }
-};
+    const quiz = video.quiz;
 
-/**
- * Submit answers for a quiz
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- */
-const submitQuizAnswers = async (req, res) => {
-  try {
-    const { quizId, answers } = req.body;
-    const userId = req.user.id;
-
-    if (!quizId || !answers || !Array.isArray(answers)) {
-      return res.status(400).json({ error: 'Quiz ID and answers array are required' });
-    }
-
-    // Verify the quiz exists
-    const quiz = await prisma.quiz.findUnique({
-      where: { id: parseInt(quizId) },
-      include: {
-        questions: true,
-        course: true,
-        video: true
-      }
-    });
-
-    if (!quiz) {
-      return res.status(404).json({ error: 'Quiz not found' });
-    }
-
-    // Verify user is enrolled in the course
-    let courseId = quiz.courseId;
-    if (!courseId && quiz.video) {
-      courseId = quiz.video.courseId;
-    }
-
-    if (courseId) {
-      // Get the user's role
-      const user = await prisma.user.findUnique({
-        where: { id: userId },
-        select: { role: true }
+    // Check if video is completed (unlock signal for quiz)
+    let videoCompleted = true;
+    if (userRole !== 'ADMIN') {
+      const progress = await prisma.bunnyVideoProgress.findFirst({
+        where: { userId, bunnyVideoId: videoId, completed: true },
       });
-
-      const isAdmin = user && user.role === 'ADMIN';
-
-      if (!isAdmin) {
-        const enrollment = await prisma.enrollment.findFirst({
-          where: {
-            userId: userId,
-            courseId: courseId,
-            isPaid: true
-          }
-        });
-
-        if (!enrollment) {
-          return res.status(403).json({
-            error: 'You must be enrolled in this course to take quizzes'
-          });
-        }
-      }
+      videoCompleted = !!progress;
     }
 
-    // Check if the user has already taken this quiz
-    const existingAnswers = await prisma.answer.count({
-      where: {
-        userId: userId,
-        question: {
-          quizId: parseInt(quizId)
-        }
-      }
-    });
-
-    if (existingAnswers > 0) {
-      return res.status(400).json({ error: 'You have already taken this quiz' });
-    }
-
-    // Create a map of question IDs to their correct answers
-    const questionMap = {};
-    quiz.questions.forEach(q => {
-      questionMap[q.id] = {
-        correctOption: q.correctOption,
-        points: q.points
-      };
-    });
-
-    // Process and save each answer
-    const results = [];
-    let correctAnswers = 0;
-    let totalPoints = 0;
-    let earnedPoints = 0;
-
-    const answersData = [];
-
-    for (const answer of answers) {
-      if (!answer.questionId || answer.selectedOption === undefined) {
-        return res.status(400).json({
-          error: 'Each answer must include questionId and selectedOption'
-        });
-      }
-
-      const questionId = parseInt(answer.questionId);
-      const question = questionMap[questionId];
-
-      if (!question) {
-        return res.status(400).json({
-          error: `Question with ID ${questionId} is not part of this quiz`
-        });
-      }
-
-      const isCorrect = answer.selectedOption === question.correctOption;
-      if (isCorrect) {
-        correctAnswers++;
-        earnedPoints += question.points;
-      }
-      totalPoints += question.points;
-
-      answersData.push({
-        userId: userId,
-        questionId: questionId,
-        selectedOption: answer.selectedOption,
-        isCorrect: isCorrect
-      });
-
-      results.push({
-        questionId: questionId,
-        selectedOption: answer.selectedOption,
-        isCorrect: isCorrect
-      });
-    }
-
-    // Save all answers in one batch
-    await prisma.answer.createMany({
-      data: answersData
-    });
-
-    // Calculate the score
-    const score = totalPoints > 0 ? (earnedPoints / totalPoints) * 100 : 0;
-    const passed = score >= quiz.passingScore;
-
-    res.json({
-      message: 'Quiz answers submitted successfully',
-      quizId: parseInt(quizId),
-      correctAnswers,
-      totalQuestions: quiz.questions.length,
-      score,
-      passingScore: quiz.passingScore,
-      passed,
-      results
-    });
-  } catch (error) {
-    console.error('Error submitting quiz answers:', error);
-    res.status(500).json({ error: 'Failed to submit quiz answers' });
-  }
-};
-
-/**
- * Get quiz results for a user
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- */
-const getQuizResults = async (req, res) => {
-  try {
-    const userId = req.user.id;
-
-    // Get all answers submitted by this user, grouped by quiz
-    const userAnswers = await prisma.answer.findMany({
-      where: {
-        userId: userId
-      },
-      include: {
-        question: {
-          include: {
-            quiz: {
-              include: {
-                course: {
-                  select: {
-                    id: true,
-                    title: true
-                  }
-                },
-                video: {
-                  select: {
-                    id: true,
-                    title: true,
-                    courseId: true
-                  }
-                }
-              }
-            }
-          }
-        }
-      },
-      orderBy: {
-        submittedAt: 'desc'
-      }
-    });
-
-    if (!userAnswers || userAnswers.length === 0) {
-      return res.status(404).json({
-        message: 'No quiz results found',
-        count: 0,
-        results: []
-      });
-    }
-
-    // Group answers by quiz
-    const quizResults = {};
-    
-    for (const answer of userAnswers) {
-      const quizId = answer.question.quizId;
-      
-      if (!quizResults[quizId]) {
-        // Initialize quiz result object
-        const quiz = answer.question.quiz;
-        quizResults[quizId] = {
-          quizId: quizId,
-          title: quiz.title,
-          description: quiz.description,
-          isFinal: quiz.isFinal,
-          passingScore: quiz.passingScore,
-          courseId: quiz.courseId || (quiz.video ? quiz.video.courseId : null),
-          courseTitle: quiz.course ? quiz.course.title : (quiz.video ? quiz.video.title : null),
-          videoId: quiz.videoId,
-          videoTitle: quiz.video ? quiz.video.title : null,
-          submittedAt: answer.submittedAt,
-          answers: [],
-          correctAnswers: 0,
-          totalQuestions: 0,
-          earnedPoints: 0,
-          totalPoints: 0,
-          score: 0,
-          passed: false
-        };
-      }
-      
-      // Add answer to the quiz result
-      quizResults[quizId].answers.push({
-        questionId: answer.questionId,
-        questionText: answer.question.text,
-        selectedOption: answer.selectedOption,
-        correctOption: answer.question.correctOption,
-        isCorrect: answer.isCorrect,
-        points: answer.question.points,
-        explanation: answer.question.explanation
-      });
-      
-      // Update statistics
-      if (answer.isCorrect) {
-        quizResults[quizId].correctAnswers++;
-        quizResults[quizId].earnedPoints += answer.question.points;
-      }
-      quizResults[quizId].totalQuestions++;
-      quizResults[quizId].totalPoints += answer.question.points;
-    }
-    
-    // Calculate scores and determine pass/fail status
-    for (const quizId in quizResults) {
-      const result = quizResults[quizId];
-      result.score = result.totalPoints > 0 ? (result.earnedPoints / result.totalPoints) * 100 : 0;
-      result.passed = result.score >= result.passingScore;
-    }
-
-    // Filter only passed quizzes and sort by submission date (newest first)
-    const passedQuizzes = Object.values(quizResults)
-      .filter(result => result.passed)
-      .sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt));
-
-    res.json({
-      message: 'Passed quiz results retrieved successfully',
-      count: passedQuizzes.length,
-      results: passedQuizzes
-    });
-  } catch (error) {
-    console.error('Error getting quiz results:', error);
-    res.status(500).json({ error: 'Failed to get quiz results' });
-  }
-};
-
-/**
- * Get all quizzes for a course
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- */
-const getCourseQuizzes = async (req, res) => {
-  try {
-    const { courseId } = req.params;
-    const userId = req.user.id;
-
-    // Verify the course exists
-    const course = await prisma.course.findUnique({
-      where: { id: parseInt(courseId) }
-    });
-
-    if (!course) {
-      return res.status(404).json({ error: 'Course not found' });
-    }
-
-    // Get all quizzes for this course (both course-level and video-level)
-    const quizzes = await prisma.quiz.findMany({
-      where: {
-        OR: [
-          { courseId: parseInt(courseId) },
-          {
-            video: {
-              courseId: parseInt(courseId)
-            }
-          }
-        ]
-      },
-      include: {
-        video: {
-          select: {
-            id: true,
-            title: true
-          }
-        },
-        _count: {
-          select: { questions: true }
-        }
-      },
-      orderBy: [
-        { isFinal: 'desc' },
-        { createdAt: 'asc' }
-      ]
-    });
-
-    const quizIds = quizzes.map(q => q.id);
-    
-    // Fetch all answers for these quizzes for this user
-    const allUserAnswers = await prisma.answer.findMany({
-      where: {
-        userId: userId,
-        question: { quizId: { in: quizIds } }
-      },
-      include: { question: true }
-    });
-
-    // Group answers by quizId
-    const answersByQuiz = {};
-    for (const ans of allUserAnswers) {
-      const qId = ans.question.quizId;
-      if (!answersByQuiz[qId]) answersByQuiz[qId] = [];
-      answersByQuiz[qId].push(ans);
-    }
-
-    // Fetch all questions for quizzes the user has taken
-    const takenQuizIds = Object.keys(answersByQuiz).map(id => parseInt(id));
-    let questionsByQuiz = {};
-    if (takenQuizIds.length > 0) {
-      const allQuestions = await prisma.question.findMany({
-        where: { quizId: { in: takenQuizIds } }
-      });
-      for (const q of allQuestions) {
-        if (!questionsByQuiz[q.quizId]) questionsByQuiz[q.quizId] = [];
-        questionsByQuiz[q.quizId].push(q);
-      }
-    }
-
-    // For each quiz, check if the user has taken it
-    const quizzesWithStatus = quizzes.map(quiz => {
-      const userAnswers = answersByQuiz[quiz.id] || [];
-
-      let status = {
-        taken: userAnswers.length > 0,
-        score: null,
-        passed: null
-      };
-
-      if (userAnswers.length > 0) {
-        // Calculate the score
-        const questions = questionsByQuiz[quiz.id] || [];
-        
-        const totalPoints = questions.reduce((sum, q) => sum + q.points, 0);
-        const earnedPoints = userAnswers.reduce((sum, a) => a.isCorrect ? sum + a.question.points : sum, 0);
-        const score = totalPoints > 0 ? (earnedPoints / totalPoints) * 100 : 0;
-        
-        status.score = score;
-        status.passed = score >= quiz.passingScore;
-        status.submittedAt = userAnswers[0].submittedAt;
-      }
-
-      return {
-        id: quiz.id,
-        title: quiz.title,
-        description: quiz.description,
-        isFinal: quiz.isFinal,
-        passingScore: quiz.passingScore,
-        videoId: quiz.videoId,
-        videoTitle: quiz.video ? quiz.video.title : null,
-        questionCount: quiz._count.questions,
-        createdAt: quiz.createdAt,
-        status
-      };
-    });
-
-    res.json(quizzesWithStatus);
-  } catch (error) {
-    console.error('Error getting course quizzes:', error);
-    res.status(500).json({ error: 'Failed to get course quizzes' });
-  }
-};
-
-/**
- * Get status of a specific quiz for the current user
- * @param {Object} req - Express request object with authenticated user
- * @param {Object} res - Express response object
- */
-const getQuizStatus = async (req, res) => {
-  try {
-    const { quizId } = req.params;
-    const userId = req.user.id;
-
-    // Validate quizId
-    const parsedQuizId = parseInt(quizId, 10);
-    if (isNaN(parsedQuizId)) {
-      return res.status(400).json({ error: 'Invalid quiz ID format' });
-    }
-
-    // Verify the quiz exists
-    const quiz = await prisma.quiz.findUnique({
-      where: { id: parsedQuizId },
+    // Get all user attempts for this quiz
+    const attempts = await prisma.quizAttempt.findMany({
+      where: { userId, quizId: quiz.id },
+      orderBy: { attemptNumber: 'desc' },
       select: {
         id: true,
-        title: true,
-        description: true,
-        isFinal: true,
-        passingScore: true,
-        courseId: true,
-        videoId: true
+        attemptNumber: true,
+        status: true,
+        startedAt: true,
+        deadlineAt: true,
+        submittedAt: true,
+        scorePercent: true,
+        earnedPoints: true,
+        totalPoints: true,
+      },
+    });
+
+    const inProgressAttempt = attempts.find(a => a.status === STATUS.IN_PROGRESS) || null;
+    const gradedAttempts = attempts.filter(a => a.status === STATUS.GRADED);
+    const bestScore = gradedAttempts.length > 0
+      ? Math.max(...gradedAttempts.map(a => a.scorePercent || 0))
+      : null;
+    const passed = bestScore !== null && bestScore >= quiz.passingScore;
+
+    // Retake limiter — EXPIRED attempts (network drops/timeouts) don't burn a retake
+    const maxAttempts = quiz.maxAttempts;
+    const attemptsUsed = attempts.filter(a => a.status !== STATUS.EXPIRED).length;
+    const atMaxAttempts = attemptsUsed >= maxAttempts;
+
+    // Question/points tallies for the intro card
+    const totalQuestions = quizService.countQuestions(quiz.surveyJson);
+    const { totalPoints } = quizService.computeTotalPoints(quiz.answerKey || {});
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        exists: true,
+        quizId: quiz.id,
+        videoId,
+        videoTitle: video.title,
+        title: quiz.title,
+        timeLimitSec: quiz.timeLimitSec,
+        passingScore: quiz.passingScore,
+        maxAttempts,
+        attemptsUsed,
+        atMaxAttempts,
+        unlocked: videoCompleted,
+        attempted: attempts.length > 0,
+        totalAttempts: attempts.length,
+        passed,
+        bestScore,
+        totalQuestions,
+        totalPoints,
+        inProgressAttempt: inProgressAttempt ? {
+          id: inProgressAttempt.id,
+          attemptNumber: inProgressAttempt.attemptNumber,
+          deadlineAt: inProgressAttempt.deadlineAt,
+        } : null,
+      },
+    });
+  } catch (error) {
+    console.error('[QuizController] getQuizMeta error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
+/**
+ * POST /quizzes/videos/:videoId/start
+ * Starts a new attempt or resumes an active IN_PROGRESS attempt.
+ * Returns sanitized surveyJson and deadlineAt.
+ */
+async function startQuiz(req, res) {
+  try {
+    const videoId = parseInteger(req.params.videoId);
+    const userId = req.user.id;
+    const userRole = req.user.role;
+
+    if (videoId === null || videoId <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid video ID' });
+    }
+
+    const video = await prisma.bunnyVideo.findUnique({
+      where: { id: videoId },
+      include: { quiz: true },
+    });
+
+    if (!video || !video.quiz) {
+      return res.status(404).json({ success: false, error: 'No quiz found for this video' });
+    }
+
+    // Check enrollment and video completion for students
+    if (userRole !== 'ADMIN') {
+      const enrollment = await prisma.enrollment.findFirst({
+        where: { userId, courseId: video.courseId },
+      });
+      if (!enrollment) {
+        return res.status(403).json({ success: false, error: 'You are not enrolled in this course' });
       }
+
+      const progress = await prisma.bunnyVideoProgress.findFirst({
+        where: { userId, bunnyVideoId: videoId, completed: true },
+      });
+      if (!progress) {
+        return res.status(403).json({ success: false, error: 'You must complete the video before taking the quiz' });
+      }
+    }
+
+const { attempt, quiz, resumed } = await quizService.startAttempt(userId, video.quiz.id, {
+      bypassPassedCheck: userRole === 'ADMIN',
+    });
+    const safeQuiz = quizService.sanitizeForStudent(quiz);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        attemptId: attempt.id,
+        attemptNumber: attempt.attemptNumber,
+        status: attempt.status,
+        startedAt: attempt.startedAt,
+        deadlineAt: attempt.deadlineAt,
+        resumed,
+        responses: resumed ? attempt.responses || null : null,
+        quiz: safeQuiz,
+      },
+    });
+  } catch (error) {
+    console.error('[QuizController] startQuiz error:', error);
+    const statusCode = error.statusCode || 500;
+    return res.status(statusCode).json({ success: false, error: error.message, code: error.code });
+  }
+}
+
+/**
+ * PATCH /quizzes/attempts/:id/save
+ * Saves responses for an in-progress owned attempt without grading it.
+ */
+async function saveQuizAttempt(req, res) {
+  try {
+    const attemptId = parseInteger(req.params.id);
+    const userId = req.user.id;
+    const { responses } = req.body || {};
+
+    if (attemptId === null || attemptId <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid attempt ID' });
+    }
+
+    if (!responses || typeof responses !== 'object' || Array.isArray(responses)) {
+      return res.status(400).json({ success: false, error: 'responses must be an object map of question responses' });
+    }
+
+    const saved = await quizService.saveAttempt(userId, attemptId, responses);
+    return res.status(200).json({
+      success: true,
+      data: { attemptId: saved.id, saved: true },
+    });
+  } catch (error) {
+    console.error('[QuizController] saveQuizAttempt error:', error);
+    const statusCode = error.statusCode || 500;
+    return res.status(statusCode).json({ success: false, error: error.message || 'Unable to save attempt' });
+  }
+}
+
+/**
+ * POST /quizzes/attempts/:id/submit
+ * Submits student responses for an attempt. Auto-grades MCQs and enforces deadlines.
+ */
+async function submitQuiz(req, res) {
+  try {
+    const attemptId = parseInteger(req.params.id);
+    const userId = req.user.id;
+    const { answers, autoSubmitted } = req.body;
+
+    if (attemptId === null || attemptId <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid attempt ID' });
+    }
+
+    if (!answers || typeof answers !== 'object' || Array.isArray(answers)) {
+      return res.status(400).json({ success: false, error: 'answers must be an object map of question responses' });
+    }
+
+    const result = await quizService.submitAttempt(userId, attemptId, answers, !!autoSubmitted);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        attemptId: result.attempt.id,
+        status: result.attempt.status,
+        earnedPoints: result.attempt.earnedPoints,
+        totalPoints: result.attempt.totalPoints,
+        scorePercent: result.attempt.scorePercent,
+        hasEssays: result.hasEssays,
+        perQuestion: result.perQuestion,
+      },
+    });
+  } catch (error) {
+    console.error('[QuizController] submitQuiz error:', error);
+    const statusCode = error.statusCode || 500;
+    return res.status(statusCode).json({ success: false, error: error.message });
+  }
+}
+
+/**
+ * GET /quizzes/attempts/:id/result
+ * Retrieves score breakdown, student answers, and model answers (post-submit only).
+ */
+async function getQuizResult(req, res) {
+  try {
+    const attemptId = parseInteger(req.params.id);
+    const userId = req.user.id;
+    const userRole = req.user.role;
+
+    if (attemptId === null || attemptId <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid attempt ID' });
+    }
+
+    const attempt = await prisma.quizAttempt.findUnique({
+      where: { id: attemptId },
+      include: {
+        quiz: true,
+        user: { select: { id: true, name: true, email: true } },
+      },
+    });
+
+    if (!attempt) {
+      return res.status(404).json({ success: false, error: 'Attempt not found' });
+    }
+
+    if (attempt.userId !== userId && userRole !== 'ADMIN') {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    if (attempt.status === STATUS.IN_PROGRESS) {
+      return res.status(400).json({ success: false, error: 'Quiz attempt is still in progress' });
+    }
+
+    const answerKey = attempt.quiz.answerKey || {};
+    const responses = attempt.responses || {};
+    const feedback = attempt.essayFeedback || {};
+
+    const questionsBreakdown = [];
+    for (const [qName, keyEntry] of Object.entries(answerKey)) {
+      const studentValue = responses[qName];
+      if (keyEntry.type === 'radiogroup') {
+        const isCorrect = studentValue !== undefined && String(studentValue) === String(keyEntry.correctValue);
+        questionsBreakdown.push({
+          name: qName,
+          type: 'radiogroup',
+          studentAnswer: studentValue ?? null,
+          correctAnswer: keyEntry.correctValue,
+          isCorrect,
+          earnedPoints: isCorrect ? keyEntry.points : 0,
+          maxPoints: keyEntry.points,
+        });
+      } else if (keyEntry.type === 'comment') {
+        const essayFb = feedback[qName] || null;
+        questionsBreakdown.push({
+          name: qName,
+          type: 'comment',
+          studentAnswer: studentValue ?? null,
+          modelAnswer: keyEntry.modelAnswer,
+          earnedPoints: essayFb ? essayFb.awarded : (attempt.status === STATUS.GRADED ? 0 : null),
+          maxPoints: keyEntry.points,
+          feedback: essayFb ? essayFb.feedback : null,
+          status: attempt.status === STATUS.GRADED ? 'GRADED' : 'PENDING_REVIEW',
+        });
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        attemptId: attempt.id,
+        attemptNumber: attempt.attemptNumber,
+        status: attempt.status,
+        startedAt: attempt.startedAt,
+        submittedAt: attempt.submittedAt,
+        autoSubmitted: attempt.autoSubmitted,
+        earnedPoints: attempt.earnedPoints,
+        totalPoints: attempt.totalPoints,
+        scorePercent: attempt.scorePercent,
+        passed: (attempt.scorePercent || 0) >= attempt.quiz.passingScore,
+        passingScore: attempt.quiz.passingScore,
+        questions: questionsBreakdown,
+      },
+    });
+  } catch (error) {
+    console.error('[QuizController] getQuizResult error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
+/**
+ * GET /quizzes/videos/:videoId/attempts
+ * Lists all attempts for the authenticated student for a specific video quiz.
+ */
+async function getStudentAttempts(req, res) {
+  try {
+    const videoId = parseInteger(req.params.videoId);
+    const userId = req.user.id;
+
+    if (videoId === null || videoId <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid video ID' });
+    }
+
+    const quiz = await prisma.quiz.findUnique({
+      where: { bunnyVideoId: videoId },
+      select: { id: true, title: true, passingScore: true },
     });
 
     if (!quiz) {
-      return res.status(404).json({ error: 'Quiz not found' });
+      return res.status(404).json({ success: false, error: 'Quiz not found' });
     }
 
-    // Get user's answers for this quiz
-    const userAnswers = await prisma.answer.findMany({
-      where: {
-        userId: userId,
-        question: {
-          quizId: parsedQuizId
-        }
+    const attempts = await prisma.quizAttempt.findMany({
+      where: { userId, quizId: quiz.id },
+      orderBy: { attemptNumber: 'desc' },
+      select: {
+        id: true,
+        attemptNumber: true,
+        status: true,
+        startedAt: true,
+        submittedAt: true,
+        scorePercent: true,
+        earnedPoints: true,
+        totalPoints: true,
+        autoSubmitted: true,
       },
-      include: {
-        question: true
-      },
-      orderBy: {
-        submittedAt: 'desc'
-      }
     });
 
-    // If user hasn't taken the quiz
-    if (userAnswers.length === 0) {
-      return res.json({
-        quizId: parsedQuizId,
+    return res.status(200).json({
+      success: true,
+      data: {
+        quizId: quiz.id,
         title: quiz.title,
-        taken: false,
-        status: 'NOT_ATTEMPTED',
-        message: 'User has not attempted this quiz yet'
+        passingScore: quiz.passingScore,
+        attempts,
+      },
+    });
+  } catch (error) {
+    console.error('[QuizController] getStudentAttempts error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
+// ─── Admin Endpoints ──────────────────────────────────────────────────────────
+
+/**
+ * POST /quizzes/videos/:videoId
+ * Upserts a quiz definition for a video.
+ * Body: { title, timeLimitSec?, passingScore?, maxAttempts?, surveyJson, answerKey }
+ */
+async function upsertQuiz(req, res) {
+  try {
+    const videoId = parseInteger(req.params.videoId);
+    const { title, timeLimitSec, passingScore, maxAttempts, surveyJson, answerKey: rawKey } = req.body || {};
+
+    if (videoId === null || videoId <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid video ID' });
+    }
+
+    if (!title || typeof title !== 'string' || !title.trim()) {
+      return res.status(400).json({ success: false, error: 'Title is required' });
+    }
+
+    const video = await prisma.bunnyVideo.findUnique({ where: { id: videoId } });
+    if (!video) {
+      return res.status(404).json({ success: false, error: 'Video not found' });
+    }
+
+    // Validate SurveyJS JSON
+    const surveyValidation = quizService.validateSurveyJson(surveyJson);
+    if (!surveyValidation.ok) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid surveyJson definition',
+        details: surveyValidation.errors,
       });
     }
 
-    // Calculate the score
-    const totalPoints = await prisma.question.aggregate({
-      where: { quizId: parsedQuizId },
-      _sum: { points: true }
-    });
-    
-    const earnedPoints = userAnswers.reduce((sum, a) => a.isCorrect ? sum + a.question.points : sum, 0);
-    const totalPointsValue = totalPoints._sum.points || 0;
-    const score = totalPointsValue > 0 ? (earnedPoints / totalPointsValue) * 100 : 0;
-    const passed = score >= quiz.passingScore;
-    
-    // Get the submission time from the first answer (they should all have the same timestamp)
-    const submittedAt = userAnswers.length > 0 ? userAnswers[0].submittedAt : null;
+    // Validate and build Answer Key
+    if (!rawKey || typeof rawKey !== 'object' || Array.isArray(rawKey)) {
+      return res.status(400).json({ success: false, error: 'answerKey object is required' });
+    }
 
-    res.json({
-      quizId: parsedQuizId,
-      title: quiz.title,
-      taken: true,
-      status: passed ? 'PASSED' : 'FAILED',
-      score: score,
-      passingScore: quiz.passingScore,
-      passed: passed,
-      submittedAt: submittedAt,
-      correctAnswers: userAnswers.filter(a => a.isCorrect).length,
-      totalQuestions: userAnswers.length
+    const keyValidation = quizService.buildAnswerKey(surveyJson, rawKey);
+    if (!keyValidation.ok) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid answerKey',
+        details: keyValidation.errors,
+      });
+    }
+
+    const hasTimeLimit = timeLimitSec !== undefined && timeLimitSec !== null && timeLimitSec !== '';
+    const timeLimit = hasTimeLimit ? parseInteger(timeLimitSec) : null;
+    if (hasTimeLimit && (timeLimit === null || timeLimit <= 0)) {
+      return res.status(400).json({ success: false, error: 'timeLimitSec must be a positive integer' });
+    }
+
+const hasPassingScore = passingScore !== undefined && passingScore !== null && passingScore !== '';
+    const passScore = hasPassingScore ? parseInteger(passingScore) : 50;
+    if (passScore === null || passScore < 0 || passScore > 100) {
+      return res.status(400).json({ success: false, error: 'passingScore must be an integer from 0 to 100' });
+    }
+
+    const hasMaxAttempts = maxAttempts !== undefined && maxAttempts !== null && maxAttempts !== '';
+    const maxAttemptsValue = hasMaxAttempts ? parseInteger(maxAttempts) : 3;
+    if (maxAttemptsValue === null || maxAttemptsValue < 1 || maxAttemptsValue > 10) {
+      return res.status(400).json({ success: false, error: 'maxAttempts must be an integer from 1 to 10' });
+    }
+
+    const quiz = await prisma.quiz.upsert({
+      where: { bunnyVideoId: videoId },
+      create: {
+        bunnyVideoId: videoId,
+        title: title.trim(),
+        timeLimitSec: timeLimit,
+        passingScore: passScore,
+        maxAttempts: maxAttemptsValue,
+        surveyJson,
+        answerKey: keyValidation.answerKey,
+      },
+      update: {
+        title: title.trim(),
+        timeLimitSec: timeLimit,
+        passingScore: passScore,
+        maxAttempts: maxAttemptsValue,
+        surveyJson,
+        answerKey: keyValidation.answerKey,
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Quiz saved successfully',
+      data: quizService.sanitizeForStudent(quiz),
     });
   } catch (error) {
-    console.error('Error getting quiz status:', error);
-    res.status(500).json({ error: 'Failed to get quiz status' });
+    console.error('[QuizController] upsertQuiz error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
   }
-};
+}
+
+/**
+ * DELETE /quizzes/:quizId
+ * Deletes a quiz and all associated attempts.
+ */
+async function deleteQuiz(req, res) {
+  try {
+    const quizId = parseInteger(req.params.quizId);
+    if (quizId === null || quizId <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid quiz ID' });
+    }
+
+    const quiz = await prisma.quiz.findUnique({ where: { id: quizId } });
+    if (!quiz) {
+      return res.status(404).json({ success: false, error: 'Quiz not found' });
+    }
+
+    await prisma.quiz.delete({ where: { id: quizId } });
+
+    return res.status(200).json({ success: true, message: 'Quiz deleted successfully' });
+  } catch (error) {
+    console.error('[QuizController] deleteQuiz error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
+/**
+ * GET /quizzes/:quizId/attempts
+ * Lists student attempts for a quiz (filter by ?status=GRADING for grading queue).
+ */
+async function listQuizAttempts(req, res) {
+  try {
+    const quizId = parseInteger(req.params.quizId);
+    const { status } = req.query;
+
+    if (quizId === null || quizId <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid quiz ID' });
+    }
+
+    const where = { quizId };
+    if (status) {
+      if (!Object.values(STATUS).includes(status)) {
+        return res.status(400).json({ success: false, error: 'Invalid attempt status filter' });
+      }
+      where.status = status;
+    }
+
+    const attempts = await prisma.quizAttempt.findMany({
+      where,
+      orderBy: { startedAt: 'desc' },
+      include: {
+        user: { select: { id: true, name: true, email: true } },
+      },
+    });
+
+    return res.status(200).json({ success: true, data: attempts });
+  } catch (error) {
+    console.error('[QuizController] listQuizAttempts error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
+/**
+ * PUT /quizzes/attempts/:id/grade
+ * Admin grades essay questions and finalizes attempt score.
+ * Body: { essayScores: { [qName]: number }, essayFeedback?: { [qName]: string } }
+ */
+async function gradeAttempt(req, res) {
+  try {
+    const attemptId = parseInteger(req.params.id);
+    const adminId = req.user.id;
+    const { essayScores, essayFeedback } = req.body;
+
+    if (attemptId === null || attemptId <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid attempt ID' });
+    }
+
+    if (!essayScores || typeof essayScores !== 'object' || Array.isArray(essayScores)) {
+      return res.status(400).json({ success: false, error: 'essayScores object is required' });
+    }
+
+    if (essayFeedback !== undefined && (essayFeedback === null || typeof essayFeedback !== 'object' || Array.isArray(essayFeedback))) {
+      return res.status(400).json({ success: false, error: 'essayFeedback must be an object' });
+    }
+
+    const updated = await quizService.gradeEssayAttempt(adminId, attemptId, essayScores, essayFeedback || {});
+
+    return res.status(200).json({
+      success: true,
+      message: 'Attempt graded successfully',
+      data: updated,
+    });
+  } catch (error) {
+    console.error('[QuizController] gradeAttempt error:', error);
+    const statusCode = error.statusCode || 500;
+    return res.status(statusCode).json({ success: false, error: error.message });
+  }
+}
+
+/**
+ * POST /quizzes/attempts/:id/reset
+ * Deletes a student attempt to allow a manual reset.
+ */
+async function resetAttempt(req, res) {
+  try {
+    const attemptId = parseInteger(req.params.id);
+    if (attemptId === null || attemptId <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid attempt ID' });
+    }
+
+    const attempt = await prisma.quizAttempt.findUnique({ where: { id: attemptId } });
+    if (!attempt) {
+      return res.status(404).json({ success: false, error: 'Attempt not found' });
+    }
+
+    await prisma.quizAttempt.delete({ where: { id: attemptId } });
+
+    return res.status(200).json({ success: true, message: 'Attempt reset successfully' });
+  } catch (error) {
+    console.error('[QuizController] resetAttempt error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
+/**
+ * POST /quizzes/videos/:videoId/exemptions
+ * Grants a gate exemption to a student for a specific video quiz.
+ * Body: { userId, reason? }
+ */
+async function grantExemption(req, res) {
+  try {
+    const videoId = parseInteger(req.params.videoId);
+    const adminId = req.user.id;
+    const { userId, reason } = req.body;
+
+    const parsedUserId = parseInteger(userId);
+    if (videoId === null || videoId <= 0 || parsedUserId === null || parsedUserId <= 0) {
+      return res.status(400).json({ success: false, error: 'videoId and userId are required' });
+    }
+
+    const exemption = await prisma.gateExemption.upsert({
+      where: { userId_bunnyVideoId: { userId: parsedUserId, bunnyVideoId: videoId } },
+      create: {
+        userId: parsedUserId,
+        bunnyVideoId: videoId,
+        grantedBy: adminId,
+        reason: reason || null,
+      },
+      update: {
+        grantedBy: adminId,
+        reason: reason || null,
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Gate exemption granted successfully',
+      data: exemption,
+    });
+  } catch (error) {
+    console.error('[QuizController] grantExemption error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
+/**
+ * DELETE /quizzes/exemptions/:exemptionId
+ * Revokes a gate exemption.
+ */
+async function revokeExemption(req, res) {
+  try {
+    const exemptionId = parseInteger(req.params.exemptionId);
+    if (exemptionId === null || exemptionId <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid exemption ID' });
+    }
+
+    try {
+      await prisma.gateExemption.delete({ where: { id: exemptionId } });
+    } catch (error) {
+      if (error.code === 'P2025') {
+        return res.status(404).json({ success: false, error: 'Exemption not found' });
+      }
+      throw error;
+    }
+
+    return res.status(200).json({ success: true, message: 'Exemption revoked successfully' });
+  } catch (error) {
+    console.error('[QuizController] revokeExemption error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
 
 module.exports = {
-  createQuiz,
-  getQuiz,
-  submitQuizAnswers,
-  getQuizResults,
-  getCourseQuizzes,
-  getUserQuizResults,
-  getQuizStatus
+  getQuizMeta,
+  startQuiz,
+  saveQuizAttempt,
+  submitQuiz,
+  getQuizResult,
+  getStudentAttempts,
+  upsertQuiz,
+  deleteQuiz,
+  listQuizAttempts,
+  gradeAttempt,
+  resetAttempt,
+  grantExemption,
+  revokeExemption,
 };

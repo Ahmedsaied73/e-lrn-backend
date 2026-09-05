@@ -1,5 +1,23 @@
 const prisma = require('../config/db');
 
+function parseBunnyVideoId(value) {
+  const videoId = Number(value);
+  return Number.isSafeInteger(videoId) && videoId > 0 ? videoId : null;
+}
+
+async function findBunnyVideoWithEnrollment(videoId, userId, role) {
+  const video = await prisma.bunnyVideo.findUnique({
+    where: { id: videoId },
+    select: { id: true, courseId: true },
+  });
+  if (!video || role === 'ADMIN') return { video, enrollment: null };
+
+  const enrollment = await prisma.enrollment.findFirst({
+    where: { userId, courseId: video.courseId, isPaid: true },
+  });
+  return { video, enrollment };
+}
+
 /**
  * Mark a video as completed for the current user
  * @param {Object} req - Express request object with authenticated user
@@ -7,108 +25,71 @@ const prisma = require('../config/db');
  */
 const markVideoCompleted = async (req, res) => {
   try {
-    const { videoId } = req.body;
-    const userId = req.user.id;
+    const videoId = parseBunnyVideoId(req.body?.videoId);
+    if (!videoId) return res.status(400).json({ error: 'Invalid video ID format' });
 
-    if (!videoId) {
-      return res.status(400).json({ error: 'Video ID is required' });
+const { video, enrollment } = await findBunnyVideoWithEnrollment(videoId, req.user.id, req.user.role);
+    if (!video) return res.status(404).json({ error: 'Video not found', code: 'VIDEO_NOT_FOUND' });
+    if (!enrollment && req.user.role !== 'ADMIN') {
+      return res.status(403).json({ error: 'You must be enrolled in this course to mark progress', code: 'NOT_ENROLLED' });
     }
 
-    // Parse videoId to integer and verify the video exists
-    const parsedVideoId = parseInt(videoId, 10);
-    if (isNaN(parsedVideoId)) {
-      return res.status(400).json({ error: 'Invalid video ID format' });
-    }
-
-    // Verify the video exists
-    const video = await prisma.video.findUnique({
-      where: { id: parsedVideoId },
-      include: { course: true }
-    });
-
-    if (!video) {
-      return res.status(404).json({ error: 'Video not found' });
-    }
-
-    // Verify user is enrolled in the course
-    const enrollment = await prisma.enrollment.findFirst({
-      where: {
-        userId: userId,
-        courseId: video.courseId,
-        isPaid: true // Only paid enrollments can mark progress
-      }
-    });
-
-    // Allow admins to bypass enrollment check
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { role: true }
-    });
-
-    const isAdmin = user && user.role === 'ADMIN';
-
-    if (!enrollment && !isAdmin) {
-      return res.status(403).json({ 
-        error: 'You must be enrolled in this course to mark progress' 
+    // Sequential unlock precondition: only the currently-unlocked video may be
+    // completed — the first video, or a video whose direct predecessor is done.
+    if (req.user.role !== 'ADMIN') {
+      const courseVideos = await prisma.bunnyVideo.findMany({
+        where: { courseId: video.courseId, status: 'READY' },
+        orderBy: [{ position: 'asc' }, { createdAt: 'asc' }],
+        select: { id: true },
       });
+
+      const currentIndex = courseVideos.findIndex((v) => v.id === videoId);
+      if (currentIndex === -1) {
+        return res.status(404).json({ error: 'Video not found', code: 'VIDEO_NOT_FOUND' });
+      }
+
+      if (currentIndex > 0) {
+        const previousVideoId = courseVideos[currentIndex - 1].id;
+        const previousProgress = await prisma.bunnyVideoProgress.findUnique({
+          where: { userId_bunnyVideoId: { userId: req.user.id, bunnyVideoId: previousVideoId } },
+        });
+
+        if (!previousProgress || !previousProgress.completed) {
+          return res.status(403).json({
+            error: 'You must complete the previous video before completing this one.',
+            code: 'VIDEO_NOT_UNLOCKED',
+            previousVideoId,
+          });
+        }
+      }
     }
 
-    // Create or update the video progress record
-    const videoProgress = await prisma.videoProgress.upsert({
-      where: {
-        userId_videoId: {
-          userId: userId,
-          videoId: parsedVideoId
-        }
-      },
-      update: {
-        completed: true,
-        updatedAt: new Date()
-      },
-      create: {
-        userId: userId,
-        videoId: parsedVideoId,
-        completed: true
-      }
+    const videoProgress = await prisma.bunnyVideoProgress.upsert({
+      where: { userId_bunnyVideoId: { userId: req.user.id, bunnyVideoId: videoId } },
+      update: { completed: true, watchedAt: new Date() },
+      create: { userId: req.user.id, bunnyVideoId: videoId, completed: true },
     });
 
-    // Update the course progress if this is a student
     if (enrollment) {
-      // Count total videos in the course
-      const totalVideos = await prisma.video.count({
-        where: { courseId: video.courseId }
-      });
-
-      // Count completed videos for this user in this course
-      const completedVideos = await prisma.videoProgress.count({
-        where: {
-          userId: userId,
-          video: {
-            courseId: video.courseId
-          },
-          completed: true
-        }
-      });
-
-      // Calculate progress percentage
-      const progressPercentage = (completedVideos / totalVideos) * 100;
-
-      // Update enrollment progress
+      const [totalVideos, completedVideos] = await Promise.all([
+        prisma.bunnyVideo.count({ where: { courseId: video.courseId, status: 'READY' } }),
+        prisma.bunnyVideoProgress.count({
+          where: { userId: req.user.id, completed: true, bunnyVideo: { courseId: video.courseId, status: 'READY' } },
+        }),
+      ]);
+      const completed = totalVideos > 0 && completedVideos === totalVideos;
       await prisma.enrollment.update({
         where: { id: enrollment.id },
         data: {
-          progress: progressPercentage,
+          progress: totalVideos ? (completedVideos / totalVideos) * 100 : 0,
           lastAccess: new Date(),
-          // If all videos are completed, mark the course as completed
-          ...(completedVideos === totalVideos ? {
-            isCompleted: true,
-            completedAt: new Date()
-          } : {})
-        }
+          isCompleted: completed,
+          completedAt: completed ? new Date() : null,
+        },
       });
     }
 
-    res.json({
+    return res.json({
       message: 'Video marked as completed',
       videoProgress
     });
@@ -125,28 +106,16 @@ const markVideoCompleted = async (req, res) => {
  */
 const checkVideoCompletion = async (req, res) => {
   try {
-    const { videoId } = req.params;
-    const userId = req.user.id;
+    const videoId = parseBunnyVideoId(req.params.videoId);
+    if (!videoId) return res.status(400).json({ error: 'Invalid video ID format' });
 
-    // Parse videoId to integer and verify it's valid
-    const parsedVideoId = parseInt(videoId, 10);
-    if (isNaN(parsedVideoId)) {
-      return res.status(400).json({ error: 'Invalid video ID format' });
-    }
-
-    // Find the video progress record
-    const videoProgress = await prisma.videoProgress.findUnique({
-      where: {
-        userId_videoId: {
-          userId: userId,
-          videoId: parsedVideoId
-        }
-      }
+    const videoProgress = await prisma.bunnyVideoProgress.findUnique({
+      where: { userId_bunnyVideoId: { userId: req.user.id, bunnyVideoId: videoId } },
     });
 
     // Return completion status
     res.json({
-      videoId: parsedVideoId,
+      videoId,
       completed: videoProgress ? videoProgress.completed : false,
       watchedAt: videoProgress ? videoProgress.watchedAt : null
     });
@@ -163,41 +132,37 @@ const checkVideoCompletion = async (req, res) => {
  */
 const getCourseVideoProgress = async (req, res) => {
   try {
-    const { courseId } = req.params;
-    const userId = req.user.id;
+    const courseId = parseBunnyVideoId(req.params.courseId);
+    if (!courseId) return res.status(400).json({ error: 'Invalid course ID format' });
 
-    // Verify the course exists
     const course = await prisma.course.findUnique({
-      where: { id: parseInt(courseId) },
-      include: { videos: true }
+      where: { id: courseId },
+      include: { bunnyVideos: { where: { status: 'READY' }, orderBy: [{ position: 'asc' }, { createdAt: 'asc' }] } }
     });
 
     if (!course) {
       return res.status(404).json({ error: 'Course not found' });
     }
 
-    // Get all video IDs for this course
-    const videoIds = course.videos.map(video => video.id);
-
-    // Get progress for all videos in this course
-    const videoProgress = await prisma.videoProgress.findMany({
+    const videoIds = course.bunnyVideos.map(video => video.id);
+    const videoProgress = await prisma.bunnyVideoProgress.findMany({
       where: {
-        userId: userId,
-        videoId: { in: videoIds }
+        userId: req.user.id,
+        bunnyVideoId: { in: videoIds }
       }
     });
 
     // Create a map of video ID to completion status
     const progressMap = {};
     videoProgress.forEach(progress => {
-      progressMap[progress.videoId] = {
+      progressMap[progress.bunnyVideoId] = {
         completed: progress.completed,
         watchedAt: progress.watchedAt
       };
     });
 
     // Create the response with all videos and their completion status
-    const videosWithProgress = course.videos.map(video => ({
+    const videosWithProgress = course.bunnyVideos.map(video => ({
       id: video.id,
       title: video.title,
       duration: video.duration,
@@ -206,8 +171,8 @@ const getCourseVideoProgress = async (req, res) => {
     }));
 
     res.json({
-      courseId: parseInt(courseId),
-      totalVideos: course.videos.length,
+      courseId,
+      totalVideos: course.bunnyVideos.length,
       completedVideos: Object.values(progressMap).filter(p => p.completed).length,
       videos: videosWithProgress
     });

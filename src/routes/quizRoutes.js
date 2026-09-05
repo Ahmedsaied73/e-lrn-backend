@@ -1,36 +1,75 @@
-const express = require('express');
-const { 
-  createQuiz, 
-  getQuiz, 
-  submitQuizAnswers, 
-  getQuizResults,
-  getCourseQuizzes,
-  getUserQuizResults,
-  getQuizStatus
-} = require('../controllers/quizController');
-const { authenticateToken, authorizeAdmin } = require('../middlewares/index');
+﻿'use strict';
 
+/**
+ * quizRoutes.js
+ * Declarative Express router for SurveyJS-backed Quiz API.
+ * Mounted in app.js as: app.use('/quizzes', quizRoutes);
+ */
+
+const express = require('express');
 const router = express.Router();
 
-// Create a new quiz (admin only)
-router.post('/', authenticateToken, authorizeAdmin(), createQuiz);
+const { authenticateToken, authorizeAdmin } = require('../middlewares/index');
+const {
+  getQuizMeta,
+  startQuiz,
+  saveQuizAttempt,
+  submitQuiz,
+  getQuizResult,
+  getStudentAttempts,
+  upsertQuiz,
+  deleteQuiz,
+  listQuizAttempts,
+  gradeAttempt,
+  resetAttempt,
+  grantExemption,
+  revokeExemption,
+} = require('../controllers/quizController');
 
-// Get all quiz results for the authenticated user
-router.get('/user/results', authenticateToken, getUserQuizResults);
+// All quiz routes require valid authentication
+router.use(authenticateToken);
 
-// Get all quizzes for a course
-router.get('/course/:courseId', authenticateToken, getCourseQuizzes);
+// ─── Student Endpoints ────────────────────────────────────────────────────────
 
-// Get the status of a specific quiz for the current user
-router.get('/:quizId/status', authenticateToken, getQuizStatus);
+// Drives "بدء الاختبار" button: check if quiz exists, unlock status, best score
+router.get('/videos/:videoId/meta', getQuizMeta);
 
-// Get quiz results for a user
-router.get('/:quizId/results', authenticateToken, getQuizResults);
+// Start or resume an attempt -> returns sanitized surveyJson & deadlineAt
+router.post('/videos/:videoId/start', startQuiz);
 
-// Get a quiz by ID
-router.get('/:id', authenticateToken, getQuiz);
+// Save in-progress responses without grading or changing attempt status
+router.patch('/attempts/:id/save', saveQuizAttempt);
 
-// Submit answers for a quiz
-router.post('/submit', authenticateToken, submitQuizAnswers);
+// Submit answers for grading
+router.post('/attempts/:id/submit', submitQuiz);
+
+// View score and detailed breakdown (with model answers post-submit)
+router.get('/attempts/:id/result', getQuizResult);
+
+// List historical attempts for student
+router.get('/videos/:videoId/attempts', getStudentAttempts);
+
+// ─── Admin Endpoints ──────────────────────────────────────────────────────────
+
+// Create / update quiz definition for a video
+router.post('/videos/:videoId', authorizeAdmin(), upsertQuiz);
+
+// Delete quiz and associated attempts
+router.delete('/:quizId', authorizeAdmin(), deleteQuiz);
+
+// View attempt list / grading queue
+router.get('/:quizId/attempts', authorizeAdmin(), listQuizAttempts);
+
+// Grade essay questions
+router.put('/attempts/:id/grade', authorizeAdmin(), gradeAttempt);
+
+// Reset a student attempt
+router.post('/attempts/:id/reset', authorizeAdmin(), resetAttempt);
+
+// Grant sequential gate exemption
+router.post('/videos/:videoId/exemptions', authorizeAdmin(), grantExemption);
+
+// Revoke sequential gate exemption
+router.delete('/exemptions/:exemptionId', authorizeAdmin(), revokeExemption);
 
 module.exports = router;

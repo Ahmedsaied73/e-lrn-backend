@@ -14,13 +14,15 @@ model User {
   phoneNumber       String?            @unique
   password          String
   role              Role               @default(STUDENT)
-  grade             Grade? // Student's grade/year
+  grade             Grade              @default(FIRST_SECONDARY) // Student's grade/year (required)
   courses           Course[]           @relation("AdminCourses") // Courses created by the admin
   enrollments       Enrollment[]
   payments          Payment[]
   certificates      Certificate[]
   videoProgress     VideoProgress[]
-  quizAnswers       Answer[]
+  bunnyVideoProgress BunnyVideoProgress[]
+  quizAttempts      QuizAttempt[]      // SurveyJS quiz attempts
+  gateExemptions    GateExemption[]    // Admin-granted quiz gate bypasses
   assignmentAnswers AssignmentAnswer[] // Answers to MCQ assignment questions
   submissions       Submission[] // Assignment submissions by the user
   refreshToken      String?            @db.Text
@@ -29,26 +31,23 @@ model User {
 }
 
 model Course {
-  id                Int            @id @default(autoincrement())
-  title             String
-  description       String
-  price             Float
-  thumbnail         String
-  // YouTube specific fields
-  isYoutube         Boolean        @default(false)
-  youtubePlaylistId String?
+  id            Int            @id @default(autoincrement())
+  title         String
+  description   String
+  price         Float
+  thumbnail     String
   // Relations
-  teacher           User           @relation("AdminCourses", fields: [teacherId], references: [id])
-  teacherId         Int
-  videos            Video[]
-  enrollments       Enrollment[]
-  certificates      Certificate[]
-  learningPaths     LearningPath[] @relation("CoursesInPath")
-  prerequisite      LearningPath[] @relation("Prerequisites")
-  quizzes           Quiz[] // Course can have multiple quizzes
-  createdAt         DateTime       @default(now())
-  category          String?
-  grade             Grade // Required field for Egyptian secondary school year
+  teacher       User           @relation("AdminCourses", fields: [teacherId], references: [id])
+  teacherId     Int
+  videos        Video[]
+  bunnyVideos   BunnyVideo[] // Bunny Stream videos (separate from local Video)
+  enrollments   Enrollment[]
+  certificates  Certificate[]
+  learningPaths LearningPath[] @relation("CoursesInPath")
+  prerequisite  LearningPath[] @relation("Prerequisites")
+  createdAt     DateTime       @default(now())
+  category      String?
+  grade         Grade // Required field for Egyptian secondary school year
 
   @@index([teacherId])
   @@index([grade])
@@ -62,13 +61,9 @@ model Video {
   course        Course          @relation(fields: [courseId], references: [id], onDelete: Cascade)
   courseId      Int
   duration      Int
-  // YouTube specific fields
-  isYoutube     Boolean         @default(false)
-  youtubeId     String?
   position      Int?
   // Additional metadata
   videoProgress VideoProgress[]
-  quizzes       Quiz[] // Video can have lecture quizzes
   assignments   Assignment[] // Video can have assignments
   description   String?
   transcript    String? // For searchable video content
@@ -135,6 +130,14 @@ enum Role {
   ADMIN
 }
 
+enum VideoStatus {
+  PENDING
+  UPLOADING
+  PROCESSING
+  READY
+  FAILED
+}
+
 enum PaymentStatus {
   PENDING
   COMPLETED
@@ -161,53 +164,75 @@ model VideoProgress {
   @@unique([userId, videoId])
 }
 
-// New model for quizzes
+// ─── SurveyJS Quiz Models ────────────────────────────────────────────────────
+
 model Quiz {
-  id           Int        @id @default(autoincrement())
+  id           Int           @id @default(autoincrement())
+  bunnyVideoId Int           @unique               // 1-to-1: one quiz per Bunny video
   title        String
-  description  String?
-  isFinal      Boolean    @default(false) // Whether this is a final exam or lecture quiz
-  passingScore Float      @default(70.0) // Percentage needed to pass (e.g., 70%)
-  // Relations - a quiz belongs to either a course (final) or a video (lecture)
-  course       Course?    @relation(fields: [courseId], references: [id], onDelete: Cascade)
-  courseId     Int?
-  video        Video?     @relation(fields: [videoId], references: [id], onDelete: Cascade)
-  videoId      Int?
-  questions    Question[]
-  createdAt    DateTime   @default(now())
-  updatedAt    DateTime   @updatedAt
+  timeLimitSec Int?                                // null = untimed; e.g. 600 = 10 min
+  passingScore Int           @default(50)          // percentage required to pass (default 50%)
+  maxAttempts  Int           @default(3)           // max retakes per student; 409 once exhausted
+  surveyJson   Json                                // SurveyJS student-facing definition (no secrets)
+  answerKey    Json                                // SERVER-ONLY: { qName: { type, correctValue?, modelAnswer?, points } }
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
 
-  @@index([courseId])
-  @@index([videoId])
+  bunnyVideo   BunnyVideo    @relation(fields: [bunnyVideoId], references: [id], onDelete: Cascade)
+  attempts     QuizAttempt[]
+
+  @@index([bunnyVideoId])
 }
 
-// New model for quiz questions
-model Question {
-  id            Int      @id @default(autoincrement())
-  quiz          Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
+model QuizAttempt {
+  id            Int               @id @default(autoincrement())
   quizId        Int
-  text          String   @db.Text
-  options       Json // Array of possible answers stored as JSON
-  correctOption Int // Index of the correct option
-  explanation   String?  @db.Text
-  points        Int      @default(1)
-  answers       Answer[]
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  userId        Int
+  attemptNumber Int               @default(1)
+  status        QuizAttemptStatus @default(IN_PROGRESS)
+  startedAt     DateTime          @default(now())
+  deadlineAt    DateTime?                             // server-authoritative timer deadline
+  submittedAt   DateTime?
+  autoSubmitted Boolean           @default(false)
+  responses     Json?                                 // Student response map: { [qName]: value }
+  mcqEarned     Int?
+  essayEarned   Int?
+  totalPoints   Int?
+  earnedPoints  Int?
+  scorePercent  Float?
+  essayFeedback Json?                                 // { [qName]: { points, feedback } }
+  essayGradedBy Int?
+  essayGradedAt DateTime?
+
+  quiz          Quiz              @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  user          User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, quizId])
+  @@index([quizId])
+  @@index([userId])
 }
 
-// New model for student answers
-model Answer {
-  id             Int      @id @default(autoincrement())
-  user           User     @relation(fields: [userId], references: [id])
-  userId         Int
-  question       Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
-  questionId     Int
-  selectedOption Int
-  isCorrect      Boolean
-  submittedAt    DateTime @default(now())
+enum QuizAttemptStatus {
+  IN_PROGRESS
+  SUBMITTED
+  GRADING
+  GRADED
+  EXPIRED
+}
 
-  @@unique([userId, questionId])
+// Admin-granted bypass for the sequential quiz gate (force-advance a student past a quiz)
+model GateExemption {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  bunnyVideoId Int                          // Bunny video that owns the quiz being waived
+  grantedBy Int                             // admin userId who created this exemption
+  reason    String?
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, bunnyVideoId])
+  @@index([bunnyVideoId])
 }
 
 // New model for assignments
@@ -280,4 +305,51 @@ enum SubmissionStatus {
   PENDING
   GRADED
   REJECTED
+}
+
+model BunnyVideo {
+  id                 Int         @id @default(autoincrement())
+  courseId           Int
+  title              String
+  // Position in the course sequence — used for ordering and the sequential gate.
+  // Nullable only for legacy rows; new videos always get max(position)+1.
+  position           Int?
+  // Bunny identifiers — bunnyVideoId is set atomically when the row is created
+  // (row is only inserted after Bunny video object exists, so never null in practice)
+  bunnyVideoId       String      @unique
+  bunnyLibraryId     String
+  // State machine: PENDING → UPLOADING → PROCESSING → READY | FAILED
+  status             VideoStatus @default(PENDING)
+  // Populated by webhook after Bunny encoding completes
+  duration           Int?
+  width              Int?
+  height             Int?
+  processingProgress Int?        @default(0)
+  thumbnailUrl       String?
+  // Set when status = FAILED; records the failure reason for inspection/retry
+  failureReason      String?     @db.Text
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+
+  course        Course               @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  quiz          Quiz?
+  progress      BunnyVideoProgress[]
+
+  // Query patterns: list by course, filter by status, webhook lookup by bunnyVideoId (unique index)
+  @@index([courseId])
+  @@index([status])
+}
+
+model BunnyVideoProgress {
+  id           Int        @id @default(autoincrement())
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId       Int
+  bunnyVideo   BunnyVideo @relation(fields: [bunnyVideoId], references: [id], onDelete: Cascade)
+  bunnyVideoId Int
+  completed    Boolean    @default(false)
+  watchedAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@unique([userId, bunnyVideoId])
+  @@index([bunnyVideoId])
 }

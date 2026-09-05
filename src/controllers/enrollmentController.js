@@ -34,17 +34,29 @@ const enrollUserInCourse = async (req, res) => {
     });
 
     if (existingEnrollment) {
+      if (!existingEnrollment.isPaid) {
+        const updatedEnrollment = await prisma.enrollment.update({
+          where: { id: existingEnrollment.id },
+          data: { isPaid: true, paymentDate: new Date() }
+        });
+        return res.status(200).json({
+          success: true,
+          message: 'Enrollment updated to active!',
+          data: { enrollment: updatedEnrollment }
+        });
+      }
       return res.status(409).json({ success: false, error: 'Already enrolled in this course.' });
     }
 
-    // Free courses are auto-paid; paid courses default to isPaid=false
-    const isPaid = course.price === 0;
+    // Payment is disabled for now — all enrollments are auto-marked as paid
+    const isPaid = true;
 
     const enrollment = await prisma.enrollment.create({
       data: {
         userId,
         courseId: parsedCourseId,
         isPaid,
+        paymentDate: new Date(),
         startedAt: new Date(),
         lastAccess: new Date()
       }
