@@ -9,7 +9,7 @@
  */
 
 const prisma = require('../config/db');
-const { ALLOWED_QUESTION_TYPES, MAX_SURVEY_JSON_BYTES, GRACE_SEC, DEFAULT_MAX_ATTEMPTS, STATUS } = require('../config/quizConfig');
+const { ALLOWED_QUESTION_TYPES, MAX_SURVEY_JSON_BYTES, GRACE_SEC, DEFAULT_MAX_ATTEMPTS, STALE_ATTEMPT_MS, STATUS } = require('../config/quizConfig');
 const bunny = require('../integrations/bunny/bunnyStreamClient');
 
 // ─── Validation ───────────────────────────────────────────────────────────────
@@ -121,6 +121,26 @@ function buildAnswerKey(surveyJson, answerKeyInput) {
   }
 
   return { ok: errors.length === 0, errors, answerKey };
+}
+
+/**
+ * Count the number of scorable questions in a surveyJson definition.
+ * Non-scorable display elements (html, image) are excluded.
+ *
+ * @param {object} surveyJson - SurveyJS definition (must have a `pages` array)
+ * @returns {number}
+ */
+function countQuestions(surveyJson) {
+  if (!surveyJson || !Array.isArray(surveyJson.pages)) return 0;
+  let count = 0;
+  for (const page of surveyJson.pages) {
+    if (!Array.isArray(page.elements)) continue;
+    for (const el of page.elements) {
+      if (el.type === 'html' || el.type === 'image') continue;
+      count += 1;
+    }
+  }
+  return count;
 }
 
 /**
@@ -353,16 +373,37 @@ async function evaluateLegacyVideoGate(userId, video) {
 
 /**
  * Start or resume a quiz attempt for a user.
- * - If an IN_PROGRESS attempt exists → return it (resume).
- * - Otherwise → create a new attempt (attemptNumber = lastAttemptNumber + 1).
+ * - If an IN_PROGRESS attempt exists, it is resumed — unless it went stale
+ *   (abandoned untimed attempt) or its deadline expired, in which case it is
+ *   finalized and a new attempt is created.
+ * - Students who already passed the quiz cannot start again (409 ALREADY_PASSED).
+ * - EXPIRED attempts (network drops/timeouts) never burn a retake.
  *
  * @param {number} userId
  * @param {number} quizId
+ * @param {{ bypassPassedCheck?: boolean }} [options]
  * @returns {Promise<{ attempt: object, quiz: object, resumed: boolean }>}
  */
-async function startAttempt(userId, quizId) {
+async function startAttempt(userId, quizId, options = {}) {
   const quiz = await prisma.quiz.findUnique({ where: { id: quizId } });
   if (!quiz) throw Object.assign(new Error('Quiz not found'), { statusCode: 404 });
+
+  // Students who already passed the quiz must not retake it. bestScore is the
+  // stored grade — no more attempts once the passing degree is banked.
+  // Admins bypass this check so they can inspect/practice the quiz.
+  if (!options.bypassPassedCheck && quiz.passingScore != null) {
+    const bestGraded = await prisma.quizAttempt.findFirst({
+      where: { userId, quizId, status: STATUS.GRADED },
+      orderBy: { scorePercent: 'desc' },
+      select: { scorePercent: true },
+    });
+    if (bestGraded && (bestGraded.scorePercent || 0) >= quiz.passingScore) {
+      throw Object.assign(
+        new Error(`You have already passed this exam with a score of ${bestGraded.scorePercent}%. Retaking is not allowed.`),
+        { statusCode: 409, code: 'ALREADY_PASSED' }
+      );
+    }
+  }
 
   // Check for existing IN_PROGRESS attempt to resume
   const inProgress = await prisma.quizAttempt.findFirst({
@@ -371,12 +412,18 @@ async function startAttempt(userId, quizId) {
   });
 
   if (inProgress) {
-    // Lazily expire if past deadline
-    if (inProgress.deadlineAt && new Date() > new Date(inProgress.deadlineAt.getTime ? inProgress.deadlineAt.getTime() + GRACE_SEC * 1000 : Date.parse(inProgress.deadlineAt) + GRACE_SEC * 1000)) {
-      const expired = await prisma.quizAttempt.update({
+    const deadline = inProgress.deadlineAt ? Date.parse(inProgress.deadlineAt) : null;
+
+    // Past deadline + grace → EXPIRED (timed quiz abandoned). Doesn't burn a retake.
+    if (deadline !== null && Date.now() > deadline + GRACE_SEC * 1000) {
+      await prisma.quizAttempt.update({
         where: { id: inProgress.id },
         data: { status: STATUS.EXPIRED, scorePercent: 0, earnedPoints: 0, totalPoints: computeTotalPoints(quiz.answerKey).totalPoints },
       });
+      // Fall through to create a new attempt
+    } else if (deadline === null && Date.now() - new Date(inProgress.startedAt).getTime() >= STALE_ATTEMPT_MS) {
+      // Abandoned untimed attempt → auto-submit its saved responses, then start fresh.
+      await finalizeStaleAttempt(inProgress, quiz);
       // Fall through to create a new attempt
     } else {
       return { attempt: inProgress, quiz, resumed: true };
@@ -392,7 +439,7 @@ async function startAttempt(userId, quizId) {
   if (attemptsUsed >= maxAttempts) {
     throw Object.assign(
       new Error(`You have used all ${maxAttempts} allowed attempts for this quiz`),
-      { statusCode: 409 }
+      { statusCode: 409, code: 'MAX_ATTEMPTS_REACHED' }
     );
   }
 
@@ -413,6 +460,42 @@ async function startAttempt(userId, quizId) {
   });
 
   return { attempt, quiz, resumed: false };
+}
+
+/**
+ * Finalize an abandoned UNTIMED in-progress attempt by auto-grading whatever
+ * responses it had saved (autosave). Used to keep stale attempts from lingering
+ * forever while never losing a real answer set. Essay quizzes go to GRADING.
+ *
+ * @param {object} attempt - Raw Prisma quizAttempt row (IN_PROGRESS)
+ * @param {object} quiz    - The quiz row (with answerKey)
+ * @returns {Promise<object>} Updated attempt
+ */
+async function finalizeStaleAttempt(attempt, quiz) {
+  const answerKey = quiz.answerKey || {};
+  const responses = attempt.responses || {};
+  const { mcqEarned } = gradeMcq(answerKey, responses);
+  const { totalPoints, totalEssayPoints } = computeTotalPoints(answerKey);
+
+  const hasEssays = totalEssayPoints > 0;
+  const earnedPoints = mcqEarned;
+  const scorePercent = computeScorePercent(mcqEarned, totalPoints);
+  const newStatus = hasEssays ? STATUS.GRADING : STATUS.GRADED;
+
+  return prisma.quizAttempt.update({
+    where: { id: attempt.id },
+    data: {
+      status: newStatus,
+      submittedAt: new Date(),
+      autoSubmitted: true,
+      responses,
+      mcqEarned,
+      essayEarned: hasEssays ? 0 : null,
+      totalPoints,
+      earnedPoints,
+      scorePercent,
+    },
+  });
 }
 
 /**
@@ -603,6 +686,7 @@ async function uploadQuestionImage(fileBuffer, mimeType, filename) {
 module.exports = {
   validateSurveyJson,
   buildAnswerKey,
+  countQuestions,
   sanitizeForStudent,
   gradeMcq,
   computeTotalPoints,

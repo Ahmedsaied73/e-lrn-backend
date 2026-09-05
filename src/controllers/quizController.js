@@ -105,6 +105,10 @@ async function getQuizMeta(req, res) {
     const attemptsUsed = attempts.filter(a => a.status !== STATUS.EXPIRED).length;
     const atMaxAttempts = attemptsUsed >= maxAttempts;
 
+    // Question/points tallies for the intro card
+    const totalQuestions = quizService.countQuestions(quiz.surveyJson);
+    const { totalPoints } = quizService.computeTotalPoints(quiz.answerKey || {});
+
     return res.status(200).json({
       success: true,
       data: {
@@ -123,6 +127,8 @@ async function getQuizMeta(req, res) {
         totalAttempts: attempts.length,
         passed,
         bestScore,
+        totalQuestions,
+        totalPoints,
         inProgressAttempt: inProgressAttempt ? {
           id: inProgressAttempt.id,
           attemptNumber: inProgressAttempt.attemptNumber,
@@ -177,7 +183,9 @@ async function startQuiz(req, res) {
       }
     }
 
-    const { attempt, quiz, resumed } = await quizService.startAttempt(userId, video.quiz.id);
+const { attempt, quiz, resumed } = await quizService.startAttempt(userId, video.quiz.id, {
+      bypassPassedCheck: userRole === 'ADMIN',
+    });
     const safeQuiz = quizService.sanitizeForStudent(quiz);
 
     return res.status(200).json({
@@ -196,7 +204,7 @@ async function startQuiz(req, res) {
   } catch (error) {
     console.error('[QuizController] startQuiz error:', error);
     const statusCode = error.statusCode || 500;
-    return res.status(statusCode).json({ success: false, error: error.message });
+    return res.status(statusCode).json({ success: false, error: error.message, code: error.code });
   }
 }
 

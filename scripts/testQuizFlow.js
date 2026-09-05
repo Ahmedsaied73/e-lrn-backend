@@ -27,9 +27,11 @@
  *   B17 admin grade essay         → 200
  *   B18 student result            → GRADED, passed (80>=60), earnedPoints=80
  *   B19 playback v3               → still 403 (quiz2 not passed)
- *   B20 max-attempts: 3 fails on quiz2 → 4th start → 409
+ *   B14 pass quiz2  → B20 essay grade  → ...
+ *   B21 passed student retry quiz2    → 409 ALREADY_PASSED (bug-fix #4)
+ *   B22 fresh failing student burns 3/3 → 4th start → 409 MAX_ATTEMPTS
  *
- * Re-runnable: existing test student's attempts/progress are wiped first.
+ * Re-runnable: existing test students' attempts/progress are wiped first.
  */
 
 const config = require('../src/config/env');
@@ -42,6 +44,14 @@ const STUDENT = {
   email: 'seqquiz@localhost.test',
   password: 'SeqQuiz#2026',
   phoneNumber: '01097776654',
+  grade: 'THIRD_SECONDARY',
+};
+
+const FAILER = {
+  name: 'Quiz Failer',
+  email: 'maxattempts@localhost.test',
+  password: 'MaxAtt#2026',
+  phoneNumber: '01097776655',
   grade: 'THIRD_SECONDARY',
 };
 
@@ -162,6 +172,26 @@ async function ensureStudent() {
     if (![201, 200].includes(reg.status)) throw new Error(`Student registration failed: ${JSON.stringify(reg.data)}`);
     sess = await loginAs(STUDENT.email, STUDENT.password);
     if (sess.status !== 200) throw new Error(`Student login failed: ${JSON.stringify(sess.data)}`);
+  }
+  return sess;
+}
+
+async function ensureFailer() {
+  let sess = await loginAs(FAILER.email, FAILER.password);
+  if (sess.status !== 200) {
+    const reg = await api('/auth/register', {
+      method: 'POST',
+      body: {
+        email: FAILER.email,
+        password: FAILER.password,
+        name: FAILER.name,
+        phoneNumber: FAILER.phoneNumber,
+        grade: FAILER.grade,
+      },
+    });
+    if (![201, 200].includes(reg.status)) throw new Error(`Failer registration failed: ${JSON.stringify(reg.data)}`);
+    sess = await loginAs(FAILER.email, FAILER.password);
+    if (sess.status !== 200) throw new Error(`Failer login failed: ${JSON.stringify(sess.data)}`);
   }
   return sess;
 }
@@ -362,12 +392,28 @@ async function main() {
   check('B20b playback v3 → still 200 (essay failed-to-pass does not regress the gate)',
     r.status === 200, `status=${r.status}`);
 
-  // ── B21: max-attempts retake limiter on quiz2 (2 used → burn 3rd → 4th = 409)
-  const t3 = d(await start(v2.id));
-  await submit(t3.attemptId, { q1: 'Luxor', q2: 'Euphrates' }); // 3rd attempt used
-  const s4 = await start(v2.id);
-  check('B21 maxAttempts=3 → 4th start → 409',
-    s4.status === 409, `status=${s4.status} body=${JSON.stringify(s4.data)}`);
+  // ── B21: a passed student must NOT retake (bug-fix round #4) ──
+  const sPass = await start(v2.id);
+  check('B21 retry after pass → 409 ALREADY_PASSED',
+    sPass.status === 409 && sPass.data?.code === 'ALREADY_PASSED', `status=${sPass.status} code=${sPass.data?.code}`);
+
+  // ── B22: max-attempts retake limiter — needs a FRESH student who never
+  //     passed (a passed student is now blocked from starting at all).
+  const failer = await ensureFailer();
+  const failerUser = await prisma.user.findUnique({ where: { email: FAILER.email }, select: { id: true } });
+  await resetStudentState(failerUser.id, course.id);
+  const fEnroll = await prisma.enrollment.findFirst({ where: { userId: failerUser.id, courseId: course.id } });
+  if (fEnroll) await prisma.enrollment.update({ where: { id: fEnroll.id }, data: { isPaid: true } });
+  else await prisma.enrollment.create({ data: { userId: failerUser.id, courseId: course.id, isPaid: true, paymentDate: new Date() } });
+  await api('/progress/complete', { method: 'POST', cookie: failer.cookie, body: { videoId: v1.id } });
+  await api('/progress/complete', { method: 'POST', cookie: failer.cookie, body: { videoId: v2.id } });
+  for (let i = 0; i < 3; i++) {
+    const tf = d(await api(`/quizzes/videos/${v2.id}/start`, { method: 'POST', cookie: failer.cookie, body: {} }));
+    await api(`/quizzes/attempts/${tf.attemptId}/submit`, { method: 'POST', cookie: failer.cookie, body: { answers: { q1: 'Luxor', q2: 'Euphrates' } } });
+  }
+  const sMax = await api(`/quizzes/videos/${v2.id}/start`, { method: 'POST', cookie: failer.cookie, body: {} });
+  check('B22 maxAttempts=3 → 4th start (never passed) → 409',
+    sMax.status === 409, `status=${sMax.status} code=${sMax.data?.code} body=${JSON.stringify(sMax.data)}`);
 
   // ── Summary ────────────────────────────────────────────────────────────────
   console.log('\n========================================');
