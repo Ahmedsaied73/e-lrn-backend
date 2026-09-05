@@ -35,6 +35,7 @@ const ErrorCodes = {
   // Video resource errors
   VIDEO_NOT_FOUND: 'VIDEO_NOT_FOUND',
   COURSE_NOT_FOUND: 'COURSE_NOT_FOUND',
+  INVALID_VIDEO_IDS: 'INVALID_VIDEO_IDS',
 
   // Authorization errors
   VIDEO_ACCESS_DENIED: 'VIDEO_ACCESS_DENIED',

@@ -14,7 +14,7 @@ model User {
   phoneNumber       String?            @unique
   password          String
   role              Role               @default(STUDENT)
-  grade             Grade? // Student's grade/year
+  grade             Grade              @default(FIRST_SECONDARY) // Student's grade/year (required)
   courses           Course[]           @relation("AdminCourses") // Courses created by the admin
   enrollments       Enrollment[]
   payments          Payment[]
@@ -310,6 +310,9 @@ model BunnyVideo {
   id                 Int         @id @default(autoincrement())
   courseId           Int
   title              String
+  // Position in the course sequence — used for ordering and the sequential gate.
+  // Nullable only for legacy rows; new videos always get max(position)+1.
+  position           Int?
   // Bunny identifiers — bunnyVideoId is set atomically when the row is created
   // (row is only inserted after Bunny video object exists, so never null in practice)
   bunnyVideoId       String      @unique

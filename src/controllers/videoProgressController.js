@@ -107,7 +107,7 @@ const getCourseVideoProgress = async (req, res) => {
 
     const course = await prisma.course.findUnique({
       where: { id: courseId },
-      include: { bunnyVideos: { where: { status: 'READY' }, orderBy: { createdAt: 'asc' } } }
+      include: { bunnyVideos: { where: { status: 'READY' }, orderBy: [{ position: 'asc' }, { createdAt: 'asc' }] } }
     });
 
     if (!course) {

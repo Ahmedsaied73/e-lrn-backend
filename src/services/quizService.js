@@ -243,7 +243,7 @@ async function evaluateBunnyVideoGate(userId, video) {
   // Get all videos in course ordered by position then id
   const courseVideos = await prisma.bunnyVideo.findMany({
     where: { courseId: video.course.id, status: 'READY' },
-    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    orderBy: [{ position: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
     select: { id: true },
   });
 

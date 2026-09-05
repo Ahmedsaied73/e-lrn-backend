@@ -132,6 +132,9 @@ async function createVideo({ courseId, title, requestedByUserId }) {
 
   // Persist local record — if this fails, compensate by deleting the Bunny video
   try {
+    // New videos join the end of the course sequence (position = count + 1)
+    const lastPosition = await prisma.bunnyVideo.count({ where: { courseId } });
+
     const localVideo = await prisma.bunnyVideo.create({
       data: {
         courseId,
@@ -139,6 +142,7 @@ async function createVideo({ courseId, title, requestedByUserId }) {
         bunnyVideoId: bunnyVideo.guid,
         bunnyLibraryId: process.env.BUNNY_STREAM_LIBRARY_ID,
         status: 'PENDING',
+        position: lastPosition + 1,
       },
     });
 
@@ -472,11 +476,12 @@ async function listCourseVideos(courseId, userId, role) {
 
   return prisma.bunnyVideo.findMany({
     where: whereClause,
-    orderBy: { createdAt: 'asc' },
+    orderBy: [{ position: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
     select: {
       id: true,
       courseId: true,
       title: true,
+      position: true,
       bunnyVideoId: true,
       status: true,
       duration: true,
@@ -490,6 +495,61 @@ async function listCourseVideos(courseId, userId, role) {
   });
 }
 
+/**
+ * Reorder the videos in a course by assigning `position` sequentially.
+ * Accepts the video IDs in the desired order. Idempotent and atomic.
+ *
+ * @param {number} courseId
+ * @param {number[]} videoIds - BunnyVideo IDs in desired order
+ * @param {number} requestedByUserId - ADMIN user id (for the audit log)
+ * @returns {Promise<object[]>} Reordered videos (position + id)
+ */
+async function reorderVideos(courseId, videoIds, requestedByUserId) {
+  if (!Array.isArray(videoIds) || videoIds.some(id => !Number.isInteger(id))) {
+    throw new AppError('videoIds must be a non-empty array of integers', 400, ErrorCodes.INVALID_VIDEO_IDS);
+  }
+
+  const course = await prisma.course.findUnique({
+    where: { id: courseId },
+    select: { id: true },
+  });
+  if (!course) {
+    throw new AppError('Course not found', 404, ErrorCodes.COURSE_NOT_FOUND);
+  }
+
+  const existing = await prisma.bunnyVideo.findMany({
+    where: { courseId },
+    select: { id: true },
+  });
+  const existingIds = new Set(existing.map(v => v.id));
+
+  if (videoIds.length !== existingIds.size || videoIds.some(id => !existingIds.has(id))) {
+    throw new AppError(
+      "videoIds must contain exactly the course's videos, each exactly once",
+      400,
+      ErrorCodes.INVALID_VIDEO_IDS
+    );
+  }
+
+  log.info('video.reordered', { courseId, requestedByUserId, count: videoIds.length });
+
+  // Assign positions atomically: 1-based index in the submitted order
+  await prisma.$transaction(
+    videoIds.map((videoId, index) =>
+      prisma.bunnyVideo.update({
+        where: { id: videoId },
+        data: { position: index + 1 },
+      })
+    )
+  );
+
+  return prisma.bunnyVideo.findMany({
+    where: { courseId },
+    orderBy: [{ position: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
+    select: { id: true, title: true, position: true },
+  });
+}
+
 module.exports = {
   createVideo,
   transitionStatus,
@@ -500,5 +560,6 @@ module.exports = {
   listCourseVideos,
   findById,
   findStaleProcessing,
+  reorderVideos,
   BUNNY_STATUS_MAP,
 };

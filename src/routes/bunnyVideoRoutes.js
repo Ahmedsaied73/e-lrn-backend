@@ -31,6 +31,7 @@ const {
   getBunnyVideoPlayback,
   deleteBunnyVideo,
   listCourseBunnyVideos,
+  reorderCourseVideos,
 } = require('../controllers/bunnyVideoController');
 
 // ─── Course-scoped video management ───────────────────────────────────────────
@@ -50,6 +51,14 @@ router.post('/:courseId/videos', authenticateToken, authorizeAdmin(), createBunn
  * Playback access remains protected by GET /videos/:videoId/playback.
  */
 router.get('/:courseId/bunny-videos', authenticateToken, listCourseBunnyVideos);
+
+/**
+ * PUT /courses/:courseId/reorder
+ * Reorder Bunny videos within a course.
+ * Body: { "videoIds": [3, 1, 2] } — BunnyVideo IDs in desired order
+ * Auth: ADMIN only
+ */
+router.put('/:courseId/reorder', authenticateToken, authorizeAdmin(), reorderCourseVideos);
 
 // ─── Video-level operations ────────────────────────────────────────────────────
 

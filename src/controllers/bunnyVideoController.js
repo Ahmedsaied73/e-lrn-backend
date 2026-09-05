@@ -350,10 +350,40 @@ const listCourseBunnyVideos = async (req, res, next) => {
   }
 };
 
+// ─── PUT /courses/:courseId/reorder ──────────────────────────────────────────
+
+/**
+ * Reorder videos within a course.
+ * Auth: authenticateToken + authorizeAdmin (admin only)
+ *
+ * Body: { videoIds: number[] } — BunnyVideo IDs in the desired order.
+ * Positions are reassigned 1-based in the submitted order.
+ */
+const reorderCourseVideos = async (req, res, next) => {
+  try {
+    const courseId = parseInt(req.params.courseId, 10);
+    const { videoIds } = req.body;
+
+    if (!courseId || isNaN(courseId)) {
+      return next(new AppError('Invalid course ID', 400, ErrorCodes.COURSE_NOT_FOUND));
+    }
+
+    const videos = await bunnyVideoService.reorderVideos(courseId, videoIds, req.user.id);
+
+    return res.json({
+      success: true,
+      data: videos,
+    });
+  } catch (err) {
+    return next(err);
+  }
+};
+
 module.exports = {
   createBunnyVideo,
   uploadBunnyVideo,
   getBunnyVideoPlayback,
   deleteBunnyVideo,
   listCourseBunnyVideos,
+  reorderCourseVideos,
 };
