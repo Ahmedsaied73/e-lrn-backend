@@ -1,4 +1,5 @@
 const prisma = require('../config/db');
+const bunnyClient = require('../integrations/bunny/bunnyStreamClient');
 
 // Get all courses (with pagination)
 const getAllCourses = async (req, res) => {
@@ -230,6 +231,12 @@ const deleteCourse = async (req, res) => {
       return res.status(404).json({ success: false, error: 'Course not found' });
     }
 
+    // Collect BunnyVideos for remote cleanup (before DB rows are deleted)
+    const bunnyVideos = await prisma.bunnyVideo.findMany({
+      where: { courseId },
+      select: { bunnyVideoId: true },
+    });
+
     await prisma.$transaction(async (prisma) => {
       if (existingCourse._count.videos > 0) {
         await prisma.video.deleteMany({ where: { courseId } });
@@ -264,6 +271,17 @@ const deleteCourse = async (req, res) => {
 
       await prisma.course.delete({ where: { id: courseId } });
     });
+
+    // ── Bunny remote cleanup (after DB success) ──────────────────────────────
+    // Leave no orphaned videos on Bunny's servers. Errors are logged per-video
+    // and do NOT fail the request — the DB delete already succeeded.
+    for (const video of bunnyVideos) {
+      try {
+        await bunnyClient.deleteVideo(video.bunnyVideoId);
+      } catch (cleanupErr) {
+        console.error(`[deleteCourse] Failed to delete Bunny video ${video.bunnyVideoId}:`, cleanupErr.message);
+      }
+    }
 
     res.json({ success: true, message: 'Course deleted successfully' });
   } catch (error) {
