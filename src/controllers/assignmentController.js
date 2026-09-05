@@ -256,24 +256,19 @@ const submitAssignment = async (req, res) => {
     let submission;
     let mcqScore = null;
 
+    // Guard: a graded submission can never be resubmitted — checked BEFORE any mutation
+    if (existingSubmission && existingSubmission.status !== 'PENDING') {
+      return res.status(400).json({
+        error: 'This assignment has already been graded and cannot be resubmitted'
+      });
+    }
+
     // Handle MCQ assignment submission
     if (assignment.isMCQ) {
       // Process MCQ answers
       let correctAnswers = 0;
       let totalPoints = 0;
       
-      // Delete any existing answers if resubmitting
-      if (existingSubmission) {
-        await prisma.assignmentAnswer.deleteMany({
-          where: {
-            userId: userId,
-            questionId: {
-              in: assignment.AssignmentQuestion.map(q => q.id)
-            }
-          }
-        });
-      }
-
       const answersData = [];
       
       // Process answers for each question
@@ -297,50 +292,93 @@ const submitAssignment = async (req, res) => {
         totalPoints += question.points;
       }
       
-      if (answersData.length > 0) {
-        await prisma.assignmentAnswer.createMany({
-          data: answersData
-        });
-      }
-
       // Calculate score as percentage
       mcqScore = totalPoints > 0 ? (correctAnswers / totalPoints) * 100 : 0;
-    }
 
-    if (existingSubmission) {
-      // Update existing submission
-      if (existingSubmission.status !== 'PENDING') {
-        return res.status(400).json({
-          error: 'This assignment has already been graded and cannot be resubmitted'
-        });
-      }
-
-      submission = await prisma.submission.update({
-        where: { id: existingSubmission.id },
-        data: {
-          content: assignment.isMCQ ? null : content,
-          fileUrl: assignment.isMCQ ? null : fileUrl,
-          mcqScore: assignment.isMCQ ? mcqScore : null,
-          submittedAt: new Date(),
-          // Auto-grade MCQ assignments
-          status: assignment.isMCQ ? 'GRADED' : 'PENDING',
-          grade: assignment.isMCQ ? mcqScore : null,
-          gradedAt: assignment.isMCQ ? new Date() : null
+      // All mutations in ONE transaction: delete old answers + insert new answers + create/update submission
+      submission = await prisma.$transaction(async (tx) => {
+        // Delete any existing answers if resubmitting
+        if (existingSubmission) {
+          await tx.assignmentAnswer.deleteMany({
+            where: {
+              userId: userId,
+              questionId: {
+                in: assignment.AssignmentQuestion.map(q => q.id)
+              }
+            }
+          });
         }
+
+        if (answersData.length > 0) {
+          await tx.assignmentAnswer.createMany({
+            data: answersData
+          });
+        }
+
+        if (existingSubmission) {
+          // Update existing submission
+          return tx.submission.update({
+            where: { id: existingSubmission.id },
+            data: {
+              content: assignment.isMCQ ? null : content,
+              fileUrl: assignment.isMCQ ? null : fileUrl,
+              mcqScore: assignment.isMCQ ? mcqScore : null,
+              submittedAt: new Date(),
+              // Auto-grade MCQ assignments
+              status: assignment.isMCQ ? 'GRADED' : 'PENDING',
+              grade: assignment.isMCQ ? mcqScore : null,
+              gradedAt: assignment.isMCQ ? new Date() : null
+            }
+          });
+        }
+
+        // Create new submission
+        return tx.submission.create({
+          data: {
+            userId: userId,
+            assignmentId: parseInt(assignmentId),
+            content: assignment.isMCQ ? null : content,
+            fileUrl: assignment.isMCQ ? null : fileUrl,
+            mcqScore: assignment.isMCQ ? mcqScore : null,
+            status: assignment.isMCQ ? 'GRADED' : 'PENDING',
+            grade: assignment.isMCQ ? mcqScore : null,
+            gradedAt: assignment.isMCQ ? new Date() : null
+          }
+        });
       });
     } else {
-      // Create new submission
-      submission = await prisma.submission.create({
-        data: {
-          userId: userId,
-          assignmentId: parseInt(assignmentId),
-          content: assignment.isMCQ ? null : content,
-          fileUrl: assignment.isMCQ ? null : fileUrl,
-          mcqScore: assignment.isMCQ ? mcqScore : null,
-          status: assignment.isMCQ ? 'GRADED' : 'PENDING',
-          grade: assignment.isMCQ ? mcqScore : null,
-          gradedAt: assignment.isMCQ ? new Date() : null
+      // Text assignment: replace or create the submission (answers unchanged)
+      submission = await prisma.$transaction(async (tx) => {
+        if (existingSubmission) {
+          // Update existing submission
+          return tx.submission.update({
+            where: { id: existingSubmission.id },
+            data: {
+              content: assignment.isMCQ ? null : content,
+              fileUrl: assignment.isMCQ ? null : fileUrl,
+              mcqScore: assignment.isMCQ ? mcqScore : null,
+              submittedAt: new Date(),
+              // Auto-grade MCQ assignments
+              status: assignment.isMCQ ? 'GRADED' : 'PENDING',
+              grade: assignment.isMCQ ? mcqScore : null,
+              gradedAt: assignment.isMCQ ? new Date() : null
+            }
+          });
         }
+
+        // Create new submission
+        return tx.submission.create({
+          data: {
+            userId: userId,
+            assignmentId: parseInt(assignmentId),
+            content: assignment.isMCQ ? null : content,
+            fileUrl: assignment.isMCQ ? null : fileUrl,
+            mcqScore: assignment.isMCQ ? mcqScore : null,
+            status: assignment.isMCQ ? 'GRADED' : 'PENDING',
+            grade: assignment.isMCQ ? mcqScore : null,
+            gradedAt: assignment.isMCQ ? new Date() : null
+          }
+        });
       });
     }
 

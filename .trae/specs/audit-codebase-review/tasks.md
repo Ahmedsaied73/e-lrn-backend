@@ -5,9 +5,9 @@
 - [ ] Task 2 (P0): Enforce enrollment gate on course videos
   - [ ] 2.1: In `coursesController.getCourseById`, strip/nullify video `url` when requester lacks paid enrollment and is not ADMIN.
 - [ ] Task 3 (P0): Stop data loss on graded-MCQ resubmission
-  - [ ] 3.1: Move the graded-status guard above the `deleteMany`; wrap delete+createMany+submission update/create in one `$transaction`.
+  - [x] 3.1: Move the graded-status guard above the `deleteMany`; wrap delete+createMany+submission update/create in one `$transaction`.
 - [ ] Task 4 (P0): Fix search crash on MySQL
-  - [ ] 4.1: Remove `mode: 'insensitive'` from both queries in `searchController.js`.
+  - [x] 4.1: Remove `mode: 'insensitive'` from both queries in `searchController.js`.
 - [ ] Task 5 (P1): Stop MCQ answer leakage in assignments
   - [ ] 5.1: In `assignmentController.getAssignment`, select only `id, text, options, points` for students; include `correctOption/explanation` only for admins or after submission exists.
 - [ ] Task 6 (P1): Separate refresh-token secret

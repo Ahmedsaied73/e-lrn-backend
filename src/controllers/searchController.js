@@ -38,8 +38,8 @@ const searchContent = async (req, res) => {
     if (query) {
       courseWhereClause.AND.push({
         OR: [
-          { title: { contains: query, mode: 'insensitive' } },
-          { description: { contains: query, mode: 'insensitive' } }
+          { title: { contains: query } },
+          { description: { contains: query } }
         ]
       });
     }
@@ -145,8 +145,8 @@ const searchContent = async (req, res) => {
       // For videos, we need to join with courses to apply the same filters
       const videoWhereClause = {
         OR: [
-          { title: { contains: query, mode: 'insensitive' } },
-          { description: { contains: query, mode: 'insensitive' } }
+          { title: { contains: query } },
+          { description: { contains: query } }
         ],
         course: {}
       };
