@@ -128,23 +128,23 @@ Students must complete prerequisites before accessing the next video:
 - **Payment is disabled**: All enrollments auto-mark as paid. Payment controller returns 403 in production. Access control middleware auto-grants `isPaid` on every request.
 - **`createCourse` teacher attribution**: Always assigns to first ADMIN user found, not the requesting user.
 - **Cookie/JWT expiry mismatch**: Access cookie maxAge = 15min, but JWT expiry = 1h.
-- **`BunnyVideo` has no `position` field** — ordering is by `createdAt` only, no reorder API.
 
-## Bugs confirmed by grilling (fix priority)
+## Bug fixes applied (grilling round, Sept 2026)
 
-### Critical (fix immediately)
-1. **`previousVideo` undefined** — `sequentialAccess.js:76` references `previousVideo` but `evaluateGate` returns `previousVideoId`. Throws `ReferenceError`. Never tested.
-2. **`evaluateGate` only queries `BunnyVideo`** — legacy Video courses completely locked for students. `evaluateGate` does `prisma.bunnyVideo.findUnique({ where: { id: videoId } })` — a legacy Video ID won't be found.
-3. **`deleteCourse` doesn't clean up Bunny remote** — deletes DB rows but never calls `bunnyClient.deleteVideo()`. Orphaned videos cost money.
-4. **`submitAttempt` ternary is dead code** — both branches identical (`mcqEarned`), essay score always 0 at submission.
+All 11 confirmed bugs are **fixed and committed on `Dev`** (see `plans/bug-fix-plan.md`). Summary:
 
-### Schema/Design (fix before launch)
-5. No `position` on `BunnyVideo` — needs migration + reorder API.
-6. Quiz retake logic undefined — no max attempts, no retake flow.
-7. `User.grade` optional but required for recommendations — students without grade get nothing.
-8. README completely stale — wrong roles, wrong quiz model, outdated instructions.
+| # | Fix | Where |
+|---|-----|-------|
+| 1.1 | `previousVideo` undefined → derived from `courseVideos[currentVideoIndex - 1].id` | `src/middlewares/sequentialAccess.js` |
+| 1.2 | `evaluateGate` supports both `Video` and `BunnyVideo` (split into `evaluateBunnyVideoGate` / `evaluateLegacyVideoGate`) | `src/services/quizService.js` |
+| 1.3 | `deleteCourse` cleans up Bunny remote videos (per-video, errors logged not fatal) | `src/controllers/coursesController.js` |
+| 1.4 | `submitAttempt` dead ternary simplified (MCQ now, essay at grading) | `src/services/quizService.js` |
+| 2.3 | `User.grade` required (`@default(FIRST_SECONDARY)`), registration already validated | `prisma/schema.prisma` + migration `20260905000000_require_user_grade` |
+| 2.1 | `BunnyVideo.position` + `PUT /courses/:courseId/reorder` (ADMIN) | `prisma/schema.prisma` + migration `20260905010000_bunny_video_position`, `bunnyVideoService.js`, `bunnyVideoController.js`, `bunnyVideoRoutes.js`, `quizService.js`, `videoProgressController.js` |
+| 2.2 | `Quiz.maxAttempts` (default 3), 409 once exhausted, EXPIRED attempts don't burn a retake | `prisma/schema.prisma` + migration `20260905020000_quiz_max_attempts`, `quizService.js`, `quizController.js`, `quizConfig.js` |
+| 2.4 | README rewritten to match current stack | `README.md` |
+| 3.1 | `scripts/testImports.js` removed | deleted |
+| 3.2 | `getCookieConfig()` removed from `src/utils.js` | `src/utils.js` |
+| 3.3 | Empty placeholders removed: `src/routes/videoProcessing.js`, `src/controllers/videoProcessingController.js`, `src/middlewares.js` | deleted |
 
-### Dead code (clean up)
-9. `testImports.js` — references nonexistent `youtubeRoutes`. Remove.
-10. `getCookieConfig()` in `src/utils.js` — never imported. Remove.
-11. `videoProcessing.js` / `videoProcessingController.js` — empty placeholders. Review before removing.
+**Pending (user-managed)**: The three migrations above are authored and committed but **not yet applied**. Run `npx prisma migrate dev` (applies all pending + regenerates Prisma client) before testing. Frontend type updates (position, maxAttempts, 409 handling) are committed on the frontend `Dev` branch (`e5d825a`).
