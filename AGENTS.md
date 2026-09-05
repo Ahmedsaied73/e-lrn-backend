@@ -179,6 +179,10 @@ Sealed plan: `plans/security-round1.md`. All changes paired backend ↔ frontend
 
 Passing a quiz with an essay still **requires an admin-graded essay** (score% uses `mcqEarned/(mcq+essay)`). A perfect MCQ score alone can be blocked pending grading. Accepted behavior until an AI-grader is built (user decision).
 
+### Frontend agent coordination
+
+The FE agent's shared brain lives at **`<frontend>\plans\frontend-handoff.md`** (committed `2048d35`) — read it, and keep it updated, whenever backend behavior changes that the FE depends on (auth, error codes, endpoints).
+
 ### Out of scope (deferred)
 
 CSP/security headers (#7), `/courses/enrolled` response shape (#9), paywall stays free, admin site work beyond the layout guard.
