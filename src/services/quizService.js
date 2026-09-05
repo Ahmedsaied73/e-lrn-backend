@@ -448,9 +448,11 @@ async function submitAttempt(userId, attemptId, responses, autoSubmitted = false
 
   const hasEssays = totalEssayPoints > 0;
 
-  // If no essays: immediately graded. If essays: status = GRADING (pending manual grade).
-  const earnedPoints = hasEssays ? mcqEarned : mcqEarned; // essays add 0 until graded
-  const scorePercent = hasEssays ? computeScorePercent(mcqEarned, totalPoints) : computeScorePercent(mcqEarned, totalPoints);
+  // MCQ points count immediately. Essay points are added later by admin
+  // grading, so scorePercent at submission reflects MCQ-only against the
+  // full total (including essay points).
+  const earnedPoints = mcqEarned;
+  const scorePercent = computeScorePercent(mcqEarned, totalPoints);
   const newStatus = hasEssays ? STATUS.GRADING : STATUS.GRADED;
 
   const updated = await prisma.quizAttempt.update({
