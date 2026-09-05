@@ -20,6 +20,7 @@ model User {
   payments          Payment[]
   certificates      Certificate[]
   videoProgress     VideoProgress[]
+  bunnyVideoProgress BunnyVideoProgress[]
   quizAttempts      QuizAttempt[]      // SurveyJS quiz attempts
   gateExemptions    GateExemption[]    // Admin-granted quiz gate bypasses
   assignmentAnswers AssignmentAnswer[] // Answers to MCQ assignment questions
@@ -63,7 +64,6 @@ model Video {
   position      Int?
   // Additional metadata
   videoProgress VideoProgress[]
-  quiz          Quiz?          // SurveyJS quiz (one optional quiz per video)
   assignments   Assignment[] // Video can have assignments
   description   String?
   transcript    String? // For searchable video content
@@ -168,7 +168,7 @@ model VideoProgress {
 
 model Quiz {
   id           Int           @id @default(autoincrement())
-  videoId      Int           @unique               // 1-to-1: one quiz per video
+  bunnyVideoId Int           @unique               // 1-to-1: one quiz per Bunny video
   title        String
   timeLimitSec Int?                                // null = untimed; e.g. 600 = 10 min
   passingScore Int           @default(50)          // percentage required to pass (default 50%)
@@ -177,10 +177,10 @@ model Quiz {
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
 
-  video        Video         @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  bunnyVideo   BunnyVideo    @relation(fields: [bunnyVideoId], references: [id], onDelete: Cascade)
   attempts     QuizAttempt[]
 
-  @@index([videoId])
+  @@index([bunnyVideoId])
 }
 
 model QuizAttempt {
@@ -223,15 +223,15 @@ enum QuizAttemptStatus {
 model GateExemption {
   id        Int      @id @default(autoincrement())
   userId    Int
-  videoId   Int                             // video that owns the quiz being waived
+  bunnyVideoId Int                          // Bunny video that owns the quiz being waived
   grantedBy Int                             // admin userId who created this exemption
   reason    String?
   createdAt DateTime @default(now())
 
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@unique([userId, videoId])
-  @@index([videoId])
+  @@unique([userId, bunnyVideoId])
+  @@index([bunnyVideoId])
 }
 
 // New model for assignments
@@ -306,9 +306,6 @@ enum SubmissionStatus {
   REJECTED
 }
 
-// Bunny.net Stream video model — standalone, separate from YouTube/local Video model.
-// VideoProgress and Assignment continue to reference the old Video model.
-// This model can grow independently and old Video can be removed later without impact.
 model BunnyVideo {
   id                 Int         @id @default(autoincrement())
   courseId           Int
@@ -330,9 +327,25 @@ model BunnyVideo {
   createdAt          DateTime    @default(now())
   updatedAt          DateTime    @updatedAt
 
-  course Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  course        Course               @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  quiz          Quiz?
+  progress      BunnyVideoProgress[]
 
   // Query patterns: list by course, filter by status, webhook lookup by bunnyVideoId (unique index)
   @@index([courseId])
   @@index([status])
+}
+
+model BunnyVideoProgress {
+  id           Int        @id @default(autoincrement())
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId       Int
+  bunnyVideo   BunnyVideo @relation(fields: [bunnyVideoId], references: [id], onDelete: Cascade)
+  bunnyVideoId Int
+  completed    Boolean    @default(false)
+  watchedAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@unique([userId, bunnyVideoId])
+  @@index([bunnyVideoId])
 }

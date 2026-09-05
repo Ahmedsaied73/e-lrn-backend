@@ -32,11 +32,11 @@ async function getQuizMeta(req, res) {
       return res.status(400).json({ success: false, error: 'Invalid video ID' });
     }
 
-    const video = await prisma.video.findUnique({
+    const video = await prisma.bunnyVideo.findUnique({
       where: { id: videoId },
       include: {
         quiz: true,
-        course: { select: { id: true, title: true } },
+        course: { select: { id: true } },
       },
     });
 
@@ -70,8 +70,8 @@ async function getQuizMeta(req, res) {
     // Check if video is completed (unlock signal for quiz)
     let videoCompleted = true;
     if (userRole !== 'ADMIN') {
-      const progress = await prisma.videoProgress.findFirst({
-        where: { userId, videoId, completed: true },
+      const progress = await prisma.bunnyVideoProgress.findFirst({
+        where: { userId, bunnyVideoId: videoId, completed: true },
       });
       videoCompleted = !!progress;
     }
@@ -143,7 +143,7 @@ async function startQuiz(req, res) {
       return res.status(400).json({ success: false, error: 'Invalid video ID' });
     }
 
-    const video = await prisma.video.findUnique({
+    const video = await prisma.bunnyVideo.findUnique({
       where: { id: videoId },
       include: { quiz: true },
     });
@@ -161,8 +161,8 @@ async function startQuiz(req, res) {
         return res.status(403).json({ success: false, error: 'You are not enrolled in this course' });
       }
 
-      const progress = await prisma.videoProgress.findFirst({
-        where: { userId, videoId, completed: true },
+      const progress = await prisma.bunnyVideoProgress.findFirst({
+        where: { userId, bunnyVideoId: videoId, completed: true },
       });
       if (!progress) {
         return res.status(403).json({ success: false, error: 'You must complete the video before taking the quiz' });
@@ -365,7 +365,7 @@ async function getStudentAttempts(req, res) {
     }
 
     const quiz = await prisma.quiz.findUnique({
-      where: { videoId },
+      where: { bunnyVideoId: videoId },
       select: { id: true, title: true, passingScore: true },
     });
 
@@ -424,7 +424,7 @@ async function upsertQuiz(req, res) {
       return res.status(400).json({ success: false, error: 'Title is required' });
     }
 
-    const video = await prisma.video.findUnique({ where: { id: videoId } });
+    const video = await prisma.bunnyVideo.findUnique({ where: { id: videoId } });
     if (!video) {
       return res.status(404).json({ success: false, error: 'Video not found' });
     }
@@ -466,9 +466,9 @@ async function upsertQuiz(req, res) {
     }
 
     const quiz = await prisma.quiz.upsert({
-      where: { videoId },
+      where: { bunnyVideoId: videoId },
       create: {
-        videoId,
+        bunnyVideoId: videoId,
         title: title.trim(),
         timeLimitSec: timeLimit,
         passingScore: passScore,
@@ -635,10 +635,10 @@ async function grantExemption(req, res) {
     }
 
     const exemption = await prisma.gateExemption.upsert({
-      where: { userId_videoId: { userId: parsedUserId, videoId } },
+      where: { userId_bunnyVideoId: { userId: parsedUserId, bunnyVideoId: videoId } },
       create: {
         userId: parsedUserId,
-        videoId,
+        bunnyVideoId: videoId,
         grantedBy: adminId,
         reason: reason || null,
       },

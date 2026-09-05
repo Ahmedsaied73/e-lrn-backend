@@ -24,6 +24,7 @@ const express = require('express');
 const router = express.Router();
 
 const { authenticateToken, authorizeAdmin } = require('../middlewares/index');
+const { ensureBunnySequentialAccess } = require('../middlewares/bunnySequentialAccess');
 const {
   createBunnyVideo,
   uploadBunnyVideo,
@@ -45,7 +46,8 @@ router.post('/:courseId/videos', authenticateToken, authorizeAdmin(), createBunn
 /**
  * GET /courses/:courseId/bunny-videos
  * List all Bunny videos for a course.
- * Auth: authenticateToken (Admin sees all; Student sees READY only after enrollment verification)
+ * Auth: authenticateToken (Admin sees all; students see READY metadata)
+ * Playback access remains protected by GET /videos/:videoId/playback.
  */
 router.get('/:courseId/bunny-videos', authenticateToken, listCourseBunnyVideos);
 
@@ -66,7 +68,7 @@ router.post('/:videoId/upload', authenticateToken, authorizeAdmin(), uploadBunny
  * Auth: authenticateToken (ADMIN + enrolled STUDENT)
  * Note: Admin bypasses enrollment check in the controller.
  */
-router.get('/:videoId/playback', authenticateToken, getBunnyVideoPlayback);
+router.get('/:videoId/playback', authenticateToken, ensureBunnySequentialAccess, getBunnyVideoPlayback);
 
 /**
  * DELETE /videos/bunny/:videoId

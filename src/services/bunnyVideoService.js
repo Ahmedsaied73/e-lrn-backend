@@ -447,7 +447,8 @@ async function deleteVideo(videoId) {
 /**
  * List Bunny videos for a course.
  * If user is ADMIN, returns all videos (including PENDING/PROCESSING/FAILED).
- * If user is STUDENT, verifies enrollment and returns READY videos only.
+ * Students may view READY video metadata before enrollment; playback access is
+ * still enforced separately by getPlaybackAccess().
  *
  * @param {number} courseId
  * @param {number} userId
@@ -462,20 +463,6 @@ async function listCourseVideos(courseId, userId, role) {
 
   if (!course) {
     throw new AppError('Course not found', 404, ErrorCodes.COURSE_NOT_FOUND);
-  }
-
-  if (role !== 'ADMIN') {
-    const enrollment = await prisma.enrollment.findFirst({
-      where: { userId, courseId },
-    });
-
-    if (!enrollment) {
-      throw new AppError(
-        'You must be enrolled in this course to view its videos',
-        403,
-        ErrorCodes.COURSE_ACCESS_DENIED
-      );
-    }
   }
 
   const whereClause = { courseId };

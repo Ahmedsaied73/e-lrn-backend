@@ -133,7 +133,7 @@ function buildAnswerKey(surveyJson, answerKeyInput) {
 function sanitizeForStudent(quiz) {
   return {
     id: quiz.id,
-    videoId: quiz.videoId,
+    videoId: quiz.bunnyVideoId,
     title: quiz.title,
     timeLimitSec: quiz.timeLimitSec,
     passingScore: quiz.passingScore,
@@ -219,16 +219,16 @@ async function evaluateGate(userId, videoId, userRole) {
   if (userRole === 'ADMIN') return { allowed: true };
 
   // Get the requested video and its course
-  const video = await prisma.video.findUnique({
+  const video = await prisma.bunnyVideo.findUnique({
     where: { id: videoId },
     include: { course: { select: { id: true } } },
   });
   if (!video) return { allowed: false, reason: 'Video not found' };
 
   // Get all videos in course ordered by position then id
-  const courseVideos = await prisma.video.findMany({
-    where: { courseId: video.courseId },
-    orderBy: [{ position: 'asc' }, { id: 'asc' }],
+  const courseVideos = await prisma.bunnyVideo.findMany({
+    where: { courseId: video.courseId, status: 'READY' },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     select: { id: true },
   });
 
@@ -239,13 +239,13 @@ async function evaluateGate(userId, videoId, userRole) {
 
   // Check GateExemption for previous video
   const exemption = await prisma.gateExemption.findUnique({
-    where: { userId_videoId: { userId, videoId: previousVideoId } },
+    where: { userId_bunnyVideoId: { userId, bunnyVideoId: previousVideoId } },
   });
   if (exemption) return { allowed: true };
 
   // Check previous video completion
-  const progress = await prisma.videoProgress.findFirst({
-    where: { userId, videoId: previousVideoId, completed: true },
+  const progress = await prisma.bunnyVideoProgress.findFirst({
+    where: { userId, bunnyVideoId: previousVideoId, completed: true },
   });
   if (!progress) {
     return {
@@ -257,7 +257,7 @@ async function evaluateGate(userId, videoId, userRole) {
 
   // Check if previous video has a quiz
   const quiz = await prisma.quiz.findUnique({
-    where: { videoId: previousVideoId },
+    where: { bunnyVideoId: previousVideoId },
     select: { id: true, passingScore: true },
   });
 
