@@ -1,7 +1,7 @@
 # Quiz Feature + Gate Integration Test Plan (Sept 2026)
 
-Status: **EXECUTED — ALL 24 ASSERTIONS PASSED** (Phases A + B green; Phase C pending Chromium install)
-Target: `scripts/testQuizFlow.js` (separate from `scripts/uploadDemoVideos.js`).
+Status: **EXECUTED — ALL 24 API ASSERTIONS + 7 BROWSER ASSERTIONS PASSED**
+Target: `scripts/testQuizFlow.js` (API) + `scripts/playwright-quiz-test.js` (browser).
 
 ## Grilling answers (locked)
 
@@ -44,10 +44,15 @@ Caveats discovered:
 
 ## Remaining
 
-- **Phase C (Playwright):** install Chromium first (`cd C:\Users\Ahmed Saied\.agents\skills\playwright-skill && npm run setup`), then browser flow: login as `seqquiz@localhost.test` → course #1 → watch video → pass quiz in SurveyJS UI → next video unlocks. Screenshots to `PW_ARTIFACT_DIR`.
+- **Phase C (Playwright):** DONE — quiz-only browser pass (user narrowed scope): 7/7 assertions green.
+  - Setup via API: fresh students (locked + passing), enroll, v1 quiz ensured, v1 completed via API for the passing student.
+  - Browser flow (FE :3000): intro card locked for un-completed video (Q1/Q2) → intro details for unlocked (Q3) → runner opens (Q4) → answer both MCQ via choice labels (Q5) → submit via confirm dialog (Q6) → result "ناجح ومتميز" + 100% (Q6/Q7).
+  - Script: `scripts/playwright-quiz-test.js` (run via playwright skill: `node run.js ...`). Screenshots under `playwright-artifacts/`.
+  - Notes: radio inputs are `sr-only` behind their `<label>` — click the label, not `check()`. The old full-flow (watch → complete → unlock) browser pass hit a flaky blank-page on the video page and was dropped per user decision; backend gate semantics are already covered by API assertions.
 
 ## Re-running
 
 ```bash
-node scripts/testQuizFlow.js   # requires backend up; wipes test-student state each run
+node scripts/testQuizFlow.js            # API suite (requires backend up; wipes test-student state)
+node scripts/playwright-quiz-test.js    # browser suite (FE :3000 + BE :3005; needs playwright Chromium)
 ```

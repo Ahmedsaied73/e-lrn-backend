@@ -3,3 +3,5 @@ node_modules
 .vscode
 examples
 backend.log
+
+playwright-artifacts/
