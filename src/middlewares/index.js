@@ -33,7 +33,6 @@ const authenticateToken = (req, res, next) => {
 };
 
 /**
-/**
  * Optional authentication — resolves the current session when a valid access
  * token is present, but never rejects the request. Used on /auth/register so a
  * logged-in caller (e.g. an admin adding a student) keeps their own session
