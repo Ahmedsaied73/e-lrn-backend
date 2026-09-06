@@ -88,7 +88,7 @@ const deleteUser = async (req, res) => {
 // update user
 const updateUser = async (req, res) => {
   const { userId } = req.params;
-  const { name, email, password } = req.body;
+  const { name, email, password, grade, phoneNumber } = req.body;
   const requesterId = req.user.id;
   const requesterRole = req.user.role;
 
@@ -98,11 +98,26 @@ const updateUser = async (req, res) => {
       return res.status(403).json({ success: false, error: "You do not have permission to update this user's data." });
     }
 
+    const isAdmin = requesterRole === 'ADMIN';
+
     // Update user data
     const updateData = {};
     if (name) updateData.name = name;
     if (email) updateData.email = email;
     if (password) updateData.password = await bcrypt.hash(password, 10);
+    // Admin-only fields: students cannot self-edit grade / phoneNumber
+    if (isAdmin) {
+      const GRADES = ['FIRST_SECONDARY', 'SECOND_SECONDARY', 'THIRD_SECONDARY'];
+      if (grade !== undefined) {
+        if (!GRADES.includes(grade)) {
+          return res.status(400).json({ success: false, error: 'Invalid grade value.' });
+        }
+        updateData.grade = grade;
+      }
+      if (phoneNumber !== undefined && phoneNumber !== null && String(phoneNumber).trim() !== '') {
+        updateData.phoneNumber = String(phoneNumber).trim();
+      }
+    }
 
     const updatedUser = await prisma.user.update({
       where: { id: parseInt(userId) },
