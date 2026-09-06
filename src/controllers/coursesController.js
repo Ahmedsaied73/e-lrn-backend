@@ -18,6 +18,9 @@ const getAllCourses = async (req, res) => {
           },
           videos: {
             select: { id: true, title: true, duration: true }
+          },
+          _count: {
+            select: { videos: true, enrollments: true }
           }
         }
       }),
@@ -136,7 +139,7 @@ const getCourseById = async (req, res) => {
 // Create a new course (automatically linked to the admin/teacher)
 const createCourse = async (req, res) => {
   try {
-    const { title, description, price, grade, thumbnail } = req.body;
+    const { title, description, price, grade, category, thumbnail } = req.body;
 
     if (!title || !description || price === undefined || !grade) {
       return res.status(400).json({ success: false, error: 'Title, description, price, and grade are required' });
@@ -161,6 +164,7 @@ const createCourse = async (req, res) => {
         description,
         price: parseFloat(price),
         grade,
+        category: category || undefined,
         thumbnail: thumbnail || 'https://via.placeholder.com/640x360?text=No+Thumbnail',
         teacherId: admin.id
       }
@@ -177,7 +181,7 @@ const createCourse = async (req, res) => {
 const updateCourse = async (req, res) => {
   try {
     const { id } = req.params;
-    const { title, description, price, grade, thumbnail } = req.body;
+    const { title, description, price, grade, category, thumbnail } = req.body;
 
     const existingCourse = await prisma.course.findUnique({
       where: { id: parseInt(id) }
@@ -199,6 +203,7 @@ const updateCourse = async (req, res) => {
       description: description || undefined,
       price: price !== undefined ? parseFloat(price) : undefined,
       grade: grade || undefined,
+      category: category || undefined,
       thumbnail: thumbnail || undefined
     };
 
