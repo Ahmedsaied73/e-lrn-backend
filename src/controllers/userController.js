@@ -8,6 +8,7 @@ const selectWithoutPassword = {
   phoneNumber: true,
   grade: true,
   role: true,
+  lastLoginAt: true,
   createdAt: true
 };
 
@@ -37,10 +38,11 @@ const getUser = async (req, res) => {
 // delete user
 const deleteUser = async (req, res) => {
   const { userId } = req.params;
+  const userIdNum = parseInt(userId, 10);
 
   try {
     const user = await prisma.user.findUnique({
-      where: { id: parseInt(userId, 10) }
+      where: { id: userIdNum }
     });
 
     if (!user) {
@@ -48,14 +50,34 @@ const deleteUser = async (req, res) => {
     }
 
     // Prevent admin from deleting themselves
-    if (parseInt(userId, 10) === req.user.id) {
+    if (userIdNum === req.user.id) {
       return res.status(400).json({ success: false, error: 'Cannot delete your own admin account.' });
     }
 
-    // Delete the user
-    await prisma.user.delete({
-      where: { id: parseInt(userId, 10) }
-    });
+    // Course owners must release their courses first (bulk delete would bypass
+    // the Bunny remote-video cleanup in coursesController). Students never own
+    // courses, so this only affects admins/teachers.
+    const ownedCourses = await prisma.course.count({ where: { teacherId: userIdNum } });
+    if (ownedCourses > 0) {
+      return res.status(409).json({ success: false, error: 'User owns courses. Move or delete their courses before deleting the user.' });
+    }
+
+    // Transactional cascade: several child relations (Enrollment, Payment,
+    // Certificate, VideoProgress, AssignmentAnswer, Submission) default to
+    // Restrict — a raw user.delete would throw a P2003 FK failure for any user
+    // with rows in those tables. Explicitly remove children first, then the user.
+    await prisma.$transaction([
+      prisma.quizAttempt.deleteMany({ where: { userId: userIdNum } }),
+      prisma.gateExemption.deleteMany({ where: { userId: userIdNum } }),
+      prisma.assignmentAnswer.deleteMany({ where: { userId: userIdNum } }),
+      prisma.submission.deleteMany({ where: { userId: userIdNum } }),
+      prisma.bunnyVideoProgress.deleteMany({ where: { userId: userIdNum } }),
+      prisma.videoProgress.deleteMany({ where: { userId: userIdNum } }),
+      prisma.enrollment.deleteMany({ where: { userId: userIdNum } }),
+      prisma.payment.deleteMany({ where: { userId: userIdNum } }),
+      prisma.certificate.deleteMany({ where: { userId: userIdNum } }),
+      prisma.user.delete({ where: { id: userIdNum } })
+    ]);
 
     res.json({ success: true, message: 'User deleted successfully.' });
   } catch (error) {
@@ -115,21 +137,43 @@ const getUserById = async (req, res) => {
   }
 };
 
-// Get all users (admin only, with pagination)
+// Get all users (admin only, with pagination, filters, sorting)
 const getAllUsers = async (req, res) => {
   try {
+    const ROLES = ['STUDENT', 'ADMIN'];
+    const GRADES = ['FIRST_SECONDARY', 'SECOND_SECONDARY', 'THIRD_SECONDARY'];
+
     const page = parseInt(req.query.page) || 1;
-    const take = parseInt(req.query.limit) || 20;
+    const take = Math.min(parseInt(req.query.limit) || 20, 100);
     const skip = (page - 1) * take;
+
+    const where = {};
+    if (ROLES.includes(req.query.role)) where.role = req.query.role;
+    if (GRADES.includes(req.query.grade)) where.grade = req.query.grade;
+    const search = (req.query.search || '').trim();
+    if (search) {
+      // MySQL: contains is case-insensitive by default (no `mode` support).
+      where.OR = [{ name: { contains: search } }, { email: { contains: search } }];
+    }
+
+    const orderBy = [];
+    const rawSort = (req.query.sort || '').trim();
+    if (['name', 'createdAt'].includes(rawSort.replace(/^-/, ''))) {
+      const dir = rawSort.startsWith('-') ? 'desc' : 'asc';
+      orderBy.push({ [rawSort.replace(/^-/, '')]: dir });
+    }
+    orderBy.push({ id: 'asc' });
 
     // Get all users data
     const [users, total] = await Promise.all([
       prisma.user.findMany({
         skip,
         take,
+        where,
+        orderBy,
         select: selectWithoutPassword
       }),
-      prisma.user.count()
+      prisma.user.count({ where })
     ]);
 
     res.json({ 
