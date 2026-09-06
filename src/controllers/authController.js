@@ -85,9 +85,15 @@ async function register(req, res) {
       data: { refreshToken }
     });
 
-    // Set HttpOnly Cookies on Response. Tokens are NEVER returned in the body.
-    res.cookie('accessToken', token, accessTokenCookieOptions);
-    res.cookie('refreshToken', refreshToken, refreshTokenCookieOptions);
+    // Set HttpOnly Cookies ONLY when there is no existing session. When an
+    // already-authenticated caller registers (e.g. an admin adding a student),
+    // setting these cookies would silently replace their session with the new
+    // user's — hijacking the caller. Public signups (no session) still get
+    // auto-login via cookies. `req.user` is populated by optionalAuth.
+    if (!req.user) {
+      res.cookie('accessToken', token, accessTokenCookieOptions);
+      res.cookie('refreshToken', refreshToken, refreshTokenCookieOptions);
+    }
 
     return res.status(201).json({ success: true, message: 'User registered successfully.', data: { user: payload } });
   } catch (error) {
