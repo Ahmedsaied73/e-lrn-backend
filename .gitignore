@@ -5,3 +5,7 @@ examples
 backend.log
 
 playwright-artifacts/
+
+# local dev logs
+server.log
+server.err.log

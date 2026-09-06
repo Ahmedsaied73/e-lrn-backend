@@ -13,6 +13,7 @@ const enrollmentRoutes = require('./src/routes/enrollmentRoutes');
 const videoProgressRoutes = require('./src/routes/videoProgressRoutes');
 const assignmentRoutes = require('./src/routes/assignmentRoutes');
 const quizRoutes = require('./src/routes/quizRoutes');
+const adminRoutes = require('./src/routes/adminRoutes');
 const { logger } = require('./src/middlewares/index');
 const requestLogger = logger();
 const rateLimit = require('express-rate-limit');
@@ -108,6 +109,9 @@ app.use('/payments', PaymentRouter);
 app.use('/progress', videoProgressRoutes);
 app.use('/assignments', assignmentRoutes);
 app.use('/quizzes', quizRoutes);
+
+// ── Admin console (all routes behind authenticateToken + authorizeAdmin) ─────
+app.use('/admin', adminRoutes);
 
 // ── Bunny Stream routes ────────────────────────────────────────────────────────
 // /courses prefix: handles POST /courses/:courseId/videos (create)
