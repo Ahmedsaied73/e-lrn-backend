@@ -183,6 +183,18 @@ Passing a quiz with an essay still **requires an admin-graded essay** (score% us
 
 The FE agent's shared brain lives at **`<frontend>\plans\frontend-handoff.md`** (committed `2048d35`) — read it, and keep it updated, whenever backend behavior changes that the FE depends on (auth, error codes, endpoints).
 
+## Admin console (Phase 3, Sept 2026)
+
+Delivered under `plans/admin-dashboard-plan.md` (P0–P3 done; P4 optional). Admin UI repo = **`L:\E-LRN-FRONTEND\a-e-lrn-frontend`** (`app/admin/**`, `components/admin/**`, `services/admin*.ts`), dark design system scoped under `.admin-console`.
+
+- **Admin-only API surface** (all behind `authenticateToken, authorizeAdmin()`): `src/routes/adminRoutes.js` mounts `/admin/dashboard`, `/admin/quizzes`, `/admin/attempts`, `/admin/enrollments` (GET/POST), `/admin/enrollments/:id` (DELETE). Other admin-only routes live in their home route files (users list/get/delete, courses CRUD, bunny video create/reorder/upload/delete, quiz upsert/delete/attempts/grade/reset/exemptions).
+- **Leak rule:** `/admin/quizzes`, `/admin/attempts`, and `/admin/enrollments` serializers never include `answerKey`, `answers`, `password`, or `refreshToken`.
+- **Enrollment semantics:** admin-enroll is auto-paid `isPaid: true` (payment disabled); duplicate `{userId, courseId}` → 409; unenroll is a hard FK-safe DELETE.
+- **User edit:** `PUT /user/:userId` as ADMIN may also set `grade` + `phoneNumber`; self-edit stays name/email/password.
+- **Search:** `GET /admin/quizzes?search=`, `/admin/attempts?status=&search=`, `/admin/enrollments?search=` (student/course); `GET /user?role=&grade=&search=&sort=`; `GET /courses?search=`.
+- **Deferred (no console UI, per user decision, Q1):** legacy `Video` URL CRUD, assignments admin, certificates, admin role editing (P4.4). Docs: FE `frontend-handoff.md` §99.3/99.4.
+- Demo seed: `scripts/seedDemoQuizzes.js` — course #8 videos 4/5/9; `grader-demo@localhost.test` / `GraderDemo#2026` has a **GRADING essay attempt #87** for inbox testing; `seqaccess@localhost.test` has pre-passed gates.
+
 ### Out of scope (deferred)
 
 CSP/security headers (#7), `/courses/enrolled` response shape (#9), paywall stays free, admin site work beyond the layout guard.
