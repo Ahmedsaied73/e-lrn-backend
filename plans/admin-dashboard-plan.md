@@ -1,6 +1,6 @@
 ﻿# Implementation Plan: Admin Dashboard (Admin Console)
 
-Status: **EXECUTING (P1 + P2 COMPLETE; P3 Quiz ops + Enrollments next)** — Repos: backend `H:\e-learning-platform`, frontend `L:\E-LRN-FRONTEND\a-e-lrn-frontend`
+Status: **EXECUTING (P1 + P2 COMPLETE; P3 Quiz ops + Enrollments + Students additive + full admin surface IN PROGRESS)** — Repos: backend `H:\e-learning-platform`, frontend `L:\E-LRN-FRONTEND\a-e-lrn-frontend`
 
 ## Overview
 
@@ -131,45 +131,90 @@ Phases are vertical slices; the app compiles and core flows work after every pha
 
 ---
 
-### Phase 3: Quiz ops + Enrollments
+### Phase 3 (enhanced): Quiz ops + Enrollments + Students additive + full admin surface
+
+Scope expanded per user directive (2026-09-06): quizzes assignable per video, a self-service grading inbox (with seed data so grading can be tested immediately), add/delete students, enroll/unenroll any student to/from any course, and every admin-only backend route reachable from the console with search on every table ("CRUDS").
 
 #### Task 3.1 — BE: quizzes index + global attempts (BACKEND)
-**Description:** In `quizController.js` add `listAllQuizzes` (`GET /admin/quizzes` — all quizzes with course title, video title, attempt counts; searchable; paginated) and `listAllAttempts` (`GET /admin/attempts` — global, `?status=` filter, paginated, joins quiz title + user name/email). Uses existing serializers; must NOT leak `answerKey` beyond what admin grading already sees.
+**Description:** In `quizController.js` add `listAllQuizzes` (`GET /admin/quizzes` — search on quiz/video/course title, paginated; joins video title + course title + attempt counts [total + GRADING]) and `listAllAttempts` (`GET /admin/attempts` — `?status=` filter, search on student name/email + quiz title, paginated; joins student + quiz + video). Mount both in `adminRoutes.js`. Must NOT leak `answerKey`.
 **Acceptance criteria:**
-- [ ] `GET /admin/quizzes?search=...` and `GET /admin/attempts?status=GRADING` paginate correctly
-- [ ] Payloads contain no `answerKey` (verify field-pruning)
+- [ ] `GET /admin/quizzes?search=` and `GET /admin/attempts?status=GRADING&search=` paginate correctly (`meta` intact)
+- [ ] Payloads contain no `answerKey`; 401/403 enforced
 **Dependencies:** 0.1
 **Files:** `src/controllers/quizController.js`, `src/routes/adminRoutes.js`
 **Size:** Medium
 
-#### Task 3.2 — BE: enrollments admin list (BACKEND)
-**Description:** In `enrollmentController.js` add `listAllEnrollments` (`GET /admin/enrollments` — paginated; filters by course, student, `isPaid`, `isCompleted`; joins user name/email + course title; prunes sensitive fields).
+#### Task 3.2 — BE: enrollments admin + enroll/unenroll + user-edit extension (BACKEND)
+**Description:** `enrollmentController.js`: `listAllEnrollments` (`GET /admin/enrollments` — filters `userId`, `courseId`, `isPaid`, `isCompleted`, search on student/course; joins user name/email + course title; safe select), `adminEnroll` (`POST /admin/enrollments` `{userId, courseId}` — validates user+course, dedupes → 409, auto-paid consistent with the payment-disabled convention), `unenroll` (`DELETE /admin/enrollments/:id` — FK-safe hard delete, no child relations). Extend `PUT /user/:userId` so ADMIN may also set `grade` + `phoneNumber` (student self-edit remains name/email/password only). Mount new routes in `adminRoutes.js`.
 **Acceptance criteria:**
-- [ ] Filters + pagination work; payload has no `password`/`refreshToken`
-**Dependencies:** 0.1
-**Files:** `src/controllers/enrollmentController.js`, `src/routes/adminRoutes.js`
-**Size:** Small
-
-#### Task 3.3 — FE: quizzes index + grading inbox (FRONTEND)
-**Description:** `app/admin/quizzes/page.tsx` — TanStack table of `listAllQuizzes`; row actions drill into existing `/admin/quizzes/[videoId]` (authoring), `/admin/quizzes/quiz/[quizId]/attempts` (existing GradingQueue). `app/admin/grading/page.tsx` — global pending-essays inbox from `listAllAttempts?status=GRADING`; reuse the grading card/form pattern from `GradingQueue` (extract shared component if clean).
-**Acceptance criteria:**
-- [ ] Quizzes index drills into all existing admin quiz pages correctly
-- [ ] Grading inbox lists all pending essays across quizzes and grades one end-to-end
-- [ ] `tsc --noEmit` passes
-**Dependencies:** 3.1, 3.2
-**Files:** `app/admin/quizzes/page.tsx`, `app/admin/grading/page.tsx` (new), `components/admin/quiz/` (possibly extracted shared grading form)
+- [ ] Admin-enroll creates `isPaid: true`; duplicate → 409; unenroll removes exactly that row (does NOT touch payments/certificates)
+- [ ] Admin updates a student's grade/phoneNumber; self-edit still restricted
+- [ ] No `password`/`refreshToken` leaked; 401/403 enforced
+**Dependencies:** 0.1, 3.1
+**Files:** `src/controllers/enrollmentController.js`, `src/controllers/userController.js`, `src/routes/adminRoutes.js`
 **Size:** Medium
 
-#### Task 3.4 — FE: enrollments page + nav completion (FRONTEND)
-**Description:** `app/admin/enrollments/page.tsx` — TanStack table of `listAllEnrollments` with course/user filter selects, progress/isPaid/isCompleted badges. Ensure all sidebar links (incl. existing exemption page `/admin/quizzes/[videoId]/access`) resolve.
+#### Task 3.3 — FE: students page — add + edit grade/phone + per-student enroll/unenroll (FRONTEND)
+**Description:** Add-student dialog (name/email/password/phoneNumber/grade) reusing public `POST /auth/register`; extend edit dialog with grade + phoneNumber (`PUT /user/:id`); new "Courses" row action → dialog listing that student's enrollments with add-course (select a course) + remove-course via `POST/DELETE /admin/enrollments`. Refetch + toasts after each op.
 **Acceptance criteria:**
-- [ ] Enrollments list renders with filters; every sidebar link lands on a working page
+- [ ] Add student creates a STUDENT visible in the table (search refresh); duplicate email shows server 409 message
+- [ ] Admin edits grade/phoneNumber and it persists
+- [ ] Enroll/remove a course from a student row updates instantly
+- [ ] `tsc --noEmit` passes
+**Dependencies:** 1.2, 3.2
+**Files:** `app/admin/students/page.tsx`, `services/adminUsersService.ts`, `services/adminEnrollmentsService.ts` (new), `types/admin.ts`
+**Size:** Medium
+
+#### Task 3.4 — FE: quizzes index (list/search/assign/delete) (FRONTEND)
+**Description:** `app/admin/quizzes/page.tsx` — TanStack table from `listAllQuizzes`: quiz title, video title, course, passingScore, maxAttempts, total attempts, GRADING count; search box; row actions: author (`/admin/quizzes/[videoId]`), attempts queue (`/admin/quizzes/quiz/[quizId]/attempts`), delete (`DELETE /quizzes/:quizId` via new `adminQuizService.deleteQuiz` + ConfirmDialog). "Assign" path: videos page gains a per-row "Quiz" button → `/admin/quizzes/[videoId]` (the 1:1 upsert IS the assignment).
+**Acceptance criteria:**
+- [ ] Quizzes index lists + searches; drill-ins land on the right pages; delete removes quiz + attempts after confirm
+- [ ] From `/admin/courses/[id]/videos`, a per-video Quiz button opens authoring for that exact video
+- [ ] `tsc --noEmit` passes
+**Dependencies:** 3.1
+**Files:** `app/admin/quizzes/page.tsx` (new), `app/admin/courses/[id]/videos/page.tsx` (add link), `services/adminQuizService.ts` (add `deleteQuiz`)
+**Size:** Medium
+
+#### Task 3.5 — FE: global grading inbox + shared grading form (FRONTEND)
+**Description:** Extract the grading card/form from `components/admin/quiz/GradingQueue.tsx` into `components/admin/quiz/GradingForm.tsx` (per-essay score input + feedback, grade + reset). `app/admin/grading/page.tsx`: global `listAllAttempts?status=GRADING` table (student, quiz, video, submitted/lastAccess) → expand row to inline `GradingForm`. Refactor the per-quiz attempts page to reuse the shared form.
+**Acceptance criteria:**
+- [ ] Inbox lists every GRADING attempt across all quizzes; grading one flips it to GRADED (leaves the queue); reset removes it
+- [ ] Existing per-quiz attempts page still works via the shared component
+- [ ] `tsc --noEmit` passes
+**Dependencies:** 3.1, 3.4
+**Files:** `app/admin/grading/page.tsx` (new), `components/admin/quiz/GradingForm.tsx` (new), `components/admin/quiz/GradingQueue.tsx` (refactor)
+**Size:** Medium
+
+#### Task 3.6 — FE: enrollments page + full nav (FRONTEND)
+**Description:** `app/admin/enrollments/page.tsx` — table (student, course, isPaid, progress, isCompleted, dates) from `listAllEnrollments`; filters (course select, isPaid toggle, search); Enroll action (student + course selects → `POST /admin/enrollments`); Unenroll with ConfirmDialog (`DELETE /admin/enrollments/:id`). Confirm every sidebar link renders a working page (Overview, Students, Courses, Quizzes, Grading, Enrollments).
+**Acceptance criteria:**
+- [ ] Enroll/unenroll from the page works; filters + pagination correct
+- [ ] All 6 sidebar sections resolve; no dead links
 - [ ] `tsc --noEmit` passes
 **Dependencies:** 3.2
-**Files:** `app/admin/enrollments/page.tsx` (new), `services/adminEnrollmentsService.ts` (new)
+**Files:** `app/admin/enrollments/page.tsx` (new), `services/adminEnrollmentsService.ts` (new), shared `DataTable`/`ConfirmDialog`
 **Size:** Medium
 
-**Checkpoint P3:** all 6 sections functional in browser; BE scripts pass; no regressions on student-facing quiz flow.
+#### Task 3.7 — Coverage + search pass: every admin-only route reachable; docs (BACKEND+FRONTEND)
+**Description:** Sweep the admin-only route inventory: confirm a console entry for every endpoint (users CRUD+search, courses CRUD+search, bunny video CRUD+upload+reorder+search, quiz upsert/delete/attempts/grade/reset/exemptions, enrollments list/enroll/unenroll). Add `?search=` to any admin list endpoint missing it. Legacy systems (legacy `Video` CRUD, assignments admin, certificates) follow the Open Questions Q1 decision. Update FE handoff doc (§99.3) + AGENTS.md notes for the new contracts.
+**Acceptance criteria:**
+- [ ] Inventory checklist: every admin-only endpoint has a console entry or is explicitly documented as delegated
+- [ ] Every admin table has a working search box
+- [ ] FE handoff doc updated
+**Dependencies:** 3.1–3.6
+**Files:** admin controllers/routes, admin FE pages/services, `plans/frontend-handoff.md`
+**Size:** Medium
+
+#### Task 3.8 — Seed: quizzes + one GRADING attempt on demo course (data/verification)
+**Description:** Script recreates quizzes (incl. one with an essay question) on demo videos (bunnyVideo ids 4/5/6 of course #8), then as `seqaccess@localhost.test` starts + submits an essay quiz, leaving one `GRADING` attempt. Lets the admin grade immediately in the inbox and exercises the full gate flow without hand-authoring.
+**Acceptance criteria:**
+- [ ] All 3 demo videos have a quiz; exactly one GRADING attempt exists and is visible in `/admin/grading`
+- [ ] 10/10 sequential-access script still passes with quiz-backed gates
+**Dependencies:** 3.1
+**Files:** `scripts/seedDemoQuizzes.js` (new)
+**Size:** Small
+
+**Checkpoint P3:** students add/edit/enroll/unenroll verified; quiz assign + grade end-to-end in browser (student submits essay → admin grades in inbox → attempt GRADED, gate unlocks); enrollments page works; every sidebar link resolves; BE scripts pass; no student quiz-flow regression.
 
 ---
 
@@ -206,9 +251,11 @@ Create/edit admin users, password reset. Requires care with `setupAdmin` (only c
 | TanStack table added without need → complexity | Low | Single `DataTable<T>` wrapper; columns-only per section |
 | Charts heavy on admin shell | Low | `next/dynamic` lazy import in Task 4.1 |
 
-## Open Questions (none blocking)
+## Open Questions (resolved 2026-09-06)
 
-- Admin password-reset / secondary-admin management deferred to P4.4 — confirm when P0–P3 land.
+- **Q1 — Legacy systems in the console?** → **RESOLVED: Active stack only.** Console covers users, courses, Bunny videos, quizzes (author/grade/exempt/delete), enrollments. Legacy `Video` URL CRUD, assignments admin, and certificates stay **documented-as-deferred** (handoff doc §99.3; AGENTS.md notes) — per user decision, no console UI for them (T4.3 remains the optional catch-all).
+- **Q2 — Add-student mechanism.** → **RESOLVED: reuse public `POST /auth/register`** (single source of truth; always STUDENT). No admin-only create-user endpoint.
+- Defaults already chosen: admin-enroll is auto-paid (matches payment-disabled); unenroll is a hard delete (no child FKs); role editing (student↔admin) stays deferred to P4.4 (security); demo seed (T3.8) will create quizzes/attempts so grading can be tried immediately.
 
 ## Execution Order
 

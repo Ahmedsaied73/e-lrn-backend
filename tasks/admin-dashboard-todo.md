@@ -2,7 +2,7 @@
 
 Source plan: `plans/admin-dashboard-plan.md` (EXECUTING)
 
-## Status: EXECUTING — P1 + P2 COMPLETE; P3 Quiz ops + Enrollments NEXT
+## Status: EXECUTING — P1 + P2 COMPLETE; P3 (enhanced) Quiz ops + Enrollments + Students additive + full admin surface IN PROGRESS
 
 ---
 
@@ -47,14 +47,22 @@ Source plan: `plans/admin-dashboard-plan.md` (EXECUTING)
 
 ---
 
-## Phase 3 — Quiz ops + Enrollments
+## Phase 3 (enhanced) — Quiz ops + Enrollments + Students additive + full admin surface
 
-- [ ] **T3.1 [BE]** `quizController.listAllQuizzes` (`GET /admin/quizzes`, searchable, paginated, counts); `quizController.listAllAttempts` (`GET /admin/attempts`, `?status=`, paginated, student name/email + quiz title; NO `answerKey` leak)
-- [ ] **T3.2 [BE]** `enrollmentController.listAllEnrollments` (`GET /admin/enrollments`, filters course/student/paid/completed, pruned)
-- [ ] **T3.3 [FE]** `app/admin/quizzes/page.tsx` (index → drill into existing authoring/attempts pages); `app/admin/grading/page.tsx` (global GRADING inbox, shared grading form)
-- [ ] **T3.4 [FE]** `app/admin/enrollments/page.tsx` (table + filters, badges); ensure every sidebar link (incl. existing exemption page) resolves
+Scope: quizzes assignable per video, self-service grading inbox (seed data so grading is testable immediately), add/delete students, enroll/unenroll any student in/from any course, every admin-only route reachable, search on every table.
 
-**Checkpoint P3:** all 6 sections functional in browser; BE scripts pass; no student quiz-flow regression.
+- [ ] **T3.1 [BE]** `quizController.listAllQuizzes` (`GET /admin/quizzes`, search quiz/video/course title, paginated, attempt counts) + `listAllAttempts` (`GET /admin/attempts`, `?status=`, search student/quiz, paginated; NO `answerKey`); mount in `adminRoutes.js`
+- [ ] **T3.2 [BE]** `enrollmentController.listAllEnrollments` (`GET /admin/enrollments`, filters userId/courseId/isPaid/isCompleted + search) + `adminEnroll` (`POST /admin/enrollments {userId,courseId}`, dedupe 409, auto-paid) + `unenroll` (`DELETE /admin/enrollments/:id`, FK-safe) + `PUT /user/:id` admin may set grade/phoneNumber
+- [ ] **T3.3 [FE]** students page: add-student dialog (via `/auth/register`), edit dialog + grade/phoneNumber, "Courses" row action (list enrollment + add/remove course via admin enroll endpoints)
+- [ ] **T3.4 [FE]** `app/admin/quizzes/page.tsx` index (list/search/delete drill-ins) + per-video "Quiz" button on videos page (= assign, upsert authoring); `adminQuizService.deleteQuiz`
+- [ ] **T3.5 [FE]** `app/admin/grading/page.tsx` global GRADING inbox + shared `GradingForm` (extract from `GradingQueue`); grade/reset end-to-end
+- [ ] **T3.6 [FE]** `app/admin/enrollments/page.tsx` (table + filters + Enroll action + Unenroll confirm); all 6 sidebar links resolve
+- [ ] **T3.7 [BE+FE]** coverage sweep: every admin-only endpoint reachable or documented; `?search=` on every admin list; FE handoff doc §99.3 + AGENTS.md notes
+- [ ] **T3.8 [data]** `scripts/seedDemoQuizzes.js`: quizzes on demo videos (4/5/6) incl. one essay; leave one GRADING attempt; 10/10 seq-access still passes
+
+**Checkpoint P3:** students add/edit/enroll/unenroll verified; quiz assign + grade end-to-end in browser; enrollments page works; every sidebar link resolves; BE scripts pass; no student quiz-flow regression.
+
+**Open decisions (gate T3.7/T4.3):** Q1 legacy systems in console (recommend defer) · Q2 add-student = reuse `/auth/register` vs admin-only `POST /user` (recommend reuse) · defaults chosen: auto-paid enroll, hard-delete unenroll, role-edit deferred.
 
 ---
 

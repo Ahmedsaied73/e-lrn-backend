@@ -9,3 +9,5 @@ playwright-artifacts/
 # local dev logs
 server.log
 server.err.log
+server*.log
+server*.err.log

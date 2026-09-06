@@ -581,6 +581,174 @@ async function listQuizAttempts(req, res) {
 }
 
 /**
+ * GET /admin/quizzes
+ * Admin console: paginated quiz index with video + course context and attempt counts.
+ * ?page= &limit= &search= (quiz title / video title / course title)
+ * Never leaks answerKey.
+ */
+async function listAllQuizzes(req, res) {
+  try {
+    const page = Math.max(parseInteger(req.query.page) || 1, 1);
+    const take = Math.min(parseInteger(req.query.limit) || 20, 100);
+    const skip = (page - 1) * take;
+    const search = (req.query.search || '').trim();
+
+    const where = {};
+    if (search) {
+      where.OR = [
+        { title: { contains: search } },
+        { bunnyVideo: { title: { contains: search } } },
+        { bunnyVideo: { course: { title: { contains: search } } } },
+      ];
+    }
+
+    const [quizzes, total] = await Promise.all([
+      prisma.quiz.findMany({
+        skip,
+        take,
+        where,
+        orderBy: { updatedAt: 'desc' },
+        select: {
+          id: true,
+          title: true,
+          timeLimitSec: true,
+          passingScore: true,
+          maxAttempts: true,
+          updatedAt: true,
+          bunnyVideoId: true,
+          bunnyVideo: { select: { id: true, title: true, course: { select: { id: true, title: true } } } },
+          _count: { select: { attempts: true } },
+        },
+      }),
+      prisma.quiz.count({ where }),
+    ]);
+
+    const gradingCounts = await prisma.quizAttempt.groupBy({
+      by: ['quizId'],
+      where: { status: STATUS.GRADING },
+      _count: { _all: true },
+    });
+    const gradingMap = new Map(gradingCounts.map((g) => [g.quizId, g._count._all]));
+
+    const data = quizzes.map((q) => ({
+      id: q.id,
+      title: q.title,
+      videoId: q.bunnyVideoId,
+      videoTitle: q.bunnyVideo.title,
+      courseId: q.bunnyVideo.course.id,
+      courseTitle: q.bunnyVideo.course.title,
+      timeLimitSec: q.timeLimitSec,
+      passingScore: q.passingScore,
+      maxAttempts: q.maxAttempts,
+      totalAttempts: q._count.attempts,
+      pendingGrading: gradingMap.get(q.id) || 0,
+      updatedAt: q.updatedAt,
+    }));
+
+    return res.json({
+      success: true,
+      data,
+      meta: { total, page, limit: take, totalPages: Math.ceil(total / take) },
+    });
+  } catch (error) {
+    console.error('[QuizController] listAllQuizzes error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
+/**
+ * GET /admin/attempts
+ * Admin console: global attempt list (all quizzes) with student + quiz context.
+ * ?status= &page= &limit= &search= (student name/email / quiz title)
+ * Excludes responses for privacy in list view (detail available via result endpoint).
+ */
+async function listAllAttempts(req, res) {
+  try {
+    const { status } = req.query;
+    if (status && !Object.values(STATUS).includes(status)) {
+      return res.status(400).json({ success: false, error: 'Invalid attempt status filter' });
+    }
+
+    const page = Math.max(parseInteger(req.query.page) || 1, 1);
+    const take = Math.min(parseInteger(req.query.limit) || 20, 100);
+    const skip = (page - 1) * take;
+    const search = (req.query.search || '').trim();
+
+    const where = {};
+    if (status) where.status = status;
+    if (search) {
+      where.OR = [
+        { user: { name: { contains: search } } },
+        { user: { email: { contains: search } } },
+        { quiz: { title: { contains: search } } },
+      ];
+    }
+
+    const [attempts, total] = await Promise.all([
+      prisma.quizAttempt.findMany({
+        skip,
+        take,
+        where,
+        orderBy: { startedAt: 'desc' },
+        select: {
+          id: true,
+          quizId: true,
+          attemptNumber: true,
+          status: true,
+          startedAt: true,
+          submittedAt: true,
+          mcqEarned: true,
+          essayEarned: true,
+          scorePercent: true,
+          essayGradedAt: true,
+          user: { select: { id: true, name: true, email: true, grade: true } },
+          quiz: {
+            select: {
+              id: true,
+              title: true,
+              passingScore: true,
+              maxAttempts: true,
+              bunnyVideo: { select: { id: true, title: true, course: { select: { id: true, title: true } } } },
+            },
+          },
+        },
+      }),
+      prisma.quizAttempt.count({ where }),
+    ]);
+
+    const data = attempts.map((a) => ({
+      id: a.id,
+      quizId: a.quizId,
+      quizTitle: a.quiz.title,
+      videoId: a.quiz.bunnyVideo.id,
+      videoTitle: a.quiz.bunnyVideo.title,
+      courseId: a.quiz.bunnyVideo.course.id,
+      courseTitle: a.quiz.bunnyVideo.course.title,
+      student: a.user,
+      attemptNumber: a.attemptNumber,
+      status: a.status,
+      startedAt: a.startedAt,
+      submittedAt: a.submittedAt,
+      mcqEarned: a.mcqEarned,
+      essayEarned: a.essayEarned,
+      scorePercent: a.scorePercent,
+      passingScore: a.quiz.passingScore,
+      passed: a.scorePercent !== null ? a.scorePercent >= a.quiz.passingScore : null,
+      essayGradedAt: a.essayGradedAt,
+    }));
+
+    return res.json({
+      success: true,
+      data,
+      meta: { total, page, limit: take, totalPages: Math.ceil(total / take) },
+    });
+  } catch (error) {
+    console.error('[QuizController] listAllAttempts error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
+/**
  * PUT /quizzes/attempts/:id/grade
  * Admin grades essay questions and finalizes attempt score.
  * Body: { essayScores: { [qName]: number }, essayFeedback?: { [qName]: string } }
@@ -720,6 +888,8 @@ module.exports = {
   upsertQuiz,
   deleteQuiz,
   listQuizAttempts,
+  listAllQuizzes,
+  listAllAttempts,
   gradeAttempt,
   resetAttempt,
   grantExemption,
