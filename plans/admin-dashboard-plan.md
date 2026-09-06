@@ -1,6 +1,6 @@
-# Implementation Plan: Admin Dashboard (Admin Console)
+﻿# Implementation Plan: Admin Dashboard (Admin Console)
 
-Status: **EXECUTING (Phase 0: T0.1 done, T0.0/T0.2 in progress)** · Repos: backend `H:\e-learning-platform`, frontend `L:\E-LRN-FRONTEND\a-e-lrn-frontend`
+Status: **EXECUTING (P1 + P2 COMPLETE; P3 Quiz ops + Enrollments next)** — Repos: backend `H:\e-learning-platform`, frontend `L:\E-LRN-FRONTEND\a-e-lrn-frontend`
 
 ## Overview
 
