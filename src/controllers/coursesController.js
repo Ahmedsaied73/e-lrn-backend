@@ -7,11 +7,15 @@ const getAllCourses = async (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const take = parseInt(req.query.limit) || 20;
     const skip = (page - 1) * take;
+    const search = (req.query.search || '').trim();
+
+    const where = search ? { title: { contains: search } } : {};
 
     const [courses, total] = await Promise.all([
       prisma.course.findMany({
         skip,
         take,
+        where,
         include: {
           teacher: {
             select: { id: true, name: true, email: true }
@@ -24,7 +28,7 @@ const getAllCourses = async (req, res) => {
           }
         }
       }),
-      prisma.course.count()
+      prisma.course.count({ where })
     ]);
 
     // Ensure thumbnails have full URL if not already

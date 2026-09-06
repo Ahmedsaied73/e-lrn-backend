@@ -29,11 +29,15 @@ function cookieString(res) {
 
     // list shape
     const list = await (await fetch(`${BASE}/courses?page=1&limit=100`, { headers: { Cookie: adminCookie } })).json();
-    check('list returns success+meta', list.success === true && list.meta?.total > 0, `total=${list.meta?.total}`);
+    check('list returns success+meta', list.success === true && Number.isInteger(list.meta?.total), `total=${list.meta?.total}`);
     const sample = list.data?.[0];
-    check('list rows carry _count.videos', sample?._count && Number.isInteger(sample._count.videos), JSON.stringify(sample?._count));
-    check('list rows carry _count.enrollments', sample?._count && Number.isInteger(sample._count.enrollments), JSON.stringify(sample?._count));
-    check('list rows carry category key', 'category' in (sample || {}));
+    if (list.meta?.total > 0) {
+      check('list rows carry _count.videos', sample?._count && Number.isInteger(sample._count.videos), JSON.stringify(sample?._count));
+      check('list rows carry _count.enrollments', sample?._count && Number.isInteger(sample._count.enrollments), JSON.stringify(sample?._count));
+      check('list rows carry category key', 'category' in (sample || {}));
+    } else {
+      console.log('SKIP row-shape asserts — course table is empty (fresh DB)');
+    }
 
     // create with category
     const tag = `p2_${Date.now()}`;
@@ -50,6 +54,12 @@ function cookieString(res) {
     const row = list2.data?.find((c) => c.id === courseId);
     check('new course listed with _count', row && Number.isInteger(row._count.videos) && Number.isInteger(row._count.enrollments), JSON.stringify(row?._count));
     check('new course listed with category', row?.category === 'رياضيات');
+
+    // search narrows by title (contains, case-insensitive on MySQL)
+    const hit = await (await fetch(`${BASE}/courses?search=${tag}`, { headers: { Cookie: adminCookie } })).json();
+    check('search narrows by title', hit.success === true && hit.meta.total === 1 && hit.data[0]?.id === courseId, `total=${hit.meta?.total}`);
+    const noHit = await (await fetch(`${BASE}/courses?search=zzz_nonexistent_zzz`, { headers: { Cookie: adminCookie } })).json();
+    check('search with no matches returns empty', noHit.success === true && noHit.meta.total === 0 && noHit.data.length === 0);
 
     // update category + title
     const updated = await (await fetch(`${BASE}/courses/${courseId}`, {
