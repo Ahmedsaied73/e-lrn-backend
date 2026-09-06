@@ -1,6 +1,6 @@
 ﻿# Implementation Plan: Admin Dashboard (Admin Console)
 
-Status: **EXECUTING (P1 + P2 COMPLETE; P3 Quiz ops + Enrollments + Students additive + full admin surface IN PROGRESS)** — Repos: backend `H:\e-learning-platform`, frontend `L:\E-LRN-FRONTEND\a-e-lrn-frontend`
+Status: **COMPLETE (P0–P3 all shipped + browser-verified; P4 polish deferred as out-of-scope)** — Repos: backend `H:\e-learning-platform`, frontend `L:\E-LRN-FRONTEND\a-e-lrn-frontend`
 
 ## Overview
 
@@ -214,7 +214,7 @@ Scope expanded per user directive (2026-09-06): quizzes assignable per video, a 
 **Files:** `scripts/seedDemoQuizzes.js` (new)
 **Size:** Small
 
-**Checkpoint P3:** students add/edit/enroll/unenroll verified; quiz assign + grade end-to-end in browser (student submits essay → admin grades in inbox → attempt GRADED, gate unlocks); enrollments page works; every sidebar link resolves; BE scripts pass; no student quiz-flow regression.
+**Checkpoint P3:** ✅ students add/edit/enroll/unenroll/delete verified in browser; quiz assign + grade end-to-end in browser (student submits essay -> admin grades in inbox -> attempt GRADED, removed from GRADING queue); enrollments page works (rows/search/paid badge); all 6 sidebar links resolve; no JS errors. **Bug found & fixed during verification:** `POST /auth/register` clobbered the caller's session (admin add-student overwrote the admin cookies with the new student's) -> added `optionalAuth` on `/register`, cookies set only when no session exists (commit `ef97dd8`). Seed attempt #87 consumed by grading verification; re-run `scripts/seedDemoQuizzes.js` to re-arm the inbox fixture.
 
 ---
 

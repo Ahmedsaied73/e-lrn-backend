@@ -161,6 +161,7 @@ Sealed plan: `plans/security-round1.md`. All changes paired backend ↔ frontend
 - **Rotation**: `/auth/refresh-token` issues a new refresh token, persists it to DB, re-sets the refresh cookie. The old token dies immediately. Refresh tokens include a `jti` nonce (`createRefreshToken`), so rotation can never produce a byte-identical token within the same second.
 - **Legacy**: tokens issued before this change (no `type`) are rejected → clients get one forced re-login. Frontend `authService` sets `isLoggedIn` from a successful `/user/me`, not from a body token. `lib/api-client.ts` keeps the in-memory Bearer store as a compat shim but never populates it.
 - **Scripts**: `scripts/uploadDemoVideos.js` authenticates by extracting `set-cookie` cookies (no bearer token). Login-response consumers inside a cookie-less client are broken by design.
+- **Session-preserving `register`** (`ef97dd8`): `POST /auth/register` runs `optionalAuth` first and sets login cookies ONLY when the caller has no session. Registering from an authenticated context (e.g. the admin console's add-student dialog, which reuses this public endpoint) no longer overwrites the caller's `accessToken`/`refreshToken` — previously the admin's session was silently replaced with the new student's, breaking every subsequent admin call with 403.
 
 ### Fixes in this round
 
@@ -193,7 +194,7 @@ Delivered under `plans/admin-dashboard-plan.md` (P0–P3 done; P4 optional). Adm
 - **User edit:** `PUT /user/:userId` as ADMIN may also set `grade` + `phoneNumber`; self-edit stays name/email/password.
 - **Search:** `GET /admin/quizzes?search=`, `/admin/attempts?status=&search=`, `/admin/enrollments?search=` (student/course); `GET /user?role=&grade=&search=&sort=`; `GET /courses?search=`.
 - **Deferred (no console UI, per user decision, Q1):** legacy `Video` URL CRUD, assignments admin, certificates, admin role editing (P4.4). Docs: FE `frontend-handoff.md` §99.3/99.4.
-- Demo seed: `scripts/seedDemoQuizzes.js` — course #8 videos 4/5/9; `grader-demo@localhost.test` / `GraderDemo#2026` has a **GRADING essay attempt #87** for inbox testing; `seqaccess@localhost.test` has pre-passed gates.
+- Demo seed: `scripts/seedDemoQuizzes.js` — course #8 videos 4/5/9; `grader-demo@localhost.test` / `GraderDemo#2026` has a **GRADING essay attempt** for inbox testing (attempt #87 was consumed during P3 checkpoint verification — re-run the seed to re-arm the inbox); `seqaccess@localhost.test` has pre-passed gates.
 
 ### Out of scope (deferred)
 

@@ -2,7 +2,7 @@
 
 Source plan: `plans/admin-dashboard-plan.md` (EXECUTING)
 
-## Status: EXECUTING — P1 + P2 COMPLETE; P3 (enhanced) Quiz ops + Enrollments + Students additive + full admin surface IN PROGRESS
+## Status: P1 + P2 + P3 (enhanced) COMPLETE — full admin surface built, verified in browser; P4 polish deferred
 
 ---
 
@@ -51,16 +51,16 @@ Source plan: `plans/admin-dashboard-plan.md` (EXECUTING)
 
 Scope: quizzes assignable per video, self-service grading inbox (seed data so grading is testable immediately), add/delete students, enroll/unenroll any student in/from any course, every admin-only route reachable, search on every table.
 
-- [ ] **T3.1 [BE]** `quizController.listAllQuizzes` (`GET /admin/quizzes`, search quiz/video/course title, paginated, attempt counts) + `listAllAttempts` (`GET /admin/attempts`, `?status=`, search student/quiz, paginated; NO `answerKey`); mount in `adminRoutes.js`
-- [ ] **T3.2 [BE]** `enrollmentController.listAllEnrollments` (`GET /admin/enrollments`, filters userId/courseId/isPaid/isCompleted + search) + `adminEnroll` (`POST /admin/enrollments {userId,courseId}`, dedupe 409, auto-paid) + `unenroll` (`DELETE /admin/enrollments/:id`, FK-safe) + `PUT /user/:id` admin may set grade/phoneNumber
-- [ ] **T3.3 [FE]** students page: add-student dialog (via `/auth/register`), edit dialog + grade/phoneNumber, "Courses" row action (list enrollment + add/remove course via admin enroll endpoints)
-- [ ] **T3.4 [FE]** `app/admin/quizzes/page.tsx` index (list/search/delete drill-ins) + per-video "Quiz" button on videos page (= assign, upsert authoring); `adminQuizService.deleteQuiz`
-- [ ] **T3.5 [FE]** `app/admin/grading/page.tsx` global GRADING inbox + shared `GradingForm` (extract from `GradingQueue`); grade/reset end-to-end
-- [ ] **T3.6 [FE]** `app/admin/enrollments/page.tsx` (table + filters + Enroll action + Unenroll confirm); all 6 sidebar links resolve
-- [ ] **T3.7 [BE+FE]** coverage sweep: every admin-only endpoint reachable or documented; `?search=` on every admin list; FE handoff doc §99.3 + AGENTS.md notes
-- [ ] **T3.8 [data]** `scripts/seedDemoQuizzes.js`: quizzes on demo videos (4/5/6) incl. one essay; leave one GRADING attempt; 10/10 seq-access still passes
+- [x] **T3.1 [BE]** `quizController.listAllQuizzes` (`GET /admin/quizzes`, search quiz/video/course title, paginated, attempt counts) + `listAllAttempts` (`GET /admin/attempts`, `?status=`, search student/quiz, paginated; NO `answerKey`); mounted in `adminRoutes.js` — **testAdminQuizzes.js 18/18 PASS; commit `f2593c4` (BE)**
+- [x] **T3.2 [BE]** `enrollmentController.listAllEnrollments` (`GET /admin/enrollments`, filters userId/courseId/isPaid/isCompleted + search) + `adminEnroll` (`POST /admin/enrollments {userId,courseId}`, dedupe 409, auto-paid) + `unenroll` (`DELETE /admin/enrollments/:id`, FK-safe) + `PUT /user/:id` admin may set grade/phoneNumber — **testAdminEnrollments.js 17/17 PASS; commit `cd8ae04` (BE)**
+- [x] **T3.3 [FE]** students page: add-student dialog (via `/auth/register`), edit dialog + grade/phoneNumber, "Courses" row action (list enrollment + add/remove course via admin enroll endpoints) — **commit `92b237c` (FE); add → search → edit grade → enroll → unenroll verified in browser**
+- [x] **T3.4 [FE]** `app/admin/quizzes/page.tsx` index (list/search/delete drill-ins) + per-video "Quiz" button on videos page (= assign, upsert authoring); `adminQuizService.deleteQuiz` — **commit `92b237c` (FE); 3 rows listed, delete + grading-queue drill-ins + 3 per-video Quiz buttons verified in browser**
+- [x] **T3.5 [FE]** `app/admin/grading/page.tsx` global GRADING inbox + shared `GradingForm` (extract from `GradingQueue`); grade/reset end-to-end — **commit `92b237c` (FE); seed attempt #87 graded through the inbox, removed from GRADING queue**
+- [x] **T3.6 [FE]** `app/admin/enrollments/page.tsx` (table + filters + Enroll action + Unenroll confirm); all 6 sidebar links resolve — **commits `92b237c` + `ab63c04` (FE, Radix `SelectItem value=""` → `"ALL"` sentinel fix, was crashing the page render); rows + paid badge + search verified**
+- [x] **T3.7 [BE+FE]** coverage sweep: every admin-only endpoint reachable or documented; `?search=` on every admin list; FE handoff doc §99.3 + AGENTS.md notes — **commits `d1a67d0` (FE) + `e38a4b6` (BE)**
+- [x] **T3.8 [data]** `scripts/seedDemoQuizzes.js`: quizzes on demo videos (incl. one essay) + one GRADING attempt left for the inbox; 10/10 seq-access still passes — **commit `b13da0d`**
 
-**Checkpoint P3:** students add/edit/enroll/unenroll verified; quiz assign + grade end-to-end in browser; enrollments page works; every sidebar link resolves; BE scripts pass; no student quiz-flow regression.
+**Checkpoint P3:** ✅ students add/edit/enroll/unenroll/delete verified in browser; quiz assign (3 quiz buttons) + grading end-to-end (attempt #87); enrollments page works (rows/search/paid badge); all 6 sidebar links resolve; no JS errors. **Bonus find during verification:** `POST /auth/register` (reused by add-student) was setting the **new student's** cookies over the admin's session, breaking every follow-up admin call (403). Fixed with `optionalAuth` on `/register` — cookies are only set when no session exists — commit `ef97dd8` (BE). Seed attempt #87 was consumed by grading verification; re-run `scripts/seedDemoQuizzes.js` to restore the inbox fixture for future manual testing.
 
 **Open decisions (gate T3.7/T4.3):** Q1 legacy systems in console (recommend defer) · Q2 add-student = reuse `/auth/register` vs admin-only `POST /user` (recommend reuse) · defaults chosen: auto-paid enroll, hard-delete unenroll, role-edit deferred.
 
@@ -81,7 +81,7 @@ Scope: quizzes assignable per video, self-service grading inbox (seed data so gr
 
 - [x] `@tanstack/react-table@^8.21.3` added to FE `package.json`
 - [x] `types/api.ts` + `types/admin.ts` extended per section
-- [ ] AGENTS.md + `plans/frontend-handoff.md` updated at the end
+- [x] AGENTS.md + `plans/frontend-handoff.md` updated at the end (P3 contracts in `e38a4b6` + `d1a67d0`)
 - [x] No uncommitted FE WIP touched (`course/[id]/*`, `subscribe/*`, `video/[video]/page.tsx`, `bunnyVideoService.ts`, `next.config.js`)
 - [ ] Full diff REVIEW (breaking changes, security, conventions) before P4
 
@@ -90,3 +90,5 @@ Scope: quizzes assignable per video, self-service grading inbox (seed data so gr
 - **BE dev server**: no supervisor; `Start-Process node app.js -Redirect* server*.log` from repo root; rate limiter (100 req/15min global) resets on restart; keep request counts low when probing. Current listener ~PID from `netstat -ano | findstr :3005`.
 - **Playwright**: `node "C:/Users/Ahmed Saied/.agents/skills/playwright-skill/run.js" <test>` with workdir `L:\E-LRN-FRONTEND\a-e-lrn-frontend`; FE dev on :3000.
 - **Test artifacts to avoid**: seeded `pw_*`/`probe_*` users cleaned via `cleanup-users.js`; upload-test videos cleaned via API.
+- **Grading fixture**: seed attempt #87 was **GRADED during P3 checkpoint verification** (consumed). Re-run `node scripts/seedDemoQuizzes.js` to re-arm the GRADING inbox for future manual testing.
+- **Register no longer clobbers sessions**: `POST /auth/register` sets login cookies ONLY when the caller has no session (`optionalAuth`), so the admin add-student flow keeps the admin logged in (commit `ef97dd8`).
