@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const { jwt: jwtConfig } = require('../config/env');
+const prisma = require('../config/db');
 const logger = require('./logger');
 
 /**
@@ -55,36 +56,41 @@ const optionalAuth = (req, res, next) => {
 };
 
 /**
- * Role-based authorization middleware.
- * Supports both factory usage `authorizeAdmin(['ADMIN'])` or `authorizeAdmin()`
- * and direct middleware usage `router.post('/', authenticateToken, authorizeAdmin, handler)`.
+ * Role-based authorization middleware. The JWT `role` claim is only a speed
+ * bump — the actual role is re-verified against the DB on every call, so a
+ * stale claim (e.g. after an admin demotes a user, or a forged token replay)
+ * can never grant access. Supports both factory usage
+ * `authorizeAdmin(['ADMIN'])` / `authorizeAdmin()` and direct middleware usage
+ * `router.post('/', authenticateToken, authorizeAdmin, handler)`.
  */
 const authorizeAdmin = (arg1, arg2, arg3) => {
+  const enforce = async (req, res, next, roles) => {
+    try {
+      if (!req.user || !req.user.id) {
+        return res.status(403).json({ success: false, error: 'Access denied. User not authenticated properly.' });
+      }
+      // Claim check first (cheap reject), then authoritative DB check.
+      if (!roles.includes(req.user.role)) {
+        return res.status(403).json({ success: false, error: 'Access denied. Insufficient privileges.' });
+      }
+      const dbUser = await prisma.user.findUnique({ where: { id: req.user.id }, select: { role: true } });
+      if (!dbUser || !roles.includes(dbUser.role)) {
+        return res.status(403).json({ success: false, error: 'Access denied. Insufficient privileges.' });
+      }
+      next();
+    } catch (error) {
+      return res.status(500).json({ success: false, error: 'Failed to verify authorization.' });
+    }
+  };
+
   // Direct middleware usage: authorizeAdmin(req, res, next)
   if (arg1 && arg2 && typeof arg3 === 'function') {
-    const req = arg1;
-    const res = arg2;
-    const next = arg3;
-    if (!req.user || !req.user.role) {
-      return res.status(403).json({ success: false, error: 'Access denied. User not authenticated properly.' });
-    }
-    if (req.user.role !== 'ADMIN') {
-      return res.status(403).json({ success: false, error: 'Access denied. Insufficient privileges.' });
-    }
-    return next();
+    return enforce(arg1, arg2, arg3, ['ADMIN']);
   }
 
   // Factory usage: authorizeAdmin(allowedRoles)
   const roles = Array.isArray(arg1) ? arg1 : ['ADMIN'];
-  return (req, res, next) => {
-    if (!req.user || !req.user.role) {
-      return res.status(403).json({ success: false, error: 'Access denied. User not authenticated properly.' });
-    }
-    if (!roles.includes(req.user.role)) {
-      return res.status(403).json({ success: false, error: 'Access denied. Insufficient privileges.' });
-    }
-    next();
-  };
+  return (req, res, next) => enforce(req, res, next, roles);
 };
 
 module.exports = {

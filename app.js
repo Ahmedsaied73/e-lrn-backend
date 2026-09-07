@@ -94,6 +94,7 @@ app.use(limiter);
 
 // Apply strict limiter to auth routes specifically
 app.use('/auth/login', authLimiter);
+app.use('/auth/register', authLimiter);
 
 // Existing routes
 app.use("/user", Userrouter);

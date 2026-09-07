@@ -2,7 +2,7 @@ const prisma = require('../config/db');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { jwt: jwtConfig } = require('../config/env');
-const { createToken, createRefreshToken } = require('../utils');
+const { createToken, createRefreshToken, hashRefreshToken, createRefreshTokenFamily } = require('../utils');
 const { accessTokenCookieOptions, refreshTokenCookieOptions } = require('../config/cookie');
 
 async function login(req, res) {
@@ -31,10 +31,15 @@ async function login(req, res) {
     const token = createToken(payload, jwtConfig.secret);
     const refreshToken = createRefreshToken(payload, jwtConfig.refreshSecret);
 
-    // Save refresh token in DB for revocation support
+    // Fresh login = a NEW family. Only the SHA-256 hash of the refresh token is
+    // stored (never the raw JWT), so a DB leak can't be replayed here.
     await prisma.user.update({
       where: { id: user.id },
-      data: { refreshToken }
+      data: {
+        refreshToken: hashRefreshToken(refreshToken),
+        refreshTokenFamily: createRefreshTokenFamily(),
+        lastLoginAt: new Date(),
+      }
     });
 
     // Set HttpOnly Cookies on Response. Tokens are NEVER returned in the body —
@@ -79,10 +84,15 @@ async function register(req, res) {
     const token = createToken(payload, jwtConfig.secret);
     const refreshToken = createRefreshToken(payload, jwtConfig.refreshSecret);
 
-    // Save refresh token in DB for revocation support
+    // Same hashed storage + fresh family as login. (When an admin adds a student
+    // from an authenticated context, only the DB rows are written — the caller's
+    // cookies are untouched, see below.)
     await prisma.user.update({
       where: { id: newUser.id },
-      data: { refreshToken }
+      data: {
+        refreshToken: hashRefreshToken(refreshToken),
+        refreshTokenFamily: createRefreshTokenFamily(),
+      }
     });
 
     // Set HttpOnly Cookies ONLY when there is no existing session. When an
@@ -139,21 +149,44 @@ async function refreshToken(req, res) {
       return res.status(403).json({ success: false, error: 'Invalid or revoked refresh token.' });
     }
 
-    const user = await prisma.user.findUnique({ where: { id: decoded.id } });
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.id },
+      select: { id: true, email: true, name: true, role: true, refreshToken: true, refreshTokenFamily: true },
+    });
 
-    if (!user || user.refreshToken !== token) {
+    // Nothing stored for this user (logged out or never logged in) → refuse.
+    if (!user || user.refreshToken === null) {
+      return res.status(403).json({ success: false, error: 'Invalid or revoked refresh token.' });
+    }
+
+    // Stored token is a 64-char hex SHA-256 hash. Legacy rows still hold the raw
+    // JWT — accepting them here makes the upgrade transparent, and hashing the
+    // presented token on the next rotate permanently upgrades the row.
+    const stored = user.refreshToken;
+    const isHashed = /^[0-9a-f]{64}$/.test(stored);
+    const tokenValid = isHashed ? stored === hashRefreshToken(token) : stored === token;
+
+    if (!tokenValid) {
+      // REUSE DETECTED: the presented token is an already-rotated/superseded one
+      // (someone replayed it, or logged in elsewhere which killed this family).
+      // Quarantine the WHOLE family — every device in it must re-login.
+      await prisma.user.update({
+        where: { id: user.id },
+        data: { refreshToken: null, refreshTokenFamily: null },
+      });
       return res.status(403).json({ success: false, error: 'Invalid or revoked refresh token.' });
     }
 
     const payload = { id: user.id, email: user.email, name: user.name, role: user.role };
     const newToken = createToken(payload, jwtConfig.secret);
 
-    // ROTATE: issue a new refresh token, persist it, and re-set the cookie so a
-    // replayed/reuse-detected token becomes invalid immediately.
+    // ROTATE within the SAME family (uuid generated on login/register; legacy
+    // plaintext rows get a family the first time they rotate through here).
     const newRefreshToken = createRefreshToken(payload, jwtConfig.refreshSecret);
+    const family = user.refreshTokenFamily || createRefreshTokenFamily();
     await prisma.user.update({
       where: { id: user.id },
-      data: { refreshToken: newRefreshToken }
+      data: { refreshToken: hashRefreshToken(newRefreshToken), refreshTokenFamily: family },
     });
 
     res.cookie('accessToken', newToken, accessTokenCookieOptions);
