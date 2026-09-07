@@ -18,10 +18,15 @@ const processCoursePayment = async (req, res) => {
     const { courseId } = req.params;
     const { paymentMethod } = req.body;
     const userId = req.user.id;
-    
+
+    const parsedCourseId = parseInt(courseId, 10);
+    if (!Number.isSafeInteger(parsedCourseId) || parsedCourseId <= 0) {
+      return res.status(400).json({ error: 'Invalid course ID' });
+    }
+
     // Find the course
     const course = await prisma.course.findUnique({
-      where: { id: parseInt(courseId) }
+      where: { id: parsedCourseId }
     });
     
     if (!course) {
@@ -32,7 +37,7 @@ const processCoursePayment = async (req, res) => {
     let enrollment = await prisma.enrollment.findFirst({
       where: {
         userId: userId,
-        courseId: parseInt(courseId)
+        courseId: parsedCourseId
       }
     });
     
@@ -72,7 +77,7 @@ const processCoursePayment = async (req, res) => {
       enrollment = await prisma.enrollment.create({
         data: {
           userId: userId,
-          courseId: parseInt(courseId),
+          courseId: parsedCourseId,
           isPaid: true,
           paymentDate: new Date()
         }
