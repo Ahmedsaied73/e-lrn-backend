@@ -23,11 +23,8 @@ async function main() {
   console.log(`Associated records: ${course.videos.length} legacy videos, ${course.bunnyVideos.length} bunny videos, ${course.enrollments.length} enrollments.`);
 
   await prisma.$transaction(async (tx) => {
-    // 1. Delete associated video progress, answers, submissions for videos belonging to this course
+    // 1. Delete associated assignments (and their children) for videos belonging to this course
     for (const v of course.videos) {
-      await tx.videoProgress.deleteMany({ where: { videoId: v.id } });
-      // Legacy quiz/question/answer tables are dropped — no cascade needed
-
       const assignments = await tx.assignment.findMany({ where: { videoId: v.id } });
       for (const a of assignments) {
         await tx.submission.deleteMany({ where: { assignmentId: a.id } });

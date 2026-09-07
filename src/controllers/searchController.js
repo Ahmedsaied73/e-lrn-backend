@@ -142,22 +142,24 @@ const searchContent = async (req, res) => {
     
     // Search videos if type is not specified or type is 'videos'
     if (!type || type === 'videos') {
-      // For videos, we need to join with courses to apply the same filters
-      const videoWhereClause = {
-        OR: [
-          { title: { contains: query } },
-          { description: { contains: query } }
-        ],
-        course: {}
-      };
-      
-      // Copy applicable course filters to the video query
-      if (category || grade || minPrice !== undefined || maxPrice !== undefined) {
-        videoWhereClause.course = { ...courseWhereClause };
-      }
-      
-      videos = await prisma.video.findMany({
-        where: query ? videoWhereClause : { course: courseWhereClause },
+      // BunnyVideo is the only video system — only READY videos are searchable.
+      const hasCourseFilters = category || grade || minPrice !== undefined || maxPrice !== undefined;
+
+      videos = await prisma.bunnyVideo.findMany({
+        where: {
+          AND: [
+            { status: 'READY' },
+            // BunnyVideo has no `description` — titles only.
+            query
+              ? {
+                  OR: [
+                    { title: { contains: query } }
+                  ]
+                }
+              : {},
+            hasCourseFilters ? { course: { is: courseWhereClause } } : {}
+          ]
+        },
         include: {
           course: {
             select: {
@@ -172,12 +174,12 @@ const searchContent = async (req, res) => {
         },
         take: parseInt(limit)
       });
-      
-      // Add full URLs for thumbnails and videos
+
+      // Add full URLs for thumbnails. No `url` is exposed here — playable links
+      // are only issued per-request via the signed playback endpoint.
       videos = videos.map(video => ({
         ...video,
-        url: video.url && !video.url.startsWith('http') ? `${baseUrl}/${video.url}` : video.url,
-        thumbnail: video.thumbnail && !video.thumbnail.startsWith('http') ? `${baseUrl}/${video.thumbnail}` : video.thumbnail,
+        thumbnail: video.thumbnailUrl && !video.thumbnailUrl.startsWith('http') ? `${baseUrl}/${video.thumbnailUrl}` : video.thumbnailUrl,
         course: {
           ...video.course,
           thumbnail: video.course.thumbnail && !video.course.thumbnail.startsWith('http')

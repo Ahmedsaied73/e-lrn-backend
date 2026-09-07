@@ -42,7 +42,6 @@ function cookieString(res) {
     await prisma.certificate.create({ data: { userId: studentId, courseId: course.id, certificateNumber: `CERT_${tag}` } });
     const video = await prisma.video.create({ data: { title: `p1 ${tag}`, url: 'https://x/v.mp4', thumbnail: 'https://x/t.png', courseId: course.id, duration: 60 } });
     videoId = video.id;
-    await prisma.videoProgress.create({ data: { userId: studentId, videoId, completed: true } });
     const assignment = await prisma.assignment.create({ data: { title: `p1 ${tag}`, videoId, isMCQ: true } });
     assignmentId = assignment.id;
     await prisma.submission.create({ data: { userId: studentId, assignmentId, content: 'x', status: 'PENDING' } });
@@ -72,7 +71,7 @@ function cookieString(res) {
     const delJson = await del.json();
     check('DELETE succeeds with all child rows (no P2003)', del.status === 200 && delJson.success, `status=${del.status}`);
     check('user row removed', (await prisma.user.findUnique({ where: { id: studentId } })) === null);
-    const orphanCounts = await Promise.all(['enrollment', 'payment', 'certificate', 'videoProgress', 'submission', 'assignmentAnswer', 'quizAttempt', 'gateExemption', 'bunnyVideoProgress'].map((m) => prisma[m].count({ where: { userId: studentId } })));
+    const orphanCounts = await Promise.all(['enrollment', 'payment', 'certificate', 'submission', 'assignmentAnswer', 'quizAttempt', 'gateExemption', 'bunnyVideoProgress'].map((m) => prisma[m].count({ where: { userId: studentId } })));
     const orphans = orphanCounts.reduce((a, b) => a + b, 0);
     check('all child rows cascade-removed', orphans === 0, orphanCounts.join(','));
 

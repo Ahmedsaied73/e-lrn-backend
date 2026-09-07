@@ -223,45 +223,47 @@ function computeScorePercent(earnedPoints, totalPoints) {
 // ─── Gate Evaluation ─────────────────────────────────────────────────────────
 
 /**
- * Single source of truth for sequential video access gate.
- * Works for BOTH legacy Video and BunnyVideo:
+ * SINGLE source of truth for sequential video access — used by BOTH the
+ * playback gate (GET /videos/:videoId/playback) and markVideoCompleted
+ * (POST /progress/complete). BunnyVideo is the only video system.
+ *
+ * Checks, in order:
  *   1. Admin role → always allowed
- *   2. BunnyVideo → checks GateExemption + BunnyVideoProgress + quiz pass
- *   3. Legacy Video → checks VideoProgress + (assignments handled by middleware)
+ *   2. Video exists (BunnyVideo)
+ *   3. Enrollment in the video's course
+ *   4. First video (or the only video) in the course → allowed
+ *   5. GateExemption on the previous video → allowed
+ *   6. Previous video completed (BunnyVideoProgress) + its quiz passed (GRADED)
  *
  * @param {number} userId
- * @param {number} videoId  - The video being accessed
- * @param {string} userRole - User role (ADMIN bypasses all checks)
- * @returns {Promise<{ allowed: boolean, reason?: string, quizId?: number, bestScore?: number, required?: number, previousVideoId?: number }>}
+ * @param {number} videoId
+ * @param {string} userRole
+ * @returns {Promise<{ allowed: boolean, reason?: string, code?: string, quizId?: number, bestScore?: number, required?: number, previousVideoId?: number }>}
  */
 async function evaluateGate(userId, videoId, userRole) {
   // Admins bypass everything
   if (userRole === 'ADMIN') return { allowed: true };
 
-  // Try BunnyVideo first — it's the primary video system
-  const bunnyVideo = await prisma.bunnyVideo.findUnique({
+  const video = await prisma.bunnyVideo.findUnique({
     where: { id: videoId },
     include: { course: { select: { id: true } } },
   });
 
-  if (bunnyVideo) return evaluateBunnyVideoGate(userId, bunnyVideo);
+  if (!video) return { allowed: false, reason: 'Video not found', code: 'VIDEO_NOT_FOUND' };
 
-  // Fall back to legacy Video
-  const legacyVideo = await prisma.video.findUnique({
-    where: { id: videoId },
-    include: { course: { select: { id: true } } },
+  const enrollment = await prisma.enrollment.findFirst({
+    where: { userId, courseId: video.course.id },
+    select: { id: true },
   });
+  if (!enrollment) {
+    return {
+      allowed: false,
+      reason: 'You must be enrolled in this course to access this video',
+      code: 'NOT_ENROLLED',
+    };
+  }
 
-  if (legacyVideo) return evaluateLegacyVideoGate(userId, legacyVideo);
-
-  return { allowed: false, reason: 'Video not found' };
-}
-
-/**
- * Sequential gate evaluation for BunnyVideo (progress + quiz + exemption).
- */
-async function evaluateBunnyVideoGate(userId, video) {
-  // Get all videos in course ordered by position then id
+  // All videos in course ordered by position then created/id
   const courseVideos = await prisma.bunnyVideo.findMany({
     where: { courseId: video.course.id, status: 'READY' },
     orderBy: [{ position: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
@@ -269,6 +271,7 @@ async function evaluateBunnyVideoGate(userId, video) {
   });
 
   const currentIndex = courseVideos.findIndex(v => v.id === video.id);
+  if (currentIndex === -1) return { allowed: false, reason: 'Video not found', code: 'VIDEO_NOT_FOUND' };
   if (currentIndex <= 0) return { allowed: true }; // First video always accessible
 
   const previousVideoId = courseVideos[currentIndex - 1].id;
@@ -287,6 +290,7 @@ async function evaluateBunnyVideoGate(userId, video) {
     return {
       allowed: false,
       reason: 'You must complete the previous video before accessing this one',
+      code: 'SEQUENTIAL_GATE',
       previousVideoId,
     };
   }
@@ -315,6 +319,7 @@ async function evaluateBunnyVideoGate(userId, video) {
     return {
       allowed: false,
       reason: 'You must complete and pass the quiz for the previous video before proceeding',
+      code: 'SEQUENTIAL_GATE',
       quizId: quiz.id,
       previousVideoId,
       bestScore: null,
@@ -326,43 +331,11 @@ async function evaluateBunnyVideoGate(userId, video) {
     return {
       allowed: false,
       reason: 'You must pass the quiz for the previous video before proceeding',
+      code: 'SEQUENTIAL_GATE',
       quizId: quiz.id,
       previousVideoId,
       bestScore: bestAttempt.scorePercent,
       required: quiz.passingScore,
-    };
-  }
-
-  return { allowed: true };
-}
-
-/**
- * Sequential gate evaluation for legacy Video (progress only).
- * Legacy videos have no quizzes (quizzes live on BunnyVideo) and no gate
- * exemptions; assignment gating is enforced separately in the middleware.
- */
-async function evaluateLegacyVideoGate(userId, video) {
-  // Get all videos in course ordered by position then id
-  const courseVideos = await prisma.video.findMany({
-    where: { courseId: video.course.id },
-    orderBy: [{ position: 'asc' }, { id: 'asc' }],
-    select: { id: true },
-  });
-
-  const currentIndex = courseVideos.findIndex(v => v.id === video.id);
-  if (currentIndex <= 0) return { allowed: true }; // First video always accessible
-
-  const previousVideoId = courseVideos[currentIndex - 1].id;
-
-  // Check previous video completion
-  const progress = await prisma.videoProgress.findFirst({
-    where: { userId, videoId: previousVideoId, completed: true },
-  });
-  if (!progress) {
-    return {
-      allowed: false,
-      reason: 'You must complete the previous video before accessing this one',
-      previousVideoId,
     };
   }
 

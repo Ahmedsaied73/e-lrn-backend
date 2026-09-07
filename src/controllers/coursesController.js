@@ -73,17 +73,20 @@ const getCourseById = async (req, res) => {
       where: { id: parseInt(id) },
       include: {
         teacher: { select: { id: true, name: true, email: true } },
-        videos: {
-          orderBy: { position: 'asc' },
+        // BunnyVideo is the only video system. No `url` is exposed here — a
+        // playable link is only ever issued per-request via the signed playback
+        // endpoint, never parked in the course payload.
+        bunnyVideos: {
+          where: { status: 'READY' },
+          orderBy: [{ position: 'asc' }, { createdAt: 'asc' }],
           select: {
             id: true,
             title: true,
-            url: true,
-            thumbnail: true,
+            thumbnailUrl: true,
             duration: true,
             position: true,
             // Scoped to the authenticated user only
-            videoProgress: {
+            progress: {
               where: { userId },
               select: { completed: true, watchedAt: true }
             }
@@ -106,24 +109,25 @@ const getCourseById = async (req, res) => {
       course.thumbnail = `${baseUrl}/${course.thumbnail}`;
     }
 
-    // Derive videos + progress from the same fetched relation (no extra queries)
-    const videos = course.videos.map(({ videoProgress, ...video }) => ({
+    // Derive videos + progress from the same fetched relation (no extra queries).
+    // `thumbnailUrl` is mapped onto the legacy `thumbnail` key so the response
+    // envelope keeps its shape; `url` is intentionally absent (see above).
+    const videos = course.bunnyVideos.map(({ progress, thumbnailUrl, ...video }) => ({
       ...video,
-      url: video.url && !video.url.startsWith('http') ? `${baseUrl}/${video.url}` : video.url,
-      thumbnail: video.thumbnail && !video.thumbnail.startsWith('http') ? `${baseUrl}/${video.thumbnail}` : video.thumbnail
+      thumbnail: thumbnailUrl && !thumbnailUrl.startsWith('http') ? `${baseUrl}/${thumbnailUrl}` : thumbnailUrl
     }));
 
     // Existing "no progress record" representation (see videoProgressController):
     // completed: false, watchedAt: null
-    const progress = course.videos.map(video => ({
+    const progress = course.bunnyVideos.map(video => ({
       videoId: video.id,
-      completed: video.videoProgress[0] ? video.videoProgress[0].completed : false,
-      watchedAt: video.videoProgress[0] ? video.videoProgress[0].watchedAt : null
+      completed: video.progress[0] ? video.progress[0].completed : false,
+      watchedAt: video.progress[0] ? video.progress[0].watchedAt : null
     }));
 
     const enrollment = course.enrollments[0] || null;
 
-    const { videos: _rawVideos, enrollments: _rawEnrollments, ...courseData } = course;
+    const { bunnyVideos: _rawVideos, enrollments: _rawEnrollments, ...courseData } = course;
 
     res.json({
       success: true,

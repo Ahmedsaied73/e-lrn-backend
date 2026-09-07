@@ -76,7 +76,6 @@ const deleteUser = async (req, res) => {
       prisma.assignmentAnswer.deleteMany({ where: { userId: userIdNum } }),
       prisma.submission.deleteMany({ where: { userId: userIdNum } }),
       prisma.bunnyVideoProgress.deleteMany({ where: { userId: userIdNum } }),
-      prisma.videoProgress.deleteMany({ where: { userId: userIdNum } }),
       prisma.enrollment.deleteMany({ where: { userId: userIdNum } }),
       prisma.payment.deleteMany({ where: { userId: userIdNum } }),
       prisma.certificate.deleteMany({ where: { userId: userIdNum } }),

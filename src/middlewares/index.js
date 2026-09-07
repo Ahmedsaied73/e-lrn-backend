@@ -87,14 +87,9 @@ const authorizeAdmin = (arg1, arg2, arg3) => {
   };
 };
 
-// Access control middleware
-const { checkCourseAccess, checkVideoAccess } = require('./accessControl');
-
 module.exports = {
   authenticateToken,
   optionalAuth,
   authorizeAdmin,
-  checkCourseAccess,
-  checkVideoAccess,
   logger
 };
