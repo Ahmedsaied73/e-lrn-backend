@@ -89,6 +89,7 @@ model Enrollment {
 
   @@index([userId])
   @@index([courseId])
+  @@unique([userId, courseId])
 }
 
 model Certificate {

@@ -589,7 +589,7 @@ async function listQuizAttempts(req, res) {
 async function listAllQuizzes(req, res) {
   try {
     const page = Math.max(parseInteger(req.query.page) || 1, 1);
-    const take = Math.min(parseInteger(req.query.limit) || 20, 100);
+    const take = Math.max(1, Math.min(parseInteger(req.query.limit) || 20, 100));
     const skip = (page - 1) * take;
     const search = (req.query.search || '').trim();
 
@@ -670,7 +670,7 @@ async function listAllAttempts(req, res) {
     }
 
     const page = Math.max(parseInteger(req.query.page) || 1, 1);
-    const take = Math.min(parseInteger(req.query.limit) || 20, 100);
+    const take = Math.max(1, Math.min(parseInteger(req.query.limit) || 20, 100));
     const skip = (page - 1) * take;
     const search = (req.query.search || '').trim();
 

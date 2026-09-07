@@ -68,6 +68,9 @@ const enrollUserInCourse = async (req, res) => {
       data: { enrollment }
     });
   } catch (error) {
+    if (isUniqueError(error)) {
+      return res.status(409).json({ success: false, error: 'Already enrolled in this course.' });
+    }
     console.error('Enrollment Error:', error);
     return res.status(500).json({ success: false, error: 'Internal server error.' });
   }
@@ -109,6 +112,8 @@ const checkEnrollmentStatus = async (req, res) => {
 
 // ─── Admin Endpoints ──────────────────────────────────────────────────────────
 
+const isUniqueError = (error) => error && error.code === 'P2002';
+
 const parsePositiveInt = (value) => {
   const parsed = parseInt(value, 10);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
@@ -129,7 +134,7 @@ const parseBool = (value) => {
 const listAllEnrollments = async (req, res) => {
   try {
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-    const take = Math.min(parseInt(req.query.limit, 10) || 20, 100);
+    const take = Math.max(1, Math.min(parseInt(req.query.limit, 10) || 20, 100));
     const skip = (page - 1) * take;
 
     const where = {};
@@ -247,6 +252,9 @@ const adminEnroll = async (req, res) => {
       data: { enrollment },
     });
   } catch (error) {
+    if (isUniqueError(error)) {
+      return res.status(409).json({ success: false, error: 'Student is already enrolled in this course.' });
+    }
     console.error('Admin Enroll Error:', error);
     return res.status(500).json({ success: false, error: 'Internal server error.' });
   }

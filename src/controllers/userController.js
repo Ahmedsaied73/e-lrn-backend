@@ -41,6 +41,10 @@ const deleteUser = async (req, res) => {
   const userIdNum = parseInt(userId, 10);
 
   try {
+    if (!Number.isSafeInteger(userIdNum) || userIdNum <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid user ID.' });
+    }
+
     const user = await prisma.user.findUnique({
       where: { id: userIdNum }
     });
@@ -91,10 +95,15 @@ const updateUser = async (req, res) => {
   const { name, email, password, grade, phoneNumber } = req.body;
   const requesterId = req.user.id;
   const requesterRole = req.user.role;
+  const parsedUserId = parseInt(userId, 10);
 
   try {
+    if (!Number.isSafeInteger(parsedUserId) || parsedUserId <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid user ID.' });
+    }
+
     // Check if the requester is the user themselves or an admin
-    if (requesterId !== parseInt(userId) && requesterRole !== 'ADMIN') {
+    if (requesterId !== parsedUserId && requesterRole !== 'ADMIN') {
       return res.status(403).json({ success: false, error: "You do not have permission to update this user's data." });
     }
 
@@ -120,13 +129,16 @@ const updateUser = async (req, res) => {
     }
 
     const updatedUser = await prisma.user.update({
-      where: { id: parseInt(userId) },
+      where: { id: parsedUserId },
       data: updateData,
       select: selectWithoutPassword
     });
 
     res.json({ success: true, message: "User data updated successfully", data: updatedUser });
   } catch (error) {
+    if (error && error.code === 'P2002') {
+      return res.status(409).json({ success: false, error: 'Email or phone number already in use.' });
+    }
     handleError(res, error, 'An error occurred while updating user data');
   }
 };
@@ -158,8 +170,8 @@ const getAllUsers = async (req, res) => {
     const ROLES = ['STUDENT', 'ADMIN'];
     const GRADES = ['FIRST_SECONDARY', 'SECOND_SECONDARY', 'THIRD_SECONDARY'];
 
-    const page = parseInt(req.query.page) || 1;
-    const take = Math.min(parseInt(req.query.limit) || 20, 100);
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const take = Math.max(1, Math.min(parseInt(req.query.limit) || 20, 100));
     const skip = (page - 1) * take;
 
     const where = {};
