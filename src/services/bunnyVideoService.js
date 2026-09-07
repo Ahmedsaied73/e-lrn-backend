@@ -404,7 +404,7 @@ async function findById(videoId) {
  * @param {number} staleMinutes
  * @returns {Promise<object[]>}
  */
-async function findStaleProcessing(staleMinutes = 30) {
+async function findStaleProcessing(staleMinutes = 30, take = 50) {
   const cutoff = new Date(Date.now() - staleMinutes * 60 * 1000);
   return prisma.bunnyVideo.findMany({
     where: {
@@ -412,6 +412,7 @@ async function findStaleProcessing(staleMinutes = 30) {
       updatedAt: { lt: cutoff },
     },
     select: { id: true, bunnyVideoId: true, bunnyLibraryId: true, status: true, courseId: true },
+    take,
   });
 }
 
