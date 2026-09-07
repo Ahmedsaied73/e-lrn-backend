@@ -199,3 +199,17 @@ Delivered under `plans/admin-dashboard-plan.md` (P0–P3 done; P4 optional). Adm
 ### Out of scope (deferred)
 
 CSP/security headers (#7), `/courses/enrolled` response shape (#9), paywall stays free, admin site work beyond the layout guard.
+
+## Admin console review round (Sept 2026) — committed `1cf94e2` (BE) + `f3664d9` (FE)
+
+Multi-axis review (both repos) of the P3 diff. Required findings fixed and verified:
+
+| Finding | Fix |
+|---------|-----|
+| Enrollment dedupe TOCTOU | `@@unique([userId, courseId])` on `Enrollment` (migration `20260907000000_enrollment_unique_user_course`); both `adminEnroll` and legacy `enrollUserInCourse` catch P2002 → 409 as a race backstop (pre-check kept for UX). Data verified duplicate-free before applying. |
+| `limit`/`take` no lower clamp | `take = Math.max(1, Math.min(limit‖20, 100))` on `GET /admin/enrollments`, `/admin/quizzes`, `/admin/attempts`, `GET /user`. |
+| NaN `:userId` in PUT/DELETE `/user/:id` | 400 `Invalid user ID.` on non-safe-int ≤ 0. |
+| Duplicate email/phone on admin user-edit | P2002 → 409 `Email or phone number already in use.` (was generic 500). |
+| FE `applySearch` kept stale `page` | `setPage(1)` inside `applySearch` on grading/quizzes/enrollments/students/courses; refresh also clamps `page` to `totalPages`. |
+
+Deferred (Optional, low-risk, no UI impact): FE `loadCourseRows` staleness race, reset-button busy flag during in-flight grade, stale `result` on failed `openAttempt`, dropdown `limit:100` cap, duplicated `GRADES` arrays, `parsePositiveInt('1abc')` leniency. Pre-existing unrelated: home-page images (`teacher.png`, `grade1–3.png`, `brain.png`) missing from `public/` → 400s on `/`.
