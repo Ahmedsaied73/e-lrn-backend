@@ -164,3 +164,32 @@ Result: **no exploitable IDOR, missing-auth, or authorization flaw found.**
 4. **Skip** D-B (redundant with catalog) unless the user wants a single source of truth.
 All fixes are additive/validation-only; no response-shape changes for authorized callers → no FE
 change expected (will verify).
+
+## Task D — Applied + E2E verification (committed `d1fdc3e`, `4cc9885`, `50ca485`; Sept 2026)
+
+User approved **D-D + D-E only**. Both landed as separate commits. D-C (assignment-metadata
+gating), D-A (teacher email), D-B (redundant listing) were declined/skipped by the user.
+
+- **D-D** `GET /user/:userId`: `Number.isSafeInteger` + `> 0` → `400 Invalid user ID.`
+- **D-E** `POST /payments/course/:courseId`: same guard → `400 Invalid course ID`; valid path
+  still returns 404/200 (smoke verified).
+
+**E2E verification (Playwright, FE :3000 ↔ BE :3005) — 32/32 PASS:**
+- T1 (×9): legacy `authToken/authToken/refreshToken/token/userData/userId/userName/userEmail/
+  userRole` localStorage keys purged on boot.
+- T2 (×18): login lands on `/`; `accessToken` (path `/`) + `refreshToken` (path `/auth`) are
+  **HttpOnly**, `isLoggedIn` plain flag present; no token-like localStorage keys; `elrn:user-cache`
+  written; `/user/me` fired once at login and **zero times on hard refresh within TTL** (still
+  logged in); `/login` + `/register` bounce authenticated users; logout clears cache + both
+  cookies and restores guest nav.
+- T3 (×5): fresh register auto-logs in and lands straight on `/` (no `/login` bounce), cache
+  written, session cookies HttpOnly.
+
+**Verification side-notes:**
+- The `:3005` listener (PID 17080, started 11:10) serves **pre-D-D/D-E controller code** (its
+  `GET /user/abc` → 500, fresh instance → 400). D-D/D-E verified on a throwaway `:3006` instance
+  (stopped). Restart the long-running server to pick up the guards.
+- PowerShell→`curl.exe` drops inner quotes (invalid JSON body) — use `--data-binary @file`;
+  the "login 500" seen during smoke was this harness artifact, not the app.
+- Pre-existing (untouched, flagged): register UI marks email "optional" but the BE requires it
+  (`authController.register` → 400 `Email is required.`); registration with an empty email fails.
