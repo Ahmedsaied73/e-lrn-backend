@@ -147,9 +147,14 @@ const getUserById = async (req, res) => {
   const { userId } = req.params;
 
   try {
+    const userIdNum = parseInt(userId, 10);
+    if (!Number.isSafeInteger(userIdNum) || userIdNum <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid user ID.' });
+    }
+
     // Get user data
     const user = await prisma.user.findUnique({
-      where: { id: parseInt(userId, 10) },
+      where: { id: userIdNum },
       select: selectWithoutPassword
     });
 
