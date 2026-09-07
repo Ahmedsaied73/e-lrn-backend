@@ -196,10 +196,23 @@ async function transitionStatus(videoId, newStatus) {
  * @returns {Promise<object>} Updated BunnyVideo record
  */
 async function markFailed(videoId, reason) {
-  log.error('video.upload.failed', { videoId, reason });
+  const video = await prisma.bunnyVideo.findUnique({
+    where: { id: videoId },
+    select: { id: true, status: true },
+  });
 
-  // markFailed can be called from UPLOADING or PROCESSING — both valid transitions to FAILED
-  // We skip assertValidTransition here to be resilient (e.g. if state is already FAILED)
+  log.error('video.upload.failed', { videoId, reason, currentStatus: video ? video.status : null });
+
+  if (!video) return null;
+
+  // Terminal states must never be clobbered by a late failure event: if the
+  // video already went READY (e.g. a webhook raced the upload error handler),
+  // the failure record is dropped and READY stands.
+  if (video.status === 'READY') {
+    log.warn('video.upload.failed_after_ready', { videoId, reason });
+    return prisma.bunnyVideo.findUnique({ where: { id: videoId } });
+  }
+
   return prisma.bunnyVideo.update({
     where: { id: videoId },
     data: {
