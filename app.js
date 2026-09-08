@@ -75,10 +75,12 @@ app.use(cookieParser()); // Add cookie-parser middleware
 // Add request logger middleware to log all requests
 app.use(requestLogger);
 
-// Set up rate limiter: maximum of 100 requests per 15 minutes per IP
+// Set up rate limiter: maximum of 1000 requests per 15 minutes per IP.
+// Raised from 100 (Sept 2026) — the default starved automated + real browsing
+// (each admin page load costs ~2-3 API calls). Login stays at 20/15min below.
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
+  max: 1000, // limit each IP to 1000 requests per windowMs
   message: 'Too many requests from this IP, please try again later.'
 });
 

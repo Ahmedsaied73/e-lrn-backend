@@ -80,7 +80,7 @@ prisma/schema.prisma    → Single schema, MySQL
 - **Auth**: JWT stored in httpOnly cookies (`accessToken` or `token`). `authenticateToken` middleware checks cookie first, then `Authorization: Bearer` header.
 - **Error handling**: Bunny service layer uses `AppError` from `src/utils/AppError.js` → global handler in `app.js:128` returns `{ success: false, error, code }`. Quiz service uses ad-hoc `Object.assign(new Error(...), { statusCode })`. Legacy routes use raw `res.status().json()`.
 - **Bunny webhook**: Mounted at `/webhooks/bunny/stream` *before* `express.json()` in `app.js:68` — it needs raw body for HMAC verification. Do not reorder.
-- **Rate limiting**: 100 req/15min global, 20 req/15min on `/auth/login`.
+- **Rate limiting**: 1000 req/15min global (raised from 100 on Sept 8 2026 — it starved tab-heavy browsing and test suites), 20 req/15min on `/auth/login`.
 - **CORS**: Allowlisted origins only (localhost:3000, localhost:3002, `FRONTEND_URL`).
 - **Database**: MySQL 8.0. Prisma schema uses `Autoincrement()` IDs. Run `npm run db:setup` after schema changes.
 - **Response envelope**: Newer endpoints use `{ success: true, data }`. Legacy endpoints return raw objects.
