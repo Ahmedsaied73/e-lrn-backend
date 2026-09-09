@@ -1,5 +1,6 @@
 const prisma = require('../config/db');
 const bunnyClient = require('../integrations/bunny/bunnyStreamClient');
+const cache = require('../integrations/redis/cache');
 
 // Get all courses (with pagination)
 const getAllCourses = async (req, res) => {
@@ -11,25 +12,33 @@ const getAllCourses = async (req, res) => {
 
     const where = search ? { title: { contains: search, mode: 'insensitive' } } : {};
 
-    const [courses, total] = await Promise.all([
-      prisma.course.findMany({
-        skip,
-        take,
-        where,
-        include: {
-          teacher: {
-            select: { id: true, name: true, email: true }
-          },
-          videos: {
-            select: { id: true, title: true, duration: true }
-          },
-          _count: {
-            select: { videos: true, enrollments: true }
+    // Cache-aside, 90s TTL. Raw rows are cached (host-independent); thumbnail
+    // absolutization happens after, per request. Search text is hashed so keys
+    // stay bounded regardless of input length.
+    const searchHash = search ? cache.shortHash(search) : 'none';
+    const cacheKey = cache.buildKey('courses', 'list', `p${page}`, `l${take}`, `s${searchHash}`);
+    const { courses, total } = await cache.withCache(cacheKey, 90, async () => {
+      const [rows, count] = await Promise.all([
+        prisma.course.findMany({
+          skip,
+          take,
+          where,
+          include: {
+            teacher: {
+              select: { id: true, name: true, email: true }
+            },
+            videos: {
+              select: { id: true, title: true, duration: true }
+            },
+            _count: {
+              select: { videos: true, enrollments: true }
+            }
           }
-        }
-      }),
-      prisma.course.count({ where })
-    ]);
+        }),
+        prisma.course.count({ where })
+      ]);
+      return { courses: rows, total: count };
+    });
 
     // Ensure thumbnails have full URL if not already
     const baseUrl = `${req.protocol}://${req.get('host')}`;
@@ -178,6 +187,7 @@ const createCourse = async (req, res) => {
       }
     });
 
+    await cache.delPrefix('v1:courses:');
     res.status(201).json({ success: true, message: 'Course created successfully', data: course });
   } catch (error) {
     console.error('Error creating course:', error);
@@ -220,6 +230,7 @@ const updateCourse = async (req, res) => {
       data: updateData
     });
 
+    await cache.delPrefix('v1:courses:');
     res.json({ success: true, message: 'Course updated successfully', data: updatedCourse });
   } catch (error) {
     console.error('Error updating course:', error);
@@ -296,6 +307,8 @@ const deleteCourse = async (req, res) => {
       }
     }
 
+    await cache.delPrefix('v1:courses:');
+    await cache.delPrefix(`v1:videos:course:${courseId}:`);
     res.json({ success: true, message: 'Course deleted successfully' });
   } catch (error) {
     console.error('Error deleting course:', error);

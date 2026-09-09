@@ -24,6 +24,18 @@
 const prisma = require('../config/db');
 const bunnyClient = require('../integrations/bunny/bunnyStreamClient');
 const { AppError, ErrorCodes } = require('../utils/AppError');
+const cache = require('../integrations/redis/cache');
+
+/**
+ * Invalidate cached video lists + catalog after any video mutation.
+ * Writes are rare (admin/upload/webhook paths); invalidation is awaited so a
+ * subsequent read can never observe the pre-write state through the cache.
+ */
+async function invalidateVideoCaches(courseId) {
+  if (!Number.isInteger(courseId)) return;
+  await cache.delPrefix(`v1:videos:course:${courseId}:`);
+  await cache.delPrefix('v1:courses:');
+}
 
 // ─── Bunny status → domain status mapping ────────────────────────────────────
 // Source: Bunny Stream API docs (Aug 2026)
@@ -146,6 +158,7 @@ async function createVideo({ courseId, title, requestedByUserId }) {
       },
     });
 
+    await invalidateVideoCaches(courseId);
     return localVideo;
   } catch (dbErr) {
     // Distributed failure: Bunny succeeded, DB failed.
@@ -181,10 +194,12 @@ async function transitionStatus(videoId, newStatus) {
 
   assertValidTransition(video.status, newStatus);
 
-  return prisma.bunnyVideo.update({
+  const updated = await prisma.bunnyVideo.update({
     where: { id: videoId },
     data: { status: newStatus },
   });
+  await invalidateVideoCaches(updated.courseId);
+  return updated;
 }
 
 /**
@@ -198,7 +213,7 @@ async function transitionStatus(videoId, newStatus) {
 async function markFailed(videoId, reason) {
   const video = await prisma.bunnyVideo.findUnique({
     where: { id: videoId },
-    select: { id: true, status: true },
+    select: { id: true, status: true, courseId: true },
   });
 
   log.error('video.upload.failed', { videoId, reason, currentStatus: video ? video.status : null });
@@ -213,13 +228,15 @@ async function markFailed(videoId, reason) {
     return prisma.bunnyVideo.findUnique({ where: { id: videoId } });
   }
 
-  return prisma.bunnyVideo.update({
+  const updated = await prisma.bunnyVideo.update({
     where: { id: videoId },
     data: {
       status: 'FAILED',
       failureReason: reason ? String(reason).slice(0, 1000) : 'Unknown error',
     },
   });
+  await invalidateVideoCaches(updated.courseId);
+  return updated;
 }
 
 /**
@@ -290,6 +307,7 @@ async function applyBunnyStatus(bunnyVideoId, bunnyStatusCode) {
     where: { id: video.id },
     data: updateData,
   });
+  await invalidateVideoCaches(video.courseId);
 
   const eventName = domainStatus === 'READY'
     ? 'video.processing.completed'
@@ -453,6 +471,8 @@ async function deleteVideo(videoId) {
     where: { id: videoId },
   });
 
+  await invalidateVideoCaches(video.courseId);
+
   log.info('video.deleted', {
     videoId,
     bunnyVideoId: video.bunnyVideoId,
@@ -488,7 +508,10 @@ async function listCourseVideos(courseId, userId, role) {
     whereClause.status = 'READY';
   }
 
-  return prisma.bunnyVideo.findMany({
+  // Role is part of the key: admins receive failureReason/processingProgress.
+  // Cache-aside, 60s TTL; invalidated by every mutation above.
+  const cacheKey = cache.buildKey('videos', 'course', courseId, role === 'ADMIN' ? 'admin' : 'student');
+  return cache.withCache(cacheKey, 60, () => prisma.bunnyVideo.findMany({
     where: whereClause,
     orderBy: [{ position: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
     select: {
@@ -509,7 +532,7 @@ async function listCourseVideos(courseId, userId, role) {
       // failureReason only exposed to ADMIN
       ...(role === 'ADMIN' ? { failureReason: true, processingProgress: true } : {}),
     },
-  });
+  }));
 }
 
 /**
@@ -559,6 +582,8 @@ async function reorderVideos(courseId, videoIds, requestedByUserId) {
       })
     )
   );
+
+  await invalidateVideoCaches(courseId);
 
   return prisma.bunnyVideo.findMany({
     where: { courseId },

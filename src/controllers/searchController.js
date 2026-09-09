@@ -1,4 +1,5 @@
 const prisma = require('../config/db');
+const cache = require('../integrations/redis/cache');
 
 /**
  * Search across courses and videos
@@ -219,20 +220,28 @@ const searchContent = async (req, res) => {
 const getTrendingCourses = async (req, res) => {
   try {
     const { limit = 10, category, grade } = req.query;
-    
+
     // Build filter conditions
     const whereClause = {};
-    
+
     if (category) {
       whereClause.category = category;
     }
-    
+
     if (grade) {
       whereClause.grade = grade;
     }
-    
-    // Get courses with enrollment counts
-    const courses = await prisma.course.findMany({
+
+    // Cache-aside, 10min TTL. Enrollment counts move constantly — TTL (not
+    // invalidation) is the consistency mechanism; approximate trending is fine.
+    // Raw rows cached (host-independent); thumbnail absolutization per request.
+    const cacheKey = cache.buildKey(
+      'search', 'trending',
+      `l${parseInt(limit) || 10}`,
+      `c${category ? cache.shortHash(category) : 'any'}`,
+      `g${grade ? cache.shortHash(grade) : 'any'}`
+    );
+    const courses = await cache.withCache(cacheKey, 600, () => prisma.course.findMany({
       where: whereClause,
       take: parseInt(limit),
       include: {
@@ -255,7 +264,7 @@ const getTrendingCourses = async (req, res) => {
           _count: 'desc'
         }
       }
-    });
+    }));
     
     // Add full URLs for thumbnails
     const baseUrl = `${req.protocol}://${req.get('host')}`;

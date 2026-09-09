@@ -42,6 +42,15 @@ function buildKey(...parts) {
   return key;
 }
 
+/**
+ * Short stable hash for free-text key parts (search strings, filters).
+ * Bounds key length and charset regardless of user input.
+ */
+function shortHash(value) {
+  const crypto = require('crypto');
+  return crypto.createHash('sha1').update(String(value)).digest('hex').slice(0, 12);
+}
+
 function withTimeout(promise, ms = COMMAND_TIMEOUT_MS) {
   let timer;
   const timeout = new Promise((_, reject) => {
@@ -175,5 +184,6 @@ module.exports = {
   delPrefix,
   withCache,
   buildKey,
+  shortHash,
   stats,
 };
