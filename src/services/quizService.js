@@ -71,7 +71,9 @@ function validateSurveyJson(surveyJson) {
  *     type: 'radiogroup' | 'comment',
  *     correctValue: string,   // MCQ only — the value of the correct choice
  *     modelAnswer: string,    // Essay — reference answer shown after grading
- *     points: number          // Max points for this question (must be > 0)
+ *     points: number,         // Max points for this question (must be > 0)
+ *     rubric?: string,        // Essay only — optional grading criteria for human/AI graders
+ *     ai?: { enabled?: boolean } // Essay only — opt-in flag for AI grading (default off)
  *   }
  * }
  *
@@ -109,6 +111,12 @@ function buildAnswerKey(surveyJson, answerKeyInput) {
       if (!entry.modelAnswer) {
         errors.push(`Essay question "${name}": modelAnswer is required`);
       }
+      if (entry.rubric !== undefined && (typeof entry.rubric !== 'string' || entry.rubric.length > 5000)) {
+        errors.push(`Essay question "${name}": rubric must be a string up to 5000 chars`);
+      }
+      if (entry.ai !== undefined && (typeof entry.ai !== 'object' || entry.ai === null || (entry.ai.enabled !== undefined && typeof entry.ai.enabled !== 'boolean'))) {
+        errors.push(`Essay question "${name}": ai must look like { enabled?: boolean }`);
+      }
     } else {
       errors.push(`Answer key entry for "${name}" has unknown type "${entry.type}"`);
     }
@@ -117,6 +125,12 @@ function buildAnswerKey(surveyJson, answerKeyInput) {
       correctValue: entry.correctValue ?? null,
       modelAnswer: entry.modelAnswer ?? null,
       points: entry.points,
+      ...(entry.type === 'comment' && typeof entry.rubric === 'string' && entry.rubric.trim()
+        ? { rubric: entry.rubric.trim() }
+        : {}),
+      ...(entry.type === 'comment' && entry.ai && entry.ai.enabled === true
+        ? { ai: { enabled: true } }
+        : {}),
     };
   }
 
