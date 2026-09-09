@@ -503,6 +503,9 @@ async function listCourseVideos(courseId, userId, role) {
       height: true,
       thumbnailUrl: true,
       createdAt: true,
+      // Quiz existence only (no content/answers) — drives the admin
+      // "no quiz" guardrail; students already learn this via quiz meta.
+      quiz: { select: { id: true } },
       // failureReason only exposed to ADMIN
       ...(role === 'ADMIN' ? { failureReason: true, processingProgress: true } : {}),
     },
