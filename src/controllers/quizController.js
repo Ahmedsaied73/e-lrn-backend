@@ -910,38 +910,57 @@ async function uploadQuizImage(req, res) {
   }
 
   let fileHandled = false;
+  let failure = null; // 'IMAGE_TOO_LARGE' | 'INVALID_IMAGE_TYPE' | 'IMAGE_READ_FAILED' | 'IMAGE_UPLOAD_FAILED'
+  let uploadInFlight = false;
   let responded = false;
   const respond = (status, body) => {
     if (responded) return undefined;
     responded = true;
     return res.status(status).json(body);
   };
+  const respondFailure = () => {
+    if (failure === 'IMAGE_TOO_LARGE') return respond(413, { success: false, error: 'Image too large (max 5MB)' });
+    if (failure === 'INVALID_IMAGE_TYPE') return respond(415, { success: false, error: 'Only JPEG, PNG, WebP or GIF images are allowed' });
+    if (failure === 'IMAGE_UPLOAD_FAILED') return respond(502, { success: false, error: 'Image upload failed' });
+    return respond(500, { success: false, error: 'Image upload failed' });
+  };
 
+  // NOTE: never call bb.destroy(err) from inside a file handler — busboy
+  // propagates the error to the part stream, which crashes the process with
+  // an unhandled 'error' event. Drain + answer on 'finish' instead.
   bb.on('file', (fieldName, fileStream, info) => {
+    fileStream.on('error', () => { failure = failure || 'IMAGE_READ_FAILED'; });
+    if (failure) { fileStream.resume(); return; }
     if (fieldName !== 'image') {
       fileStream.resume();
       return;
     }
     const ext = QUIZ_IMAGE_MIME_TYPES[(info.mimeType || '').toLowerCase()];
     if (!ext) {
+      failure = 'INVALID_IMAGE_TYPE';
       fileStream.resume();
-      bb.destroy(new Error('INVALID_IMAGE_TYPE'));
       return;
     }
     fileHandled = true;
     const chunks = [];
     let size = 0;
     fileStream.on('data', (chunk) => {
+      if (failure) return;
       size += chunk.length;
       if (size > QUIZ_IMAGE_MAX_BYTES) {
-        bb.destroy(new Error('IMAGE_TOO_LARGE'));
+        failure = 'IMAGE_TOO_LARGE';
+        fileStream.resume();
         return;
       }
       chunks.push(chunk);
     });
-    fileStream.on('limit', () => bb.destroy(new Error('IMAGE_TOO_LARGE')));
-    fileStream.on('error', () => bb.destroy(new Error('IMAGE_READ_FAILED')));
+    fileStream.on('limit', () => {
+      failure = failure || 'IMAGE_TOO_LARGE';
+      fileStream.resume();
+    });
     fileStream.on('end', async () => {
+      if (failure || responded) return;
+      uploadInFlight = true;
       try {
         const buffer = Buffer.concat(chunks);
         const filename = `${crypto.randomUUID()}${ext}`;
@@ -954,22 +973,21 @@ async function uploadQuizImage(req, res) {
         respond(201, { success: true, data: { url: data.publicUrl } });
       } catch (error) {
         console.error('[QuizController] uploadQuizImage failed:', error.message);
-        respond(502, { success: false, error: 'Image upload failed' });
+        failure = 'IMAGE_UPLOAD_FAILED';
+        respondFailure();
+      } finally {
+        uploadInFlight = false;
       }
     });
   });
 
-  bb.on('error', (error) => {
-    if (error.message === 'IMAGE_TOO_LARGE') {
-      return respond(413, { success: false, error: 'Image too large (max 5MB)' });
-    }
-    if (error.message === 'INVALID_IMAGE_TYPE') {
-      return respond(415, { success: false, error: 'Only JPEG, PNG, WebP or GIF images are allowed' });
-    }
-    return respond(500, { success: false, error: 'Image upload failed' });
+  bb.on('error', () => {
+    failure = failure || 'IMAGE_READ_FAILED';
   });
 
   bb.on('finish', () => {
+    if (responded || uploadInFlight) return;
+    if (failure) return respondFailure();
     if (!fileHandled) {
       return respond(400, { success: false, error: 'No "image" file field found in the request' });
     }
