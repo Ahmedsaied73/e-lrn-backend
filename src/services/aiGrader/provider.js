@@ -53,7 +53,8 @@ function extractJson(text) {
 
 /**
  * Deterministic stand-in for checks and offline development. Feed it a queue
- * of verdicts (or Errors to simulate transport/model failures).
+ * of verdicts (plain objects), functions (invoked for dynamic/delayed
+ * verdicts), or Errors to simulate transport/model failures.
  */
 function createMockProvider(script = []) {
   const queue = [...script];
@@ -70,6 +71,7 @@ function createMockProvider(script = []) {
       }
       const next = queue.shift();
       if (next instanceof Error) throw next;
+      if (typeof next === 'function') return next();
       return next;
     },
   };
