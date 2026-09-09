@@ -82,7 +82,7 @@ prisma/schema.prisma    → Single schema, Postgres on Supabase
 - **Bunny webhook**: Mounted at `/webhooks/bunny/stream` *before* `express.json()` in `app.js:68` — it needs raw body for HMAC verification. Do not reorder.
 - **Rate limiting**: 1000 req/15min global (raised from 100 on Sept 8 2026 — it starved tab-heavy browsing and test suites), 20 req/15min on `/auth/login`.
 - **CORS**: Allowlisted origins only (localhost:3000, localhost:3002, `FRONTEND_URL`).
-- **Database**: Supabase Postgres for all envs (pooled `DATABASE_URL` 6543 + `DIRECT_URL` 5432 for migrations). Prisma schema uses `Autoincrement()` IDs. Run `npm run db:setup` after schema changes. Legacy MySQL backup: `C:\Users\AHMEDS~1\AppData\Local\Temp\opencode\mysql-backup-20260909.sql` (local only, never committed).
+- **Database**: Supabase Postgres for all envs (pooled `DATABASE_URL` 6543 + `DIRECT_URL` 5432 for migrations). **Connection gotcha (Sept 2026)**: `db.<ref>.supabase.co` is IPv6-only — unreachable from IPv4-only networks (DNS ENOENT → Prisma P1001). Use the dashboard's pooler hosts for BOTH vars: transaction pooler `:6543?pgbouncer=true` for the app, session pooler `:5432` for migrate. Prisma schema uses `Autoincrement()` IDs. Run `npm run db:setup` after schema changes. Legacy MySQL backup: `C:\Users\AHMEDS~1\AppData\Local\Temp\opencode\mysql-backup-20260909.sql` (local only, never committed).
 - **Response envelope**: Newer endpoints use `{ success: true, data }`. Legacy endpoints return raw objects.
 
 ## Dual video systems (critical)
