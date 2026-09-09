@@ -193,6 +193,7 @@ model QuizAttempt {
 
   quiz          Quiz              @relation(fields: [quizId], references: [id], onDelete: Cascade)
   user          User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  aiGradingJobs AiGradingJob[]
 
   @@index([userId, quizId])
   @@index([quizId])
@@ -205,6 +206,38 @@ enum QuizAttemptStatus {
   GRADING
   GRADED
   EXPIRED
+}
+
+// ─── AI Grader jobs ──────────────────────────────────────────────────────────
+// One row per (attempt, essay question) sent to the AI grader. BullMQ holds the
+// live queue in Redis; this table is the durable audit trail + idempotency key
+// (@@unique) + human-review surface (confidence/applied). Attempt delete
+// cascades (attempt rows vanish on quiz delete/reset by design).
+model AiGradingJob {
+  id           Int                @id @default(autoincrement())
+  attemptId    Int
+  questionName String             // qName within the quiz's answerKey
+  status       AiGradingJobStatus @default(PENDING)
+  tries        Int                @default(0)
+  maxTries     Int                @default(3)
+  confidence   Float?             // verdict confidence 0..1 (null until graded)
+  applied      Boolean            @default(false) // verdict auto-finalized into the attempt
+  verdict      Json?              // validated verdict {score,maxScore,confidence,feedback,reasoning?,model,promptVersion}
+  error        String?            @db.Text
+  claimedAt    DateTime?
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+
+  attempt      QuizAttempt        @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+
+  @@unique([attemptId, questionName])
+  @@index([status])
+}
+
+enum AiGradingJobStatus {
+  PENDING
+  DONE
+  FAILED
 }
 
 // Admin-granted bypass for the sequential quiz gate (force-advance a student past a quiz)
