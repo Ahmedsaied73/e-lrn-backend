@@ -1,8 +1,9 @@
-# AI Grader for Quiz Essays — Plan (PAUSED, awaiting Redis + Gemini key)
+# AI Grader for Quiz Essays — Plan (IN PROGRESS on ai-grader; live-model smoke needs GEMINI_API_KEY)
 
 ## Status
-**PAUSED by user (2026-09-09).** Resume trigger: user confirms Redis infrastructure is ready.
-Planning only — no implementation written. Grill session completed; all choice-dependent items decided below.
+- P0 (contract + AiGradingJob table), P1 (evaluator module, 7/7 mock checks), P2 (BullMQ queue + worker + submit hooks, mock e2e green), P3a (authoring rubric + toggle), P3b (attribution passthrough + admin badges), P3c (auto-refetch, live-flip proven), P4 (daily budget proven blocking, eval harness green) — all committed.
+- Remaining: real-model smoke (`scripts/ai-eval.js --real`) + production key provisioning.
+- Build-time fixes worth knowing: BullMQ jobIds must not contain `:`; BullMQ connections need `maxRetriesPerRequest: null` (dedicated, never the shared cache client); enqueue requires Redis only (worker requires key); Express ETag 304s break pollers → api-client uses `cache: 'no-store'`.
 
 ## Locked decisions (user-approved, do not re-ask)
 | # | Decision | Verdict |

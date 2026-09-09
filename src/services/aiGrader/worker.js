@@ -42,6 +42,45 @@ function confidenceThreshold() {
   return config.aiGrader ? config.aiGrader.confidenceThreshold : 0.8;
 }
 
+function dailyBudget() {
+  const raw = Number(process.env.AI_GRADER_DAILY_BUDGET);
+  return Number.isSafeInteger(raw) && raw >= 0 ? raw : 1000;
+}
+
+function budgetKey(date = new Date()) {
+  return `ai:budget:${date.toISOString().slice(0, 10)}`;
+}
+
+/**
+ * Cost guard: at most N paid model calls per UTC day (Redis counter, 24h TTL).
+ * Returns true when the call may proceed (and counts it), false when the
+ * budget is exhausted — the job stays queued for human grading. Never throws.
+ */
+async function checkBudget() {
+  try {
+    const { getRedis, ensureConnected } = require('../../integrations/redis/redisClient');
+    // Await the handshake (bounded): without this, a cold client rejects and
+    // the fail-open below would wrongly approve the spend.
+    await ensureConnected(3000).catch(() => false);
+    const client = getRedis();
+    if (!client || client.status !== 'ready') return true; // fail-open: no Redis, no budget tracking
+    const key = budgetKey();
+    const used = Number(await client.get(key)) || 0;
+    if (used >= dailyBudget()) {
+      logWarn('ai.budget.exhausted', { used, budget: dailyBudget() });
+      return false;
+    }
+    const count = await client.incr(key);
+    if (count === 1) {
+      await client.expire(key, 86400).catch(() => {});
+    }
+    return true;
+  } catch (err) {
+    logWarn('ai.budget.check_failed', { error: err.message });
+    return true; // fail-open: budget system must never block grading by itself
+  }
+}
+
 async function markJob(attemptId, questionName, patch) {
   try {
     await prisma.aiGradingJob.update({
@@ -88,6 +127,11 @@ async function processGradingJob(job, providerFactory = defaultProviderFactory) 
   }
 
   await markJob(attemptId, questionName, { tries: { increment: 1 }, claimedAt: new Date() });
+
+  if (!(await checkBudget())) {
+    logInfo('ai.worker.skipped_budget', { attemptId, questionName });
+    return { skipped: 'budget-exhausted' };
+  }
 
   const provider = await providerFactory();
   const verdict = await gradeEssay(
