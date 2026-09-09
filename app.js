@@ -78,17 +78,24 @@ app.use(requestLogger);
 // Set up rate limiter: maximum of 1000 requests per 15 minutes per IP.
 // Raised from 100 (Sept 2026) — the default starved automated + real browsing
 // (each admin page load costs ~2-3 API calls). Login stays at 20/15min below.
+// Store: shared Redis when configured (correct across instances), otherwise the
+// built-in MemoryStore. passOnStoreError keeps fail-open if Redis dies.
+const { createRateLimitStore } = require('./src/integrations/redis/rateLimitStore');
+const { isRedisEnabled } = require('./src/integrations/redis/redisClient');
+const redisStoreEnabled = isRedisEnabled();
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 1000, // limit each IP to 1000 requests per windowMs
-  message: 'Too many requests from this IP, please try again later.'
+  message: 'Too many requests from this IP, please try again later.',
+  ...(redisStoreEnabled ? { store: createRateLimitStore(), passOnStoreError: true } : {}),
 });
 
 // Stricter rate limiter for auth routes
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 20, // Limit each IP to 10 login requests per windowMs
-  message: 'Too many login attempts from this IP, please try again later.'
+  message: 'Too many login attempts from this IP, please try again later.',
+  ...(redisStoreEnabled ? { store: createRateLimitStore(), passOnStoreError: true } : {}),
 });
 
 // Apply rate limiter to all requests
