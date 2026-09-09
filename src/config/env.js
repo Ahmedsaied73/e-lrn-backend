@@ -103,6 +103,26 @@ function resolveRedis() {
   return { url, enabled: true, configured: true };
 }
 
+// ── AI Grader config (essay grading via Gemini + BullMQ) ────────────────────
+// NEVER boot-critical: a missing key only disables AI grading (attempts fall
+// back to the human inbox). Warnings only, in every environment.
+function resolveAiGrader() {
+  const apiKey = process.env.GEMINI_API_KEY || null;
+  const model = process.env.AI_GRADER_MODEL || 'gemini-2.5-flash';
+  const threshold = Number(process.env.AI_GRADER_CONFIDENCE_THRESHOLD);
+  const timeoutMs = Number(process.env.AI_GRADER_TIMEOUT_MS);
+  if (!apiKey) {
+    console.warn('[WARN] GEMINI_API_KEY not set — AI essay grading disabled (human inbox only).');
+  }
+  return {
+    apiKey,
+    model,
+    confidenceThreshold: Number.isFinite(threshold) && threshold >= 0 && threshold <= 1 ? threshold : 0.8,
+    timeoutMs: Number.isSafeInteger(timeoutMs) && timeoutMs > 0 ? timeoutMs : 45000,
+    configured: Boolean(apiKey),
+  };
+}
+
 const config = {
   jwt: {
     secret: process.env.JWTSECRET,
@@ -112,6 +132,7 @@ const config = {
   },
   supabase: resolveSupabase(),
   redis: resolveRedis(),
+  aiGrader: resolveAiGrader(),
   admin: {
     // [C-2] Credentials come from env only — no hardcoded fallbacks
     email: process.env.ADMIN_EMAIL || 'admin@elearning.com',

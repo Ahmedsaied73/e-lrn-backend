@@ -28,7 +28,7 @@ function isRedisEnabled() {
   return Boolean(config.redis && config.redis.enabled && config.redis.configured);
 }
 
-function createRedisConnection() {
+function createRedisConnection(overrides = {}) {
   // Lazy require: keeps `require('./redisClient')` side-effect free when Redis
   // is disabled or ioredis is absent.
   const { Redis } = require('ioredis');
@@ -40,6 +40,9 @@ function createRedisConnection() {
     retryStrategy(times) {
       return Math.min(times * 100, 3000);
     },
+    // Callers with different semantics override here — e.g. BullMQ mandates
+    // maxRetriesPerRequest: null on its connections.
+    ...overrides,
   });
   client.on('error', (err) => {
     // Sampled: connection blips retry every few seconds — don't flood logs,

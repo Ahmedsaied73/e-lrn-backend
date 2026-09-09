@@ -162,6 +162,16 @@ app.listen(port, () => {
 
     // Start Bunny video reconciliation job (every 10 minutes)
     startReconciliationJob();
+
+    // Start AI essay-grading worker (in-process BullMQ). No-ops with a warning
+    // when GEMINI_API_KEY is missing or Redis is disabled — human grading path
+    // is unaffected.
+    try {
+      const { startAiGradingWorker } = require('./src/services/aiGrader/worker');
+      startAiGradingWorker();
+    } catch (err) {
+      console.warn('[WARN] AI grading worker failed to start:', err.message);
+    }
 });
 
 module.exports = app; // Export for testing

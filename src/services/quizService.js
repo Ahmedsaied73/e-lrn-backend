@@ -469,7 +469,7 @@ async function finalizeStaleAttempt(attempt, quiz) {
   const scorePercent = computeScorePercent(mcqEarned, totalPoints);
   const newStatus = hasEssays ? STATUS.GRADING : STATUS.GRADED;
 
-  return prisma.quizAttempt.update({
+  const updated = await prisma.quizAttempt.update({
     where: { id: attempt.id },
     data: {
       status: newStatus,
@@ -483,6 +483,27 @@ async function finalizeStaleAttempt(attempt, quiz) {
       scorePercent,
     },
   });
+
+  // Fire-and-forget AI grading for AI-enabled essays. Never throws — a queue
+  // failure just leaves the attempt for the human inbox.
+  if (newStatus === STATUS.GRADING) {
+    enqueueAiGradingSafe(updated.id);
+  }
+
+  return updated;
+}
+
+/**
+ * Best-effort AI enqueue that can never break the quiz flow. Lazy-requires
+ * the queue module to keep quizService importable without BullMQ/Redis.
+ */
+function enqueueAiGradingSafe(attemptId) {
+  try {
+    const { enqueueAiGrading } = require('./aiGrader/queue');
+    enqueueAiGrading(attemptId).catch(() => {});
+  } catch {
+    // Queue module unavailable — human grading path is unaffected.
+  }
 }
 
 /**
@@ -553,6 +574,12 @@ async function submitAttempt(userId, attemptId, responses, autoSubmitted = false
       scorePercent,
     },
   });
+
+  // Fire-and-forget AI grading for AI-enabled essays. Never throws — a queue
+  // failure just leaves the attempt for the human inbox.
+  if (newStatus === STATUS.GRADING) {
+    enqueueAiGradingSafe(updated.id);
+  }
 
   return { attempt: updated, perQuestion, hasEssays };
 }
@@ -650,6 +677,84 @@ async function gradeEssayAttempt(adminId, attemptId, essayScores, essayFeedbackM
   return updated;
 }
 
+/**
+ * Apply one AI essay verdict to a GRADING attempt (called by the AI worker).
+ * Merges into essayFeedback with AI attribution; finalizes to GRADED only when
+ * EVERY essay question in the answer key now carries a numeric score (human
+ * grades, applied via gradeEssayAttempt, always count — human wins ties).
+ * Never overwrites an existing numeric score. Returns { finalized }.
+ */
+async function applyAiVerdict(attemptId, qName, verdict) {
+  const attempt = await prisma.quizAttempt.findUnique({
+    where: { id: attemptId },
+    include: { quiz: { select: { answerKey: true } } },
+  });
+
+  if (!attempt) throw Object.assign(new Error('Attempt not found'), { statusCode: 404 });
+  if (attempt.status !== STATUS.GRADING) {
+    return { finalized: false, reason: 'not-grading' };
+  }
+
+  const answerKey = attempt.quiz.answerKey || {};
+  const keyEntry = answerKey[qName];
+  if (!keyEntry || keyEntry.type !== 'comment') {
+    return { finalized: false, reason: 'not-essay' };
+  }
+
+  const feedbackRecord = { ...(attempt.essayFeedback || {}) };
+  const current = feedbackRecord[qName];
+  if (current && typeof current.awarded === 'number') {
+    return { finalized: false, reason: 'already-graded' }; // human (or prior AI) grade stands
+  }
+
+  const awarded = Math.min(Math.max(0, Number(verdict.awarded)), keyEntry.points);
+  if (!Number.isFinite(awarded)) {
+    throw Object.assign(new Error('AI verdict awarded is not a number'), { statusCode: 422 });
+  }
+  feedbackRecord[qName] = {
+    awarded,
+    max: keyEntry.points,
+    feedback: typeof verdict.feedback === 'string' ? verdict.feedback.slice(0, 2000) : null,
+    gradedBy: 'ai',
+    confidence: verdict.confidence,
+    model: verdict.model || null,
+    promptVersion: verdict.promptVersion || null,
+    gradedAt: new Date().toISOString(),
+  };
+
+  const essayNames = Object.entries(answerKey)
+    .filter(([, e]) => e && e.type === 'comment')
+    .map(([n]) => n);
+  const allScored = essayNames.every(
+    (n) => feedbackRecord[n] && typeof feedbackRecord[n].awarded === 'number'
+  );
+
+  if (!allScored) {
+    await prisma.quizAttempt.update({
+      where: { id: attemptId },
+      data: { essayFeedback: feedbackRecord },
+    });
+    return { finalized: false };
+  }
+
+  const essayEarned = essayNames.reduce((sum, n) => sum + feedbackRecord[n].awarded, 0);
+  const totalPoints = attempt.totalPoints || 0;
+  const mcqEarned = attempt.mcqEarned || 0;
+  await prisma.quizAttempt.update({
+    where: { id: attemptId },
+    data: {
+      status: STATUS.GRADED,
+      essayEarned,
+      earnedPoints: mcqEarned + essayEarned,
+      scorePercent: computeScorePercent(mcqEarned + essayEarned, totalPoints),
+      essayFeedback: feedbackRecord,
+      essayGradedBy: null, // mixed/AI attribution lives per-question in essayFeedback
+      essayGradedAt: new Date(),
+    },
+  });
+  return { finalized: true };
+}
+
 // ─── Image Upload ─────────────────────────────────────────────────────────────
 
 /**
@@ -683,5 +788,6 @@ module.exports = {
   submitAttempt,
   saveAttempt,
   gradeEssayAttempt,
+  applyAiVerdict,
   uploadQuestionImage,
 };
