@@ -9,6 +9,8 @@
 const prisma = require('../config/db');
 const quizService = require('../services/quizService');
 const { STATUS } = require('../config/quizConfig');
+const busboy = require('busboy');
+const crypto = require('crypto');
 
 function parseInteger(value) {
   const parsed = typeof value === 'number' ? value : Number(value);
@@ -878,6 +880,104 @@ async function revokeExemption(req, res) {
   }
 }
 
+// ─── Admin: quiz question image upload (Supabase Storage) ───────────────────
+
+const QUIZ_IMAGE_MIME_TYPES = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+};
+const QUIZ_IMAGE_MAX_BYTES = 5 * 1024 * 1024; // 5MB — bounded in-memory buffer (storage-js has no streaming API)
+
+/**
+ * POST /quizzes/images
+ * Admin-only. Accepts a single image (multipart field "image"), forwards it to
+ * the Supabase Storage bucket, and returns the public URL for question `imageLink`.
+ * Busboy streaming is handled inside the controller — no body-parser middleware here.
+ */
+async function uploadQuizImage(req, res) {
+  const { isSupabaseConfigured, getSupabaseAdmin, getSupabaseBucket } = require('../integrations/supabase/supabaseClient');
+  if (!isSupabaseConfigured()) {
+    return res.status(501).json({ success: false, error: 'Image upload is not configured' });
+  }
+
+  let bb;
+  try {
+    bb = busboy({ headers: req.headers, limits: { fileSize: QUIZ_IMAGE_MAX_BYTES, files: 1 } });
+  } catch (error) {
+    return res.status(400).json({ success: false, error: 'Invalid multipart request' });
+  }
+
+  let fileHandled = false;
+  let responded = false;
+  const respond = (status, body) => {
+    if (responded) return undefined;
+    responded = true;
+    return res.status(status).json(body);
+  };
+
+  bb.on('file', (fieldName, fileStream, info) => {
+    if (fieldName !== 'image') {
+      fileStream.resume();
+      return;
+    }
+    const ext = QUIZ_IMAGE_MIME_TYPES[(info.mimeType || '').toLowerCase()];
+    if (!ext) {
+      fileStream.resume();
+      bb.destroy(new Error('INVALID_IMAGE_TYPE'));
+      return;
+    }
+    fileHandled = true;
+    const chunks = [];
+    let size = 0;
+    fileStream.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > QUIZ_IMAGE_MAX_BYTES) {
+        bb.destroy(new Error('IMAGE_TOO_LARGE'));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    fileStream.on('limit', () => bb.destroy(new Error('IMAGE_TOO_LARGE')));
+    fileStream.on('error', () => bb.destroy(new Error('IMAGE_READ_FAILED')));
+    fileStream.on('end', async () => {
+      try {
+        const buffer = Buffer.concat(chunks);
+        const filename = `${crypto.randomUUID()}${ext}`;
+        const sb = getSupabaseAdmin();
+        const { error } = await sb.storage
+          .from(getSupabaseBucket())
+          .upload(filename, buffer, { contentType: info.mimeType, upsert: false });
+        if (error) throw new Error(error.message);
+        const { data } = sb.storage.from(getSupabaseBucket()).getPublicUrl(filename);
+        respond(201, { success: true, data: { url: data.publicUrl } });
+      } catch (error) {
+        console.error('[QuizController] uploadQuizImage failed:', error.message);
+        respond(502, { success: false, error: 'Image upload failed' });
+      }
+    });
+  });
+
+  bb.on('error', (error) => {
+    if (error.message === 'IMAGE_TOO_LARGE') {
+      return respond(413, { success: false, error: 'Image too large (max 5MB)' });
+    }
+    if (error.message === 'INVALID_IMAGE_TYPE') {
+      return respond(415, { success: false, error: 'Only JPEG, PNG, WebP or GIF images are allowed' });
+    }
+    return respond(500, { success: false, error: 'Image upload failed' });
+  });
+
+  bb.on('finish', () => {
+    if (!fileHandled) {
+      return respond(400, { success: false, error: 'No "image" file field found in the request' });
+    }
+  });
+
+  req.pipe(bb);
+}
+
 module.exports = {
   getQuizMeta,
   startQuiz,
@@ -887,6 +987,7 @@ module.exports = {
   getStudentAttempts,
   upsertQuiz,
   deleteQuiz,
+  uploadQuizImage,
   listQuizAttempts,
   listAllQuizzes,
   listAllAttempts,

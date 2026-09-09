@@ -19,6 +19,7 @@ const {
   getStudentAttempts,
   upsertQuiz,
   deleteQuiz,
+  uploadQuizImage,
   listQuizAttempts,
   gradeAttempt,
   resetAttempt,
@@ -53,6 +54,12 @@ router.get('/videos/:videoId/attempts', getStudentAttempts);
 
 // Create / update quiz definition for a video
 router.post('/videos/:videoId', authorizeAdmin(), upsertQuiz);
+
+// Upload an image for a quiz question (multipart/form-data, field name: "image").
+// Proxied to Supabase Storage; returns the public URL for question `imageLink`.
+// Auth: ADMIN only. Busboy streaming is handled inside the controller —
+// no body-parser middleware here. Do NOT add express.json() or multer to this route.
+router.post('/images', authorizeAdmin(), uploadQuizImage);
 
 // Delete quiz and associated attempts
 router.delete('/:quizId', authorizeAdmin(), deleteQuiz);

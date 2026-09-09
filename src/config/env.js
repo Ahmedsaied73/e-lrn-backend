@@ -49,6 +49,34 @@ function resolveRefreshSecret() {
   return candidate || process.env.JWTSECRET;
 }
 
+// ── Supabase Storage config (quiz question images) ──────────────────────────
+// Uploads are proxied through POST /quizzes/images (ADMIN-only); the service
+// key never leaves the server. Missing keys → dev warns + endpoint 501s;
+// production refuses to start.
+const SUPABASE_PLACEHOLDER_RE = /your_|placeholder|change_me|example|TODO|\[.*\]/i;
+function resolveSupabase() {
+  const url = process.env.SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_KEY;
+  const looksPlaceholder = (v) => Boolean(v) && SUPABASE_PLACEHOLDER_RE.test(v);
+  const configured = Boolean(url) && Boolean(serviceKey)
+    && !looksPlaceholder(url) && !looksPlaceholder(serviceKey);
+
+  if (!configured) {
+    if (process.env.NODE_ENV === 'production') {
+      console.error('[FATAL] SUPABASE_URL / SUPABASE_SERVICE_KEY are not set. Quiz image upload requires them.');
+      process.exit(1);
+    }
+    console.warn('[WARN] Supabase storage not configured — POST /quizzes/images will return 501.');
+  }
+
+  return {
+    url: url || null,
+    serviceKey: serviceKey || null,
+    bucket: process.env.SUPABASE_QUIZ_BUCKET || 'quiz-images',
+    configured,
+  };
+}
+
 const config = {
   jwt: {
     secret: process.env.JWTSECRET,
@@ -56,6 +84,7 @@ const config = {
     refreshSecret: resolveRefreshSecret(),
     refreshExpiry: process.env.REFRESH_TOKEN_EXPIRY || '7d'
   },
+  supabase: resolveSupabase(),
   admin: {
     // [C-2] Credentials come from env only — no hardcoded fallbacks
     email: process.env.ADMIN_EMAIL || 'admin@elearning.com',
