@@ -4,7 +4,7 @@
 
 Node.js/Express e-learning platform for Egyptian secondary school students. Courses contain videos (Bunny.net Stream), quizzes (SurveyJS), and assignments. Students progress sequentially. Admins manage everything.
 
-**Stack**: Express, MySQL 8.0 (Prisma ORM), Bunny.net Stream, JWT cookies, Busboy. Port **3005**.
+**Stack**: Express, Postgres on Supabase (Prisma ORM), Bunny.net Stream, JWT cookies, Busboy. Port **3005**.
 
 ## Commands
 
@@ -70,7 +70,7 @@ src/jobs/               → Background jobs (video reconciliation every 10 min)
 src/utils.js            → JWT helpers (createToken, createRefreshToken)
 src/utils/AppError.js   → Error class for Bunny service layer
 scripts/                → CLI utilities (enrollment, upload, admin scripts)
-prisma/schema.prisma    → Single schema, MySQL
+prisma/schema.prisma    → Single schema, Postgres on Supabase
 ```
 
 ## Key conventions
@@ -82,7 +82,7 @@ prisma/schema.prisma    → Single schema, MySQL
 - **Bunny webhook**: Mounted at `/webhooks/bunny/stream` *before* `express.json()` in `app.js:68` — it needs raw body for HMAC verification. Do not reorder.
 - **Rate limiting**: 1000 req/15min global (raised from 100 on Sept 8 2026 — it starved tab-heavy browsing and test suites), 20 req/15min on `/auth/login`.
 - **CORS**: Allowlisted origins only (localhost:3000, localhost:3002, `FRONTEND_URL`).
-- **Database**: MySQL 8.0. Prisma schema uses `Autoincrement()` IDs. Run `npm run db:setup` after schema changes.
+- **Database**: Supabase Postgres for all envs (pooled `DATABASE_URL` 6543 + `DIRECT_URL` 5432 for migrations). Prisma schema uses `Autoincrement()` IDs. Run `npm run db:setup` after schema changes. Legacy MySQL backup: `C:\Users\AHMEDS~1\AppData\Local\Temp\opencode\mysql-backup-20260909.sql` (local only, never committed).
 - **Response envelope**: Newer endpoints use `{ success: true, data }`. Legacy endpoints return raw objects.
 
 ## Dual video systems (critical)

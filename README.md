@@ -2,7 +2,7 @@
 
 Backend API for an e-learning platform built for Egyptian secondary school students. Courses contain streaming videos (Bunny.net Stream), SurveyJS quizzes, and assignments. Students progress sequentially through course content; admins manage everything.
 
-**Stack**: Express, MySQL 8.0 (Prisma ORM), Bunny.net Stream, JWT cookies, Busboy.
+**Stack**: Express, Postgres on Supabase (Prisma ORM), Bunny.net Stream, JWT cookies, Busboy.
 **Port**: 3005
 
 ## Features
@@ -23,7 +23,7 @@ Backend API for an e-learning platform built for Egyptian secondary school stude
 ### Prerequisites
 
 - Node.js 18+
-- MySQL 8.0
+- A Supabase project (Postgres + Storage) — see Environment variables below
 
 ### Installation
 
@@ -54,7 +54,8 @@ There is **no `npm start`** script defined — use `node app.js` or `npm run dev
 
 | Variable | Purpose |
 |----------|---------|
-| `DATABASE_URL` | Prisma/MySQL connection string |
+| `DATABASE_URL` | Supabase pooled Postgres connection (6543, `?pgbouncer=true`) |
+| `DIRECT_URL` | Supabase direct Postgres connection (5432) for `prisma migrate` |
 | `FRONTEND_URL` | Allowed CORS origin |
 | `JWTSECRET` / `JWT_EXPIRY` | Access-token signing (default 1h) |
 | `REFRESH_TOKEN_SECRET` / `REFRESH_TOKEN_EXPIRY` | Refresh-token signing (default 7d) |
@@ -78,7 +79,7 @@ The default admin is auto-created on startup from `ADMIN_EMAIL`/`ADMIN_PASSWORD`
 
 ## Database
 
-Single Prisma schema at `prisma/schema.prisma` (MySQL, `Autoincrement()` IDs). Key models:
+Single Prisma schema at `prisma/schema.prisma` (Postgres on Supabase, `Autoincrement()` IDs). Key models:
 
 - `User` (role ADMIN/STUDENT, grade is required — `FIRST_SECONDARY`/`SECOND_SECONDARY`/`THIRD_SECONDARY`)
 - `Course` (per-grade)

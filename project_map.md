@@ -4,7 +4,7 @@
 
 A full-stack e-learning platform for Egyptian secondary school students. Courses contain videos (hosted on Bunny.net Stream), quizzes (SurveyJS-based), and assignments. Students progress sequentially through course content. Admins manage everything.
 
-**Tech Stack**: Node.js/Express, MySQL 8.0 (Prisma ORM), Bunny.net Stream (video hosting), JWT (cookie-based auth), Busboy (multipart uploads).
+**Tech Stack**: Node.js/Express, Postgres on Supabase (Prisma ORM), Bunny.net Stream (video hosting), JWT (cookie-based auth), Busboy (multipart uploads).
 
 **Port**: 3005
 
@@ -151,7 +151,7 @@ Students must complete prerequisites before accessing the next video:
 | `scripts/enrollAdminsInAllCourses.js` | Auto-enroll all admins in all courses |
 | `scripts/markEnrollmentAsPaid.js` | Manually mark enrollment as paid |
 | `scripts/deleteCourse1.js` | Delete course ID 1 transactionally |
-| `scripts/checkDbTables.js` | List MySQL tables |
+| `scripts/checkDbTables.js` | List Postgres tables |
 | `scripts/testBunnyIntegration.js` | Unit tests for Bunny client |
 | `scripts/testQuizLogic.js` | Unit tests for quiz service |
 | `scripts/testQuizFlow.js` | E2E quiz flow test |

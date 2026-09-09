@@ -9,7 +9,7 @@ const getAllCourses = async (req, res) => {
     const skip = (page - 1) * take;
     const search = (req.query.search || '').trim();
 
-    const where = search ? { title: { contains: search } } : {};
+    const where = search ? { title: { contains: search, mode: 'insensitive' } } : {};
 
     const [courses, total] = await Promise.all([
       prisma.course.findMany({

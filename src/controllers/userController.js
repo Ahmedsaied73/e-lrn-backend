@@ -183,8 +183,8 @@ const getAllUsers = async (req, res) => {
     if (GRADES.includes(req.query.grade)) where.grade = req.query.grade;
     const search = (req.query.search || '').trim();
     if (search) {
-      // MySQL: contains is case-insensitive by default (no `mode` support).
-      where.OR = [{ name: { contains: search } }, { email: { contains: search } }];
+      // Postgres: contains is case-sensitive by default — `mode` keeps search case-insensitive.
+      where.OR = [{ name: { contains: search, mode: 'insensitive' } }, { email: { contains: search, mode: 'insensitive' } }];
     }
 
     const orderBy = [];

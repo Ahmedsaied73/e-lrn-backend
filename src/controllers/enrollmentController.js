@@ -149,9 +149,9 @@ const listAllEnrollments = async (req, res) => {
     const search = (req.query.search || '').trim();
     if (search) {
       where.OR = [
-        { user: { name: { contains: search } } },
-        { user: { email: { contains: search } } },
-        { course: { title: { contains: search } } },
+        { user: { name: { contains: search, mode: 'insensitive' } } },
+        { user: { email: { contains: search, mode: 'insensitive' } } },
+        { course: { title: { contains: search, mode: 'insensitive' } } },
       ];
     }
 

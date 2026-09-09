@@ -596,9 +596,9 @@ async function listAllQuizzes(req, res) {
     const where = {};
     if (search) {
       where.OR = [
-        { title: { contains: search } },
-        { bunnyVideo: { title: { contains: search } } },
-        { bunnyVideo: { course: { title: { contains: search } } } },
+        { title: { contains: search, mode: 'insensitive' } },
+        { bunnyVideo: { title: { contains: search, mode: 'insensitive' } } },
+        { bunnyVideo: { course: { title: { contains: search, mode: 'insensitive' } } } },
       ];
     }
 
@@ -678,9 +678,9 @@ async function listAllAttempts(req, res) {
     if (status) where.status = status;
     if (search) {
       where.OR = [
-        { user: { name: { contains: search } } },
-        { user: { email: { contains: search } } },
-        { quiz: { title: { contains: search } } },
+        { user: { name: { contains: search, mode: 'insensitive' } } },
+        { user: { email: { contains: search, mode: 'insensitive' } } },
+        { quiz: { title: { contains: search, mode: 'insensitive' } } },
       ];
     }
 

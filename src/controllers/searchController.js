@@ -38,8 +38,8 @@ const searchContent = async (req, res) => {
     if (query) {
       courseWhereClause.AND.push({
         OR: [
-          { title: { contains: query } },
-          { description: { contains: query } }
+          { title: { contains: query, mode: 'insensitive' } },
+          { description: { contains: query, mode: 'insensitive' } }
         ]
       });
     }
@@ -153,7 +153,7 @@ const searchContent = async (req, res) => {
             query
               ? {
                   OR: [
-                    { title: { contains: query } }
+                    { title: { contains: query, mode: 'insensitive' } }
                   ]
                 }
               : {},
