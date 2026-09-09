@@ -342,6 +342,11 @@ async function getQuizResult(req, res) {
           maxPoints: keyEntry.points,
           feedback: essayFb ? essayFb.feedback : null,
           status: attempt.status === STATUS.GRADED ? 'GRADED' : 'PENDING_REVIEW',
+          // AI attribution passthrough (transparency for students, review signal
+          // for admins). Internal reasoning never leaves the AiGradingJob row.
+          ...(essayFb && essayFb.gradedBy ? { gradedBy: essayFb.gradedBy } : {}),
+          ...(essayFb && typeof essayFb.confidence === 'number' ? { confidence: essayFb.confidence } : {}),
+          ...(essayFb && essayFb.model ? { gradedModel: essayFb.model } : {}),
         });
       }
     }
