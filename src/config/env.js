@@ -108,7 +108,7 @@ function resolveRedis() {
 // back to the human inbox). Warnings only, in every environment.
 function resolveAiGrader() {
   const apiKey = process.env.GEMINI_API_KEY || null;
-  const model = process.env.AI_GRADER_MODEL || 'gemini-2.5-flash';
+  const model = process.env.AI_GRADER_MODEL || 'gemini-3.6-flash';
   const threshold = Number(process.env.AI_GRADER_CONFIDENCE_THRESHOLD);
   const timeoutMs = Number(process.env.AI_GRADER_TIMEOUT_MS);
   if (!apiKey) {
