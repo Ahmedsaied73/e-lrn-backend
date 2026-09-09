@@ -77,6 +77,32 @@ function resolveSupabase() {
   };
 }
 
+// ── Redis config (Upstash-backed cache + future rate-limit/queue use) ───────
+// REDIS_ENABLED=false (or missing/unreachable URL) means pure passthrough:
+// caching and Redis-backed limits silently stay off, the app boots and serves.
+// Production refuses to start only when Redis is explicitly enabled but the
+// URL is missing or looks like a placeholder.
+const REDIS_PLACEHOLDER_RE = /your_|placeholder|change_me|example|TODO|\[.*\]/i;
+function resolveRedis() {
+  const enabled = String(process.env.REDIS_ENABLED || '').toLowerCase() === 'true';
+  const url = process.env.REDIS_URL;
+  const looksPlaceholder = Boolean(url) && REDIS_PLACEHOLDER_RE.test(url);
+
+  if (!enabled) {
+    return { url: null, enabled: false, configured: false };
+  }
+  if (!url || looksPlaceholder) {
+    if (process.env.NODE_ENV === 'production') {
+      console.error('[FATAL] REDIS_ENABLED=true but REDIS_URL is missing or a placeholder. Set a real Upstash URL.');
+      process.exit(1);
+    }
+    console.warn('[WARN] REDIS_ENABLED=true but REDIS_URL is missing — Redis stays off (passthrough).');
+    return { url: null, enabled: true, configured: false };
+  }
+
+  return { url, enabled: true, configured: true };
+}
+
 const config = {
   jwt: {
     secret: process.env.JWTSECRET,
@@ -85,6 +111,7 @@ const config = {
     refreshExpiry: process.env.REFRESH_TOKEN_EXPIRY || '7d'
   },
   supabase: resolveSupabase(),
+  redis: resolveRedis(),
   admin: {
     // [C-2] Credentials come from env only — no hardcoded fallbacks
     email: process.env.ADMIN_EMAIL || 'admin@elearning.com',
