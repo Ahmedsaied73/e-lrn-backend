@@ -82,13 +82,33 @@ async function checkBudget() {
 }
 
 async function markJob(attemptId, questionName, patch) {
+  const where = { attemptId_questionName: { attemptId, questionName } };
   try {
     await prisma.aiGradingJob.update({
-      where: { attemptId_questionName: { attemptId, questionName } },
+      where,
       data: { ...patch, updatedAt: new Date() },
     });
+    return;
   } catch (err) {
-    logWarn('ai.worker.job_row_missing', { attemptId, questionName, error: err.message });
+    if (!err || err.code !== 'P2025') {
+      logWarn('ai.worker.job_row_missing', { attemptId, questionName, error: err && err.message });
+      return;
+    }
+  }
+  // No row yet (graded without enqueue reaching the DB first) — create the
+  // audit skeleton instead of dropping the record.
+  try {
+    const { tries, ...rest } = patch;
+    await prisma.aiGradingJob.create({
+      data: {
+        attemptId,
+        questionName,
+        tries: tries && typeof tries.increment === 'number' ? tries.increment : 0,
+        ...rest,
+      },
+    });
+  } catch (err) {
+    logWarn('ai.worker.job_row_create_failed', { attemptId, questionName, error: err && err.message });
   }
 }
 
@@ -142,17 +162,31 @@ async function processGradingJob(job, providerFactory = defaultProviderFactory) 
   }
 
   const provider = await providerFactory();
-  const verdict = await gradeEssay(
-    {
-      questionTitle: questionName,
-      studentAnswer: answer,
-      modelAnswer: entry.modelAnswer,
-      rubric: typeof entry.rubric === 'string' ? entry.rubric : null,
-      maxPoints: entry.points,
-    },
-    provider,
-    { model: provider.name }
-  );
+  // AI-1: honor the configured timeout (previously always the 45s default).
+  const aiCfg = require('../../config/env').aiGrader || {};
+  let verdict;
+  try {
+    verdict = await gradeEssay(
+      {
+        questionTitle: questionName,
+        studentAnswer: answer,
+        modelAnswer: entry.modelAnswer,
+        rubric: typeof entry.rubric === 'string' ? entry.rubric : null,
+        maxPoints: entry.points,
+      },
+      provider,
+      { model: provider.name, timeoutMs: aiCfg.timeoutMs }
+    );
+  } catch (err) {
+    // AI-3: terminal failure records FAILED + error on the row (previously
+    // orphan PENDING with no trace). BullMQ may still retry per its policy;
+    // a later success overwrites this via the DONE patch below.
+    await markJob(attemptId, questionName, {
+      status: 'FAILED',
+      error: String((err && err.message) || err).slice(0, 1000),
+    });
+    throw err;
+  }
 
   const threshold = confidenceThreshold();
   const confident = verdict.confidence >= threshold;

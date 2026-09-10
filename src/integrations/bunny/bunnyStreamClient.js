@@ -17,6 +17,11 @@ const crypto = require('crypto');
 
 const BUNNY_HOST = 'video.bunnycdn.com';
 
+// Hung metadata calls must not pin request handlers (Node fetch has no
+// timeout otherwise). The binary upload stream stays untimed — multi-GB
+// uploads are legitimately slow and busboy caps bound them instead.
+const BUNNY_API_TIMEOUT_MS = 20000;
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /** Read library ID lazily so it's always current from env (set after require). */
@@ -64,6 +69,9 @@ async function createVideo({ title, collectionId }) {
     method: 'POST',
     headers: authHeaders(),
     body: JSON.stringify(body),
+    // Hung metadata calls must not pin handlers: the upload stream itself
+    // stays untimed (multi-GB uploads are legitimately slow).
+    signal: AbortSignal.timeout(BUNNY_API_TIMEOUT_MS),
   });
 
   if (!res.ok) {
@@ -88,6 +96,7 @@ async function getVideo(bunnyVideoId) {
       AccessKey: process.env.BUNNY_STREAM_API_KEY,
       Accept: 'application/json',
     },
+    signal: AbortSignal.timeout(BUNNY_API_TIMEOUT_MS),
   });
 
   if (!res.ok) {
@@ -112,6 +121,7 @@ async function deleteVideo(bunnyVideoId) {
     headers: {
       AccessKey: process.env.BUNNY_STREAM_API_KEY,
     },
+    signal: AbortSignal.timeout(BUNNY_API_TIMEOUT_MS),
   });
 
   if (!res.ok) {

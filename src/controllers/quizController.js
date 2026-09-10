@@ -1040,9 +1040,15 @@ async function uploadQuizImage(req, res) {
         const buffer = Buffer.concat(chunks);
         const filename = `${crypto.randomUUID()}${ext}`;
         const sb = getSupabaseAdmin();
-        const { error } = await sb.storage
+        // Bounded wait: a hung storage call must fail the request (502), not
+        // pin the handler. Images are ≤5MB — 30s is generous.
+        const upload = sb.storage
           .from(getSupabaseBucket())
           .upload(filename, buffer, { contentType: info.mimeType, upsert: false });
+        const { error } = await Promise.race([
+          upload,
+          new Promise((_, reject) => setTimeout(() => reject(new Error('storage timeout')), 30000)),
+        ]);
         if (error) throw new Error(error.message);
         const { data } = sb.storage.from(getSupabaseBucket()).getPublicUrl(filename);
         respond(201, { success: true, data: { url: data.publicUrl } });

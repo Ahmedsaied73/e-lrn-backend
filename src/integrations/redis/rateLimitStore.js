@@ -17,7 +17,7 @@ const { getRedis, ensureConnected } = require('./redisClient');
 
 const PREFIX = 'rl:';
 const COMMAND_TIMEOUT_MS = 500;
-const CONNECT_TIMEOUT_MS = 1000;
+const CONNECT_TIMEOUT_MS = 250;
 
 function withTimeout(promise, ms = COMMAND_TIMEOUT_MS) {
   let timer;
@@ -63,10 +63,20 @@ function createRateLimitStore() {
     async increment(key) {
       const client = await readyClient();
       const fullKey = `${PREFIX}${key}`;
-      const totalHits = await withTimeout(client.incr(fullKey));
-      if (Number(totalHits) === 1) {
-        await withTimeout(client.pexpire(fullKey, windowMs));
-      }
+      // Atomic INCR + first-hit expiry in one Lua step: a crash between the
+      // two can no longer leave a TTL-less key throttling an IP forever.
+      // NOTE: resetTime stays approximate (full window, not remaining TTL) —
+      // cosmetic only; counting is exact.
+      const totalHits = await withTimeout(
+        client.eval(
+          `local c = redis.call('INCR', KEYS[1]); ` +
+          `if c == 1 then redis.call('PEXPIRE', KEYS[1], ARGV[1]) end; ` +
+          `return c;`,
+          1,
+          fullKey,
+          String(windowMs)
+        )
+      );
       return { totalHits: Number(totalHits), resetTime: new Date(Date.now() + windowMs) };
     },
 
