@@ -280,20 +280,26 @@ const submitAssignment = async (req, res) => {
       
       const answersData = [];
       
-      // Process answers for each question
+      // Iterate over ALL assignment questions (not just submitted answers) so
+      // omitting a question cannot shrink the denominator (omit-to-100% fix).
+      // Unanswered questions score 0; duplicate submissions keep the last.
+      const answersByQuestion = new Map();
       for (const answer of answers) {
-        const question = assignment.AssignmentQuestion.find(q => q.id === parseInt(answer.questionId));
-        
-        if (!question) continue;
-        
-        const isCorrect = parseInt(answer.selectedOption) === question.correctOption;
-        
-        answersData.push({
-          userId: userId,
-          questionId: question.id,
-          selectedOption: parseInt(answer.selectedOption),
-          isCorrect: isCorrect
-        });
+        const qid = parseInt(answer.questionId);
+        if (Number.isSafeInteger(qid)) answersByQuestion.set(qid, answer);
+      }
+      for (const question of assignment.AssignmentQuestion) {
+        const answer = answersByQuestion.get(question.id);
+        const isCorrect = answer !== undefined && parseInt(answer.selectedOption) === question.correctOption;
+
+        if (answer !== undefined) {
+          answersData.push({
+            userId: userId,
+            questionId: question.id,
+            selectedOption: parseInt(answer.selectedOption),
+            isCorrect: isCorrect
+          });
+        }
 
         if (isCorrect) {
           correctAnswers += question.points;
@@ -734,6 +740,22 @@ const getCourseAssignments = async (req, res) => {
     });
     if (!course) {
       return res.status(404).json({ error: 'Course not found' });
+    }
+    // Check if user is enrolled in the course (same rule as video assignments)
+    if (req.user.role !== 'ADMIN') {
+      const enrollment = await prisma.enrollment.findFirst({
+        where: {
+          userId: req.user.id,
+          courseId: parseInt(courseId, 10),
+          isPaid: true
+        }
+      });
+
+      if (!enrollment) {
+        return res.status(403).json({
+          error: 'You must be enrolled in this course to access assignments'
+        });
+      }
     }
     // Get all assignments for videos in this course
     const assignments = await prisma.assignment.findMany({

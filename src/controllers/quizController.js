@@ -389,6 +389,7 @@ async function getStudentAttempts(req, res) {
   try {
     const videoId = parseInteger(req.params.videoId);
     const userId = req.user.id;
+    const userRole = req.user.role;
 
     if (videoId === null || videoId <= 0) {
       return res.status(400).json({ success: false, error: 'Invalid video ID' });
@@ -396,11 +397,26 @@ async function getStudentAttempts(req, res) {
 
     const quiz = await prisma.quiz.findUnique({
       where: { bunnyVideoId: videoId },
-      select: { id: true, title: true, passingScore: true },
+      select: {
+        id: true,
+        title: true,
+        passingScore: true,
+        bunnyVideo: { select: { courseId: true } },
+      },
     });
 
     if (!quiz) {
       return res.status(404).json({ success: false, error: 'Quiz not found' });
+    }
+
+    // Same enrollment rule as quiz meta: students see only their own courses.
+    if (userRole !== 'ADMIN') {
+      const enrollment = await prisma.enrollment.findFirst({
+        where: { userId, courseId: quiz.bunnyVideo.courseId },
+      });
+      if (!enrollment) {
+        return res.status(403).json({ success: false, error: 'You are not enrolled in this course' });
+      }
     }
 
     const attempts = await prisma.quizAttempt.findMany({
