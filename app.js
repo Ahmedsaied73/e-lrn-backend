@@ -119,6 +119,18 @@ app.use('/quizzes', quizRoutes);
 // ── Admin console (all routes behind authenticateToken + authorizeAdmin) ─────
 app.use('/admin', adminRoutes);
 
+// ── Optional modules mount only when enabled (see src/config/env.js) ───────
+// Disabled modules are not exposed at all (no stub routes, no handlers).
+let enabledFeatures = {};
+try {
+  enabledFeatures = require('./src/config/env').features || {};
+} catch {
+  enabledFeatures = {};
+}
+if (enabledFeatures.notifications !== false) {
+  app.use('/notifications', require('./src/routes/notificationRoutes'));
+}
+
 // ── Bunny Stream routes ────────────────────────────────────────────────────────
 // /courses prefix: handles POST /courses/:courseId/videos (create)
 // /videos prefix:  handles POST /videos/:videoId/upload and GET /videos/:videoId/playback
