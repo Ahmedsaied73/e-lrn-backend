@@ -647,5 +647,6 @@ module.exports = {
   findStaleProcessing,
   recoverInterruptedUploads,
   reorderVideos,
+  invalidateVideoCaches,
   BUNNY_STATUS_MAP,
 };

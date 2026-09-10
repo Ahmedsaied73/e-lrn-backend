@@ -539,6 +539,18 @@ const hasPassingScore = passingScore !== undefined && passingScore !== null && p
       },
     });
 
+    // Quiz presence is cached on the videos list — invalidate it (best-effort).
+    try {
+      const { invalidateVideoCaches } = require('../services/bunnyVideoService');
+      const video = await prisma.bunnyVideo.findUnique({
+        where: { id: quiz.bunnyVideoId },
+        select: { courseId: true },
+      });
+      if (video) await invalidateVideoCaches(video.courseId);
+    } catch {
+      // Stale cache self-heals in 60s; never fail the save for it.
+    }
+
     return res.status(200).json({
       success: true,
       message: 'Quiz saved successfully',
@@ -567,6 +579,18 @@ async function deleteQuiz(req, res) {
     }
 
     await prisma.quiz.delete({ where: { id: quizId } });
+
+    // Quiz presence is cached on the videos list — invalidate it (best-effort).
+    try {
+      const { invalidateVideoCaches } = require('../services/bunnyVideoService');
+      const video = await prisma.bunnyVideo.findUnique({
+        where: { id: quiz.bunnyVideoId },
+        select: { courseId: true },
+      });
+      if (video) await invalidateVideoCaches(video.courseId);
+    } catch {
+      // Stale cache self-heals in 60s; never fail the delete for it.
+    }
 
     return res.status(200).json({ success: true, message: 'Quiz deleted successfully' });
   } catch (error) {

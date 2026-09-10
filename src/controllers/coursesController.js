@@ -6,7 +6,10 @@ const cache = require('../integrations/redis/cache');
 const getAllCourses = async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
-    const take = parseInt(req.query.limit) || 20;
+    // Clamp take 1..100 (house pattern): unbounded limits become heavy
+    // queries and oversized cache values.
+    const rawTake = parseInt(req.query.limit);
+    const take = Number.isSafeInteger(rawTake) ? Math.max(1, Math.min(rawTake, 100)) : 20;
     const skip = (page - 1) * take;
     const search = (req.query.search || '').trim();
 

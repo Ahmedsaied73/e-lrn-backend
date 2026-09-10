@@ -70,7 +70,9 @@ app.post(
   handleBunnyWebhook
 );
 
-app.use(express.json());
+// Body cap 512kb: quiz payloads validate up to 256KB server-side, so the
+// parser must accept that range (default 100kb would 413 legit admin saves).
+app.use(express.json({ limit: '512kb' }));
 app.use(cookieParser()); // Add cookie-parser middleware
 // Add request logger middleware to log all requests
 app.use(requestLogger);
@@ -101,9 +103,12 @@ const authLimiter = rateLimit({
 // Apply rate limiter to all requests
 app.use(limiter);
 
-// Apply strict limiter to auth routes specifically
+// Apply strict limiter to auth routes specifically (login, register, and
+// refresh — refresh accepts body tokens, so it gets the same replay probing
+// protection; 20/15min comfortably covers the 15-min access-token cycle).
 app.use('/auth/login', authLimiter);
 app.use('/auth/register', authLimiter);
+app.use('/auth/refresh-token', authLimiter);
 
 // Existing routes
 app.use("/user", Userrouter);
@@ -128,7 +133,13 @@ try {
   enabledFeatures = {};
 }
 if (enabledFeatures.notifications !== false) {
-  app.use('/notifications', require('./src/routes/notificationRoutes'));
+  // Guarded require mirrors the AI worker boot below: deleting the module
+  // folder must never crash startup.
+  try {
+    app.use('/notifications', require('./src/routes/notificationRoutes'));
+  } catch (err) {
+    console.warn('[WARN] Notifications router failed to mount:', err.message);
+  }
 }
 
 // ── Bunny Stream routes ────────────────────────────────────────────────────────

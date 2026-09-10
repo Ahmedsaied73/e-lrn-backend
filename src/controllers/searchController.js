@@ -22,6 +22,11 @@ const searchContent = async (req, res) => {
     if (!query && !category && !grade) {
       return res.status(400).json({ error: 'Either search query, category, or grade filter must be provided' });
     }
+
+    // Clamp take 1..100 (house pattern): NaN/negative/huge limits either 500
+    // in Prisma or become heavy scans.
+    const parsedLimit = parseInt(limit);
+    const take = Number.isSafeInteger(parsedLimit) ? Math.max(1, Math.min(parsedLimit, 100)) : 20;
     
     // Base URL for full URLs in the response
     const baseUrl = `${req.protocol}://${req.get('host')}`;
@@ -121,7 +126,7 @@ const searchContent = async (req, res) => {
           }
         },
         orderBy,
-        take: parseInt(limit)
+        take: take
       });
       
       // Add full URLs for thumbnails
@@ -173,7 +178,7 @@ const searchContent = async (req, res) => {
             }
           }
         },
-        take: parseInt(limit)
+        take: take
       });
 
       // Add full URLs for thumbnails. No `url` is exposed here — playable links
@@ -221,6 +226,10 @@ const getTrendingCourses = async (req, res) => {
   try {
     const { limit = 10, category, grade } = req.query;
 
+    // Clamp take 1..100 (house pattern); key and query share the value.
+    const parsedLimit = parseInt(limit);
+    const take = Number.isSafeInteger(parsedLimit) ? Math.max(1, Math.min(parsedLimit, 100)) : 10;
+
     // Build filter conditions
     const whereClause = {};
 
@@ -237,13 +246,13 @@ const getTrendingCourses = async (req, res) => {
     // Raw rows cached (host-independent); thumbnail absolutization per request.
     const cacheKey = cache.buildKey(
       'search', 'trending',
-      `l${parseInt(limit) || 10}`,
+      `l${take}`,
       `c${category ? cache.shortHash(category) : 'any'}`,
       `g${grade ? cache.shortHash(grade) : 'any'}`
     );
     const courses = await cache.withCache(cacheKey, 600, () => prisma.course.findMany({
       where: whereClause,
-      take: parseInt(limit),
+      take: take,
       include: {
         teacher: {
           select: {
