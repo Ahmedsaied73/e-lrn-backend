@@ -191,6 +191,10 @@ model QuizAttempt {
   essayFeedback Json?                                 // { [qName]: { points, feedback } }
   essayGradedBy Int?
   essayGradedAt DateTime?
+  // Q-5: frozen { surveyJson, answerKey } at start — grading/review resolve
+  // snapshot-first so mid-flight quiz edits can't re-grade in-flight attempts.
+  // NULL = pre-snapshot row → fall back to the live quiz key (old behavior).
+  quizSnapshot  Json?
 
   quiz          Quiz              @relation(fields: [quizId], references: [id], onDelete: Cascade)
   user          User              @relation(fields: [userId], references: [id], onDelete: Cascade)
