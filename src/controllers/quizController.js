@@ -317,6 +317,13 @@ async function getQuizResult(req, res) {
     const responses = attempt.responses || {};
     const feedback = attempt.essayFeedback || {};
 
+    // Hide-until-pass (Q-1/Q-2): correct answers and model answers are withheld
+    // from non-admins until the attempt is GRADED. EXPIRED and GRADING states
+    // reveal scores only — never the answers (harvest-then-ace / model-leak).
+    // Admins always see full data (grading duty). Failed-but-GRADED review
+    // gating is a separate Phase-1 item (Q-3).
+    const showAnswers = userRole === 'ADMIN' || attempt.status === STATUS.GRADED;
+
     const questionsBreakdown = [];
     for (const [qName, keyEntry] of Object.entries(answerKey)) {
       const studentValue = responses[qName];
@@ -326,7 +333,7 @@ async function getQuizResult(req, res) {
           name: qName,
           type: 'radiogroup',
           studentAnswer: studentValue ?? null,
-          correctAnswer: keyEntry.correctValue,
+          correctAnswer: showAnswers ? keyEntry.correctValue : null,
           isCorrect,
           earnedPoints: isCorrect ? keyEntry.points : 0,
           maxPoints: keyEntry.points,
@@ -337,7 +344,7 @@ async function getQuizResult(req, res) {
           name: qName,
           type: 'comment',
           studentAnswer: studentValue ?? null,
-          modelAnswer: keyEntry.modelAnswer,
+          modelAnswer: showAnswers ? keyEntry.modelAnswer : null,
           earnedPoints: essayFb ? essayFb.awarded : (attempt.status === STATUS.GRADED ? 0 : null),
           maxPoints: keyEntry.points,
           feedback: essayFb ? essayFb.feedback : null,
