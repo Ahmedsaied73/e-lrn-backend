@@ -162,6 +162,77 @@ async function markAllRead(userId) {
   return { updated: updated.count };
 }
 
+// ─── Automatic triggers (called post-commit, best-effort, never throw) ─────
+
+function moduleOn() {
+  try {
+    const config = require('../../config/env');
+    return !config.features || config.features.notifications !== false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Notify a student that their quiz attempt was finally graded (MCQ submit,
+ * human essay grade, or AI finalize). Call AFTER the GRADED update commits.
+ * No-op unless the attempt is GRADED. Never throws.
+ */
+async function notifyQuizGraded(attemptId) {
+  try {
+    if (!moduleOn()) return 0;
+    const attempt = await prisma.quizAttempt.findUnique({
+      where: { id: attemptId },
+      include: { quiz: { select: { id: true, title: true, bunnyVideo: { select: { id: true, courseId: true } } } } },
+    });
+    if (!attempt || attempt.status !== 'GRADED' || !attempt.quiz) return 0;
+    const { quiz } = attempt;
+    const videoId = quiz.bunnyVideo ? quiz.bunnyVideo.id : null;
+    const courseId = quiz.bunnyVideo ? quiz.bunnyVideo.courseId : null;
+    const score = attempt.scorePercent != null ? Math.round(attempt.scorePercent) : null;
+    const linkUrl = videoId && courseId ? `/course/${courseId}/video/${videoId}/quiz/result/${attempt.id}` : null;
+    const { count } = await createForUsers({
+      userIds: [attempt.userId],
+      type: NOTIFICATION_TYPES.QUIZ_GRADED,
+      title: 'نتيجتك جاهزة',
+      body: score !== null ? `اختبار "${quiz.title}" — نتيجتك ${score}%` : `اختبار "${quiz.title}" تم تصحيحه`,
+      linkUrl,
+      metadata: { quizId: quiz.id, videoId, courseId, attemptId: attempt.id },
+    });
+    return count;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Notify enrolled students that a video became watchable. Call AFTER the
+ * READY update commits (webhook + reconcile paths). Never throws.
+ */
+async function notifyVideoReady(videoId) {
+  try {
+    if (!moduleOn()) return 0;
+    const video = await prisma.bunnyVideo.findUnique({
+      where: { id: videoId },
+      select: { id: true, courseId: true, title: true, status: true },
+    });
+    if (!video || video.status !== 'READY') return 0;
+    const userIds = await resolveAudience({ kind: 'course', courseId: video.courseId });
+    if (userIds.length === 0) return 0;
+    const { count } = await createForUsers({
+      userIds,
+      type: NOTIFICATION_TYPES.VIDEO_READY,
+      title: 'محاضرة جديدة متاحة',
+      body: video.title,
+      linkUrl: `/course/${video.courseId}/video/${video.id}`,
+      metadata: { videoId: video.id, courseId: video.courseId },
+    });
+    return count;
+  } catch {
+    return 0;
+  }
+}
+
 module.exports = {
   NOTIFICATION_TYPES,
   validateLinkUrl,
@@ -171,4 +242,6 @@ module.exports = {
   unreadCount,
   markRead,
   markAllRead,
+  notifyQuizGraded,
+  notifyVideoReady,
 };

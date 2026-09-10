@@ -494,6 +494,20 @@ async function finalizeStaleAttempt(attempt, quiz) {
 }
 
 /**
+ * Best-effort "result ready" notification. Never throws and never blocks the
+ * quiz flow — a notification failure just means silence, not corruption.
+ * Lazy require keeps quizService importable without the notifications module.
+ */
+function notifyGradedSafe(attemptId) {
+  try {
+    const { notifyQuizGraded } = require('./notifications/notificationService');
+    notifyQuizGraded(attemptId).catch(() => {});
+  } catch {
+    // Notifications module absent/disabled — normal grading unaffected.
+  }
+}
+
+/**
  * Best-effort AI enqueue that can never break the quiz flow. Lazy-requires
  * the queue module to keep quizService importable without BullMQ/Redis.
  */
@@ -579,6 +593,9 @@ async function submitAttempt(userId, attemptId, responses, autoSubmitted = false
   // failure just leaves the attempt for the human inbox.
   if (newStatus === STATUS.GRADING) {
     enqueueAiGradingSafe(updated.id);
+  } else {
+    // MCQ-only submit finalized immediately — tell the student.
+    notifyGradedSafe(updated.id);
   }
 
   return { attempt: updated, perQuestion, hasEssays };
@@ -674,6 +691,8 @@ async function gradeEssayAttempt(adminId, attemptId, essayScores, essayFeedbackM
     },
   });
 
+  notifyGradedSafe(updated.id);
+
   return updated;
 }
 
@@ -752,6 +771,7 @@ async function applyAiVerdict(attemptId, qName, verdict) {
       essayGradedAt: new Date(),
     },
   });
+  notifyGradedSafe(attemptId);
   return { finalized: true };
 }
 

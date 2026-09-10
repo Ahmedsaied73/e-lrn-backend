@@ -37,6 +37,20 @@ async function invalidateVideoCaches(courseId) {
   await cache.delPrefix('v1:courses:');
 }
 
+/**
+ * Best-effort "video watchable" notification. Never throws — a notification
+ * failure must not disturb upload/webhook/reconcile flows. Lazy require keeps
+ * this service importable without the notifications module.
+ */
+function notifyReadySafe(videoId) {
+  try {
+    const { notifyVideoReady } = require('./notifications/notificationService');
+    notifyVideoReady(videoId).catch(() => {});
+  } catch {
+    // Notifications module absent/disabled — video flow unaffected.
+  }
+}
+
 // ─── Bunny status → domain status mapping ────────────────────────────────────
 // Source: Bunny Stream API docs (Aug 2026)
 // 0: Queued, 1: Processing, 2: Encoding → all treated as PROCESSING
@@ -199,6 +213,7 @@ async function transitionStatus(videoId, newStatus) {
     data: { status: newStatus },
   });
   await invalidateVideoCaches(updated.courseId);
+  if (newStatus === 'READY') notifyReadySafe(videoId);
   return updated;
 }
 
@@ -308,6 +323,7 @@ async function applyBunnyStatus(bunnyVideoId, bunnyStatusCode) {
     data: updateData,
   });
   await invalidateVideoCaches(video.courseId);
+  if (domainStatus === 'READY') notifyReadySafe(video.id);
 
   const eventName = domainStatus === 'READY'
     ? 'video.processing.completed'
