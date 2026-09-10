@@ -110,11 +110,38 @@ const updateUser = async (req, res) => {
 
     const isAdmin = requesterRole === 'ADMIN';
 
+    // Self-service password/email changes must prove the current password —
+    // otherwise a hijacked session becomes a permanent lockout. Admins acting
+    // on OTHER users are exempt (helpdesk reset flow).
+    const isSelfEdit = requesterId === parsedUserId;
+    if (isSelfEdit && (req.body.password || req.body.email)) {
+      const { currentPassword } = req.body;
+      if (!currentPassword || typeof currentPassword !== 'string') {
+        return res.status(401).json({ success: false, error: 'Current password is required to change password or email.' });
+      }
+      const existing = await prisma.user.findUnique({
+        where: { id: parsedUserId },
+        select: { password: true },
+      });
+      if (!existing) {
+        return res.status(404).json({ success: false, error: 'User not found.' });
+      }
+      const matches = await bcrypt.compare(currentPassword, existing.password);
+      if (!matches) {
+        return res.status(401).json({ success: false, error: 'Current password is incorrect.' });
+      }
+    }
+
     // Update user data
     const updateData = {};
     if (name) updateData.name = name;
     if (email) updateData.email = email;
-    if (password) updateData.password = await bcrypt.hash(password, 10);
+    if (password) {
+      if (typeof password !== 'string' || password.length < 8) {
+        return res.status(400).json({ success: false, error: 'Password must be at least 8 characters.' });
+      }
+      updateData.password = await bcrypt.hash(password, 10);
+    }
     // Admin-only fields: students cannot self-edit grade / phoneNumber
     if (isAdmin) {
       const GRADES = ['FIRST_SECONDARY', 'SECOND_SECONDARY', 'THIRD_SECONDARY'];
