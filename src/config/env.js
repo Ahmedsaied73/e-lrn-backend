@@ -6,6 +6,18 @@ if (!process.env.JWTSECRET) {
   process.exit(1);
 }
 
+// A copy-pasted example secret boots fine and makes every token forgeable.
+// Same placeholder doctrine as refresh tokens below: fatal in production,
+// loud warning in development.
+const JWT_PLACEHOLDER_RE = /your_|placeholder|change_me|example|TODO/i;
+if (JWT_PLACEHOLDER_RE.test(process.env.JWTSECRET)) {
+  if (process.env.NODE_ENV === 'production') {
+    console.error('[FATAL] JWTSECRET looks like a placeholder. Set a real value in production.');
+    process.exit(1);
+  }
+  console.warn('[WARN] JWTSECRET looks like a placeholder — set a real value.');
+}
+
 if (!process.env.ADMIN_PASSWORD) {
   console.error('[FATAL] ADMIN_PASSWORD environment variable is not set. Server will not start.');
   process.exit(1);
