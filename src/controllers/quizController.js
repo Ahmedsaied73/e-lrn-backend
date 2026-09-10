@@ -9,6 +9,7 @@
 const prisma = require('../config/db');
 const quizService = require('../services/quizService');
 const { STATUS } = require('../config/quizConfig');
+const cache = require('../integrations/redis/cache');
 const busboy = require('busboy');
 const crypto = require('crypto');
 
@@ -34,6 +35,15 @@ async function getQuizMeta(req, res) {
       return res.status(400).json({ success: false, error: 'Invalid video ID' });
     }
 
+    // Per-user 30s cache (key includes userId — no cross-user leakage).
+    // Invalidated on start/submit/grade/reset/complete/exemption change.
+    // Cached bodies are wire-identical to fresh ones (same res.json path).
+    const metaKey = cache.buildKey('quiz', 'meta', userId, videoId);
+    const cachedMeta = await cache.get(metaKey);
+    if (cachedMeta) {
+      return res.status(200).json({ success: true, data: cachedMeta });
+    }
+
     const video = await prisma.bunnyVideo.findUnique({
       where: { id: videoId },
       include: {
@@ -46,54 +56,51 @@ async function getQuizMeta(req, res) {
       return res.status(404).json({ success: false, error: 'Video not found' });
     }
 
+    const quiz = video.quiz;
+
+    // Independent reads issued in parallel (was 3 serial round trips):
+    // enrollment (non-admin), completion flag (non-admin), attempt history.
+    // The original precedence is preserved below (403 before exists:false) —
+    // parallelism changes timing only.
+    const [enrollment, progress, attempts] = await Promise.all([
+      userRole === 'ADMIN'
+        ? null
+        : prisma.enrollment.findFirst({ where: { userId, courseId: video.courseId } }),
+      userRole === 'ADMIN' || !video.quiz
+        ? null
+        : prisma.bunnyVideoProgress.findFirst({ where: { userId, bunnyVideoId: videoId, completed: true } }),
+      video.quiz
+        ? prisma.quizAttempt.findMany({
+            where: { userId, quizId: quiz.id },
+            orderBy: { attemptNumber: 'desc' },
+            select: {
+              id: true,
+              attemptNumber: true,
+              status: true,
+              startedAt: true,
+              deadlineAt: true,
+              submittedAt: true,
+              scorePercent: true,
+              earnedPoints: true,
+              totalPoints: true,
+            },
+          })
+        : [],
+    ]);
+
     // Check enrollment if student
-    if (userRole !== 'ADMIN') {
-      const enrollment = await prisma.enrollment.findFirst({
-        where: { userId, courseId: video.courseId },
-      });
-      if (!enrollment) {
-        return res.status(403).json({ success: false, error: 'You are not enrolled in this course' });
-      }
+    if (userRole !== 'ADMIN' && !enrollment) {
+      return res.status(403).json({ success: false, error: 'You are not enrolled in this course' });
     }
 
     if (!video.quiz) {
-      return res.status(200).json({
-        success: true,
-        data: {
-          exists: false,
-          videoId,
-          videoTitle: video.title,
-        },
-      });
+      const data = { exists: false, videoId, videoTitle: video.title };
+      await cache.set(metaKey, data, 30);
+      return res.status(200).json({ success: true, data });
     }
-
-    const quiz = video.quiz;
 
     // Check if video is completed (unlock signal for quiz)
-    let videoCompleted = true;
-    if (userRole !== 'ADMIN') {
-      const progress = await prisma.bunnyVideoProgress.findFirst({
-        where: { userId, bunnyVideoId: videoId, completed: true },
-      });
-      videoCompleted = !!progress;
-    }
-
-    // Get all user attempts for this quiz
-    const attempts = await prisma.quizAttempt.findMany({
-      where: { userId, quizId: quiz.id },
-      orderBy: { attemptNumber: 'desc' },
-      select: {
-        id: true,
-        attemptNumber: true,
-        status: true,
-        startedAt: true,
-        deadlineAt: true,
-        submittedAt: true,
-        scorePercent: true,
-        earnedPoints: true,
-        totalPoints: true,
-      },
-    });
+    const videoCompleted = userRole === 'ADMIN' ? true : !!progress;
 
     const inProgressAttempt = attempts.find(a => a.status === STATUS.IN_PROGRESS) || null;
     const gradedAttempts = attempts.filter(a => a.status === STATUS.GRADED);
@@ -111,32 +118,35 @@ async function getQuizMeta(req, res) {
     const totalQuestions = quizService.countQuestions(quiz.surveyJson);
     const { totalPoints } = quizService.computeTotalPoints(quiz.answerKey || {});
 
+    const metaData = {
+      exists: true,
+      quizId: quiz.id,
+      videoId,
+      videoTitle: video.title,
+      title: quiz.title,
+      timeLimitSec: quiz.timeLimitSec,
+      passingScore: quiz.passingScore,
+      maxAttempts,
+      attemptsUsed,
+      atMaxAttempts,
+      unlocked: videoCompleted,
+      attempted: attempts.length > 0,
+      totalAttempts: attempts.length,
+      passed,
+      bestScore,
+      totalQuestions,
+      totalPoints,
+      inProgressAttempt: inProgressAttempt ? {
+        id: inProgressAttempt.id,
+        attemptNumber: inProgressAttempt.attemptNumber,
+        deadlineAt: inProgressAttempt.deadlineAt,
+      } : null,
+    };
+    await cache.set(metaKey, metaData, 30);
+
     return res.status(200).json({
       success: true,
-      data: {
-        exists: true,
-        quizId: quiz.id,
-        videoId,
-        videoTitle: video.title,
-        title: quiz.title,
-        timeLimitSec: quiz.timeLimitSec,
-        passingScore: quiz.passingScore,
-        maxAttempts,
-        attemptsUsed,
-        atMaxAttempts,
-        unlocked: videoCompleted,
-        attempted: attempts.length > 0,
-        totalAttempts: attempts.length,
-        passed,
-        bestScore,
-        totalQuestions,
-        totalPoints,
-        inProgressAttempt: inProgressAttempt ? {
-          id: inProgressAttempt.id,
-          attemptNumber: inProgressAttempt.attemptNumber,
-          deadlineAt: inProgressAttempt.deadlineAt,
-        } : null,
-      },
+      data: metaData,
     });
   } catch (error) {
     console.error('[QuizController] getQuizMeta error:', error);
@@ -168,18 +178,18 @@ async function startQuiz(req, res) {
       return res.status(404).json({ success: false, error: 'No quiz found for this video' });
     }
 
-    // Check enrollment and video completion for students
+    // Check enrollment and video completion for students — independent reads
+    // issued in parallel (was 2 serial round trips). Error precedence
+    // (enrollment before completion) is preserved below.
     if (userRole !== 'ADMIN') {
-      const enrollment = await prisma.enrollment.findFirst({
-        where: { userId, courseId: video.courseId },
-      });
+      const [enrollment, progress] = await Promise.all([
+        prisma.enrollment.findFirst({ where: { userId, courseId: video.courseId } }),
+        prisma.bunnyVideoProgress.findFirst({ where: { userId, bunnyVideoId: videoId, completed: true } }),
+      ]);
       if (!enrollment) {
         return res.status(403).json({ success: false, error: 'You are not enrolled in this course' });
       }
 
-      const progress = await prisma.bunnyVideoProgress.findFirst({
-        where: { userId, bunnyVideoId: videoId, completed: true },
-      });
       if (!progress) {
         return res.status(403).json({ success: false, error: 'You must complete the video before taking the quiz' });
       }
@@ -551,6 +561,10 @@ const hasPassingScore = passingScore !== undefined && passingScore !== null && p
       // Stale cache self-heals in 60s; never fail the save for it.
     }
 
+    // Quiz definition changed (title/passingScore/questions feed cached meta
+    // for every user) — drop the namespace (rare admin op, bounded scan).
+    await cache.delPrefix('v1:quiz:meta:');
+
     return res.status(200).json({
       success: true,
       message: 'Quiz saved successfully',
@@ -588,6 +602,7 @@ async function deleteQuiz(req, res) {
         select: { courseId: true },
       });
       if (video) await invalidateVideoCaches(video.courseId);
+      await cache.delPrefix('v1:quiz:meta:');
     } catch {
       // Stale cache self-heals in 60s; never fail the delete for it.
     }
@@ -851,12 +866,21 @@ async function resetAttempt(req, res) {
       return res.status(400).json({ success: false, error: 'Invalid attempt ID' });
     }
 
-    const attempt = await prisma.quizAttempt.findUnique({ where: { id: attemptId } });
+    const attempt = await prisma.quizAttempt.findUnique({
+      where: { id: attemptId },
+      select: { userId: true, quiz: { select: { bunnyVideoId: true } } },
+    });
     if (!attempt) {
       return res.status(404).json({ success: false, error: 'Attempt not found' });
     }
 
     await prisma.quizAttempt.delete({ where: { id: attemptId } });
+
+    // Invalidate AFTER delete (never before — a concurrent read in between
+    // would re-cache pre-delete state). Ids come from the pre-delete lookup
+    // above since the helper's own row lookup would miss post-delete.
+    // (Helpers never throw by contract — safe to await inline.)
+    if (attempt.quiz) await quizService.invalidateQuizMeta(attempt.userId, attempt.quiz.bunnyVideoId);
 
     return res.status(200).json({ success: true, message: 'Attempt reset successfully' });
   } catch (error) {
@@ -917,6 +941,11 @@ async function grantExemption(req, res) {
       throw upsertError;
     }
 
+    // Exemptions affect gates enforced at playback/complete time; meta itself
+    // carries no gate verdict today — invalidate defensively so future
+    // gate-derived fields can never go stale.
+    await quizService.invalidateQuizMetaForUser(parsedUserId);
+
     return res.status(200).json({
       success: true,
       message: 'Gate exemption granted successfully',
@@ -940,7 +969,12 @@ async function revokeExemption(req, res) {
     }
 
     try {
+      const doomed = await prisma.gateExemption.findUnique({
+        where: { id: exemptionId },
+        select: { userId: true },
+      });
       await prisma.gateExemption.delete({ where: { id: exemptionId } });
+      if (doomed) await quizService.invalidateQuizMetaForUser(doomed.userId);
     } catch (error) {
       if (error.code === 'P2025') {
         return res.status(404).json({ success: false, error: 'Exemption not found' });

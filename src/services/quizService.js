@@ -290,16 +290,27 @@ async function evaluateGate(userId, videoId, userRole) {
 
   const previousVideoId = courseVideos[currentIndex - 1].id;
 
-  // Check GateExemption for previous video
-  const exemption = await prisma.gateExemption.findUnique({
-    where: { userId_bunnyVideoId: { userId, bunnyVideoId: previousVideoId } },
-  });
+  // Independent reads issued in parallel (was 3 serial round trips):
+  // exemption, previous-video completion, and previous-video quiz. The
+  // decision priority below is unchanged — parallelism affects timing only.
+  const [exemption, progress, quiz] = await Promise.all([
+    // Check GateExemption for previous video
+    prisma.gateExemption.findUnique({
+      where: { userId_bunnyVideoId: { userId, bunnyVideoId: previousVideoId } },
+    }),
+    // Check previous video completion
+    prisma.bunnyVideoProgress.findFirst({
+      where: { userId, bunnyVideoId: previousVideoId, completed: true },
+    }),
+    // Check if previous video has a quiz
+    prisma.quiz.findUnique({
+      where: { bunnyVideoId: previousVideoId },
+      select: { id: true, passingScore: true },
+    }),
+  ]);
+
   if (exemption) return { allowed: true };
 
-  // Check previous video completion
-  const progress = await prisma.bunnyVideoProgress.findFirst({
-    where: { userId, bunnyVideoId: previousVideoId, completed: true },
-  });
   if (!progress) {
     return {
       allowed: false,
@@ -308,12 +319,6 @@ async function evaluateGate(userId, videoId, userRole) {
       previousVideoId,
     };
   }
-
-  // Check if previous video has a quiz
-  const quiz = await prisma.quiz.findUnique({
-    where: { bunnyVideoId: previousVideoId },
-    select: { id: true, passingScore: true },
-  });
 
   // No quiz on previous video → gate passed
   if (!quiz) return { allowed: true };
@@ -377,7 +382,9 @@ async function startAttempt(userId, quizId, options = {}) {
   // IN_PROGRESS rows (zombies that burn retakes yet are unreachable). The
   // transaction-scoped advisory lock also makes the maxAttempts count and the
   // attemptNumber read atomic. Released automatically at commit/rollback.
-  return prisma.$transaction(async (tx) => {
+  // Invalidation happens after commit (below), never inside: invalidating
+  // before commit would let a concurrent read re-cache pre-commit state.
+  const out = await prisma.$transaction(async (tx) => {
     // Two-int advisory-lock form takes INTEGER (not bigint) — cast explicitly.
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(${userId}::int, ${quizId}::int)`;
 
@@ -457,6 +464,16 @@ async function startAttempt(userId, quizId, options = {}) {
 
     return { attempt, quiz, resumed: false };
   });
+
+  // New attempt changes attemptsUsed/atMaxAttempts/inProgressAttempt in meta.
+  // (Resume path changes nothing — no invalidation.)
+  if (!out.resumed) {
+    const quizRow = out.quiz;
+    if (quizRow && quizRow.bunnyVideoId) {
+      await invalidateQuizMeta(userId, quizRow.bunnyVideoId);
+    }
+  }
+  return out;
 }
 
 /**
@@ -504,6 +521,50 @@ async function finalizeStaleAttempt(attempt, quiz, db = prisma) {
   }
 
   return updated;
+}
+
+/**
+ * Invalidate cached quiz meta for a user+video. Call after anything that can
+ * change the meta response: attempt start/submit, essay grade, attempt reset,
+ * video completion, exemption grant/revoke. Best-effort (never throws).
+ */
+async function invalidateQuizMeta(userId, videoId) {
+  try {
+    const cache = require('../integrations/redis/cache');
+    await cache.del(cache.buildKey('quiz', 'meta', userId, videoId));
+  } catch {
+    // Cache failure must never break quiz flows.
+  }
+}
+
+/**
+ * Same, resolved from an attempt row (for paths that only know attemptId).
+ */
+async function invalidateQuizMetaForAttempt(attemptId) {
+  try {
+    const att = await prisma.quizAttempt.findUnique({
+      where: { id: attemptId },
+      select: { userId: true, quiz: { select: { bunnyVideoId: true } } },
+    });
+    if (!att || !att.quiz) return;
+    await invalidateQuizMeta(att.userId, att.quiz.bunnyVideoId);
+  } catch {
+    // Never break flows.
+  }
+}
+
+/**
+ * Drop ALL cached meta for a user (exemption changes can flip `unlocked` on
+ * any downstream video — precise per-video invalidation would need course
+ * enumeration; the per-user namespace is small and bounded).
+ */
+async function invalidateQuizMetaForUser(userId) {
+  try {
+    const cache = require('../integrations/redis/cache');
+    await cache.delPrefix(`v1:quiz:meta:${userId}:`);
+  } catch {
+    // Never break flows.
+  }
 }
 
 /**
@@ -626,6 +687,8 @@ async function submitAttempt(userId, attemptId, responses, autoSubmitted = false
     notifyGradedSafe(updated.id);
   }
 
+  await invalidateQuizMetaForAttempt(updated.id);
+
   return { attempt: updated, perQuestion, hasEssays };
 }
 
@@ -679,7 +742,9 @@ async function gradeEssayAttempt(adminId, attemptId, essayScores, essayFeedbackM
   // without the row lock, a human grade and an AI finalize racing each other
   // read-modify-write essayFeedback/earnedPoints and one side's scores win
   // silently. Released automatically at commit/rollback.
-  return prisma.$transaction(async (tx) => {
+  // Invalidation happens after commit (below), never inside: invalidating
+  // before commit would let a concurrent read re-cache pre-commit state.
+  const updated = await prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM "QuizAttempt" WHERE id = ${attemptId} FOR UPDATE`;
 
     const attempt = await tx.quizAttempt.findUnique({
@@ -747,6 +812,9 @@ async function gradeEssayAttempt(adminId, attemptId, essayScores, essayFeedbackM
 
     return updated;
   });
+
+  await invalidateQuizMetaForAttempt(updated.id);
+  return updated;
 }
 
 /**
@@ -760,7 +828,8 @@ async function applyAiVerdict(attemptId, qName, verdict) {
   // Same row lock as gradeEssayAttempt: concurrent AI verdicts (worker
   // concurrency 2) or a racing human grade must not read-modify-write
   // essayFeedback over each other and drop a verdict.
-  return prisma.$transaction(async (tx) => {
+  // Invalidation happens after commit (below), never inside.
+  const out = await prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM "QuizAttempt" WHERE id = ${attemptId} FOR UPDATE`;
 
     const attempt = await tx.quizAttempt.findUnique({
@@ -830,9 +899,14 @@ async function applyAiVerdict(attemptId, qName, verdict) {
         essayGradedAt: new Date(),
       },
     });
-    notifyGradedSafe(attemptId);
-    return { finalized: true };
+  notifyGradedSafe(attemptId);
+  return { finalized: true };
   });
+
+  // Only the finalize path mutates meta-visible state — early returns above
+  // changed nothing and skip invalidation.
+  if (out.finalized) await invalidateQuizMetaForAttempt(attemptId);
+  return out;
 }
 
 // ─── Image Upload ─────────────────────────────────────────────────────────────
@@ -869,5 +943,8 @@ module.exports = {
   saveAttempt,
   gradeEssayAttempt,
   applyAiVerdict,
+  invalidateQuizMeta,
+  invalidateQuizMetaForAttempt,
+  invalidateQuizMetaForUser,
   uploadQuestionImage,
 };
