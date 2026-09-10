@@ -276,6 +276,8 @@ model Assignment {
   updatedAt    DateTime     @updatedAt
 
   AssignmentQuestion AssignmentQuestion[]
+
+  @@index([videoId])
 }
 
 // New model for assignment questions (for MCQ assignments)
@@ -291,6 +293,8 @@ model AssignmentQuestion {
   answers       AssignmentAnswer[]
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
+
+  @@index([assignmentId])
 }
 
 // New model for student answers to assignment questions
@@ -305,6 +309,7 @@ model AssignmentAnswer {
   submittedAt    DateTime           @default(now())
 
   @@unique([userId, questionId])
+  @@index([questionId])
 }
 
 // New model for assignment submissions
@@ -325,6 +330,7 @@ model Submission {
   mcqScore     Float? // Score for MCQ assignments (percentage)
 
   @@unique([userId, assignmentId])
+  @@index([assignmentId])
 }
 
 enum SubmissionStatus {

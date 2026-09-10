@@ -43,7 +43,7 @@ qs/body-parser/express chain, form-data/tar) one dep per change with changelog.
 (Assignment.videoId, AssignmentQuestion.assignmentId, Submission
 assignmentId/userId, AssignmentAnswer.questionId) via migration.
 **Acceptance criteria:**
-- [ ] Migration applies clean; `EXPLAIN` shows index use on the tied queries
+- [x] Migration applies clean; `EXPLAIN` shows index use on the tied queries
 **Verification:** [ ] `migrate status`; [ ] assignment submit/grade smoke
 **Dependencies:** None
 **Files likely touched:** `prisma/schema.prisma`, `prisma/migrations/*`
