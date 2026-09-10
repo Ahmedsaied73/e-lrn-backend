@@ -372,81 +372,91 @@ async function evaluateGate(userId, videoId, userRole) {
  * @returns {Promise<{ attempt: object, quiz: object, resumed: boolean }>}
  */
 async function startAttempt(userId, quizId, options = {}) {
-  const quiz = await prisma.quiz.findUnique({ where: { id: quizId } });
-  if (!quiz) throw Object.assign(new Error('Quiz not found'), { statusCode: 404 });
+  // Serialize concurrent starts for the same (user, quiz). Without this, two
+  // parallel starts both pass the checks below and create duplicate
+  // IN_PROGRESS rows (zombies that burn retakes yet are unreachable). The
+  // transaction-scoped advisory lock also makes the maxAttempts count and the
+  // attemptNumber read atomic. Released automatically at commit/rollback.
+  return prisma.$transaction(async (tx) => {
+    // Two-int advisory-lock form takes INTEGER (not bigint) — cast explicitly.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${userId}::int, ${quizId}::int)`;
 
-  // Students who already passed the quiz must not retake it. bestScore is the
-  // stored grade — no more attempts once the passing degree is banked.
-  // Admins bypass this check so they can inspect/practice the quiz.
-  if (!options.bypassPassedCheck && quiz.passingScore != null) {
-    const bestGraded = await prisma.quizAttempt.findFirst({
-      where: { userId, quizId, status: STATUS.GRADED },
-      orderBy: { scorePercent: 'desc' },
-      select: { scorePercent: true },
+    const quiz = await tx.quiz.findUnique({ where: { id: quizId } });
+    if (!quiz) throw Object.assign(new Error('Quiz not found'), { statusCode: 404 });
+
+    // Students who already passed the quiz must not retake it. bestScore is the
+    // stored grade — no more attempts once the passing degree is banked.
+    // Admins bypass this check so they can inspect/practice the quiz.
+    if (!options.bypassPassedCheck && quiz.passingScore != null) {
+      const bestGraded = await tx.quizAttempt.findFirst({
+        where: { userId, quizId, status: STATUS.GRADED },
+        orderBy: { scorePercent: 'desc' },
+        select: { scorePercent: true },
+      });
+      if (bestGraded && (bestGraded.scorePercent || 0) >= quiz.passingScore) {
+        throw Object.assign(
+          new Error(`You have already passed this exam with a score of ${bestGraded.scorePercent}%. Retaking is not allowed.`),
+          { statusCode: 409, code: 'ALREADY_PASSED' }
+        );
+      }
+    }
+
+    // Check for existing IN_PROGRESS attempt to resume
+    const inProgress = await tx.quizAttempt.findFirst({
+      where: { userId, quizId, status: STATUS.IN_PROGRESS },
+      orderBy: { startedAt: 'desc' },
     });
-    if (bestGraded && (bestGraded.scorePercent || 0) >= quiz.passingScore) {
+
+    if (inProgress) {
+      const deadline = inProgress.deadlineAt ? Date.parse(inProgress.deadlineAt) : null;
+
+      // Past deadline + grace → EXPIRED (timed quiz abandoned). Doesn't burn a retake.
+      if (deadline !== null && Date.now() > deadline + GRACE_SEC * 1000) {
+        await tx.quizAttempt.update({
+          where: { id: inProgress.id },
+          data: { status: STATUS.EXPIRED, scorePercent: 0, earnedPoints: 0, totalPoints: computeTotalPoints(quiz.answerKey).totalPoints },
+        });
+        // Fall through to create a new attempt
+      } else if (deadline === null && Date.now() - new Date(inProgress.startedAt).getTime() >= STALE_ATTEMPT_MS) {
+        // Abandoned untimed attempt → auto-submit its saved responses, then start fresh.
+        await finalizeStaleAttempt(inProgress, quiz, tx);
+        // Fall through to create a new attempt
+      } else {
+        return { attempt: inProgress, quiz, resumed: true };
+      }
+    }
+
+    // Enforce max attempts — EXPIRED attempts (e.g. network drop / timeout) do
+    // NOT consume a retake, so only real started attempts count against the cap.
+    const maxAttempts = quiz.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+    const attemptsUsed = await tx.quizAttempt.count({
+      where: { userId, quizId, status: { not: STATUS.EXPIRED } },
+    });
+    if (attemptsUsed >= maxAttempts) {
       throw Object.assign(
-        new Error(`You have already passed this exam with a score of ${bestGraded.scorePercent}%. Retaking is not allowed.`),
-        { statusCode: 409, code: 'ALREADY_PASSED' }
+        new Error(`You have used all ${maxAttempts} allowed attempts for this quiz`),
+        { statusCode: 409, code: 'MAX_ATTEMPTS_REACHED' }
       );
     }
-  }
 
-  // Check for existing IN_PROGRESS attempt to resume
-  const inProgress = await prisma.quizAttempt.findFirst({
-    where: { userId, quizId, status: STATUS.IN_PROGRESS },
-    orderBy: { startedAt: 'desc' },
+    // Determine next attempt number
+    const lastAttempt = await tx.quizAttempt.findFirst({
+      where: { userId, quizId },
+      orderBy: { attemptNumber: 'desc' },
+      select: { attemptNumber: true },
+    });
+    const attemptNumber = lastAttempt ? lastAttempt.attemptNumber + 1 : 1;
+
+    // Compute deadline
+    const startedAt = new Date();
+    const deadlineAt = quiz.timeLimitSec ? new Date(startedAt.getTime() + quiz.timeLimitSec * 1000) : null;
+
+    const attempt = await tx.quizAttempt.create({
+      data: { userId, quizId, attemptNumber, startedAt, deadlineAt, status: STATUS.IN_PROGRESS },
+    });
+
+    return { attempt, quiz, resumed: false };
   });
-
-  if (inProgress) {
-    const deadline = inProgress.deadlineAt ? Date.parse(inProgress.deadlineAt) : null;
-
-    // Past deadline + grace → EXPIRED (timed quiz abandoned). Doesn't burn a retake.
-    if (deadline !== null && Date.now() > deadline + GRACE_SEC * 1000) {
-      await prisma.quizAttempt.update({
-        where: { id: inProgress.id },
-        data: { status: STATUS.EXPIRED, scorePercent: 0, earnedPoints: 0, totalPoints: computeTotalPoints(quiz.answerKey).totalPoints },
-      });
-      // Fall through to create a new attempt
-    } else if (deadline === null && Date.now() - new Date(inProgress.startedAt).getTime() >= STALE_ATTEMPT_MS) {
-      // Abandoned untimed attempt → auto-submit its saved responses, then start fresh.
-      await finalizeStaleAttempt(inProgress, quiz);
-      // Fall through to create a new attempt
-    } else {
-      return { attempt: inProgress, quiz, resumed: true };
-    }
-  }
-
-  // Enforce max attempts — EXPIRED attempts (e.g. network drop / timeout) do
-  // NOT consume a retake, so only real started attempts count against the cap.
-  const maxAttempts = quiz.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
-  const attemptsUsed = await prisma.quizAttempt.count({
-    where: { userId, quizId, status: { not: STATUS.EXPIRED } },
-  });
-  if (attemptsUsed >= maxAttempts) {
-    throw Object.assign(
-      new Error(`You have used all ${maxAttempts} allowed attempts for this quiz`),
-      { statusCode: 409, code: 'MAX_ATTEMPTS_REACHED' }
-    );
-  }
-
-  // Determine next attempt number
-  const lastAttempt = await prisma.quizAttempt.findFirst({
-    where: { userId, quizId },
-    orderBy: { attemptNumber: 'desc' },
-    select: { attemptNumber: true },
-  });
-  const attemptNumber = lastAttempt ? lastAttempt.attemptNumber + 1 : 1;
-
-  // Compute deadline
-  const startedAt = new Date();
-  const deadlineAt = quiz.timeLimitSec ? new Date(startedAt.getTime() + quiz.timeLimitSec * 1000) : null;
-
-  const attempt = await prisma.quizAttempt.create({
-    data: { userId, quizId, attemptNumber, startedAt, deadlineAt, status: STATUS.IN_PROGRESS },
-  });
-
-  return { attempt, quiz, resumed: false };
 }
 
 /**
@@ -456,9 +466,10 @@ async function startAttempt(userId, quizId, options = {}) {
  *
  * @param {object} attempt - Raw Prisma quizAttempt row (IN_PROGRESS)
  * @param {object} quiz    - The quiz row (with answerKey)
+ * @param {object} [db]    - Prisma client or transaction client (defaults to prisma)
  * @returns {Promise<object>} Updated attempt
  */
-async function finalizeStaleAttempt(attempt, quiz) {
+async function finalizeStaleAttempt(attempt, quiz, db = prisma) {
   const answerKey = quiz.answerKey || {};
   const responses = attempt.responses || {};
   const { mcqEarned } = gradeMcq(answerKey, responses);
@@ -469,7 +480,7 @@ async function finalizeStaleAttempt(attempt, quiz) {
   const scorePercent = computeScorePercent(mcqEarned, totalPoints);
   const newStatus = hasEssays ? STATUS.GRADING : STATUS.GRADED;
 
-  const updated = await prisma.quizAttempt.update({
+  const updated = await db.quizAttempt.update({
     where: { id: attempt.id },
     data: {
       status: newStatus,
@@ -488,6 +499,8 @@ async function finalizeStaleAttempt(attempt, quiz) {
   // failure just leaves the attempt for the human inbox.
   if (newStatus === STATUS.GRADING) {
     enqueueAiGradingSafe(updated.id);
+  } else {
+    notifyGradedSafe(updated.id);
   }
 
   return updated;
@@ -574,8 +587,10 @@ async function submitAttempt(userId, attemptId, responses, autoSubmitted = false
   const scorePercent = computeScorePercent(mcqEarned, totalPoints);
   const newStatus = hasEssays ? STATUS.GRADING : STATUS.GRADED;
 
-  const updated = await prisma.quizAttempt.update({
-    where: { id: attemptId },
+  // Conditional write: only an IN_PROGRESS attempt may finalize. Concurrent
+  // double-submits race here instead of check-then-act — the loser gets 409.
+  const applied = await prisma.quizAttempt.updateMany({
+    where: { id: attemptId, status: STATUS.IN_PROGRESS },
     data: {
       status: newStatus,
       submittedAt: new Date(),
@@ -588,6 +603,19 @@ async function submitAttempt(userId, attemptId, responses, autoSubmitted = false
       scorePercent,
     },
   });
+
+  if (applied.count === 0) {
+    const current = await prisma.quizAttempt.findUnique({
+      where: { id: attemptId },
+      select: { status: true },
+    });
+    throw Object.assign(
+      new Error(`Attempt is already ${current ? current.status : 'finalized'}`),
+      { statusCode: 409 }
+    );
+  }
+
+  const updated = await prisma.quizAttempt.findUnique({ where: { id: attemptId } });
 
   // Fire-and-forget AI grading for AI-enabled essays. Never throws — a queue
   // failure just leaves the attempt for the human inbox.
