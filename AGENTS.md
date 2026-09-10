@@ -129,6 +129,14 @@ Students must complete prerequisites before accessing the next video:
 - **`createCourse` teacher attribution**: Always assigns to first ADMIN user found, not the requesting user.
 - **Cookie/JWT expiry mismatch**: Access cookie maxAge = 15min, but JWT expiry = 1h.
 
+## Optional modules (Sept 2026)
+
+Core + building blocks. Modules read `config.features` (`NOTIFICATIONS_ENABLED`, `AI_GRADER_ENABLED`, default true, restart to change).
+
+- **Rules**: disabled = router unmounted in `app.js` (no stubs) + call-site guards skip work; core must never import module internals (lazy require + never-throw wrappers, e.g. `enqueueAiGradingSafe`, `notifyGradedSafe`); feature truth comes from `GET /user/me` + `GET /admin/dashboard` `features` (never client-decided); removal test = delete folder → boot + flows green.
+- **Notifications** (`src/services/notifications/`, `POST /notifications/broadcast` admin, student inbox API): one row per recipient, DB is source of truth (no Redis/WS in V1). Auto triggers: quiz→GRADED (`notifyGradedSafe` in all 3 finalize paths), video→READY (`notifyReadySafe` in `transitionStatus`/`applyBunnyStatus`).
+- **AI Grader** (`src/services/aiGrader/`): BullMQ `ai-grading` queue + in-process worker (needs `GEMINI_API_KEY` + Redis or it stays off with a warning). See `plans/ai-grader-plan.md`.
+
 ## Bug fixes applied (grilling round, Sept 2026)
 
 All 11 confirmed bugs are **fixed and committed on `Dev`** (see `plans/bug-fix-plan.md`). Summary:
