@@ -25,6 +25,7 @@ certificates      Certificate[]
   gateExemptions    GateExemption[]    // Admin-granted quiz gate bypasses
   assignmentAnswers AssignmentAnswer[] // Answers to MCQ assignment questions
   submissions       Submission[] // Assignment submissions by the user
+  notifications     Notification[] // In-app inbox rows (optional module)
   refreshToken      String?            @db.Text
   refreshTokenFamily String?           @db.VarChar(36) // groups rotated refresh tokens; null = quarantined/logged out everywhere
   createdAt         DateTime           @default(now())
@@ -372,4 +373,25 @@ model BunnyVideoProgress {
 
   @@unique([userId, bunnyVideoId])
   @@index([bunnyVideoId])
+}
+
+// ─── Notifications (optional module) ───────────────────────────────────────
+// One row per recipient (isolation by construction, trivial unread counts).
+// DB is the source of truth; no Redis/BullMQ/WebSockets in V1. Cascade on
+// user delete. Fan-out for broadcasts happens in notificationService.
+model Notification {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  type      String   // QUIZ_GRADED | VIDEO_READY | ADMIN_BROADCAST
+  title     String
+  body      String?  @db.Text
+  read      Boolean  @default(false)
+  linkUrl   String?  // server-validated internal path only (e.g. /course/1/...)
+  metadata  Json?
+  batchId   String?  // groups one broadcast send across recipients
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, read, createdAt])
 }
