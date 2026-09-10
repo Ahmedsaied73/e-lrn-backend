@@ -175,6 +175,18 @@ app.listen(port, () => {
     // Start Bunny video reconciliation job (every 10 minutes)
     startReconciliationJob();
 
+    // Crash recovery: uploads interrupted by a previous shutdown can never
+    // resume (their process is gone) — mark them FAILED so re-upload works.
+    // Best-effort and boot-non-blocking: a DB outage here must not kill boot.
+    try {
+      const { recoverInterruptedUploads } = require('./src/services/bunnyVideoService');
+      recoverInterruptedUploads()
+        .then((count) => { if (count > 0) console.log(`[INFO] Recovered ${count} interrupted upload(s) to FAILED`); })
+        .catch((err) => console.warn('[WARN] Upload crash recovery failed:', err.message));
+    } catch (err) {
+      console.warn('[WARN] Upload crash recovery failed:', err.message);
+    }
+
     // Start AI essay-grading worker (in-process BullMQ). No-ops with a warning
     // when GEMINI_API_KEY is missing or Redis is disabled — human grading path
     // is unaffected.

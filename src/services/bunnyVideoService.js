@@ -455,9 +455,26 @@ async function findStaleProcessing(staleMinutes = 30, take = 50) {
       status: 'PROCESSING',
       updatedAt: { lt: cutoff },
     },
+    // Oldest first: without ordering, past-50 stale rows starve forever
+    // while the same arbitrary batch recurs.
+    orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }],
     select: { id: true, bunnyVideoId: true, bunnyLibraryId: true, status: true, courseId: true },
     take,
   });
+}
+
+/**
+ * Crash recovery for interrupted uploads. Any row still in UPLOADING at boot
+ * belonged to a dead process (all handled upload paths mark FAILED before
+ * returning) — flip them to FAILED so re-upload becomes possible instead of
+ * leaving them stuck forever. Returns the repaired count.
+ */
+async function recoverInterruptedUploads() {
+  const result = await prisma.bunnyVideo.updateMany({
+    where: { status: 'UPLOADING' },
+    data: { status: 'FAILED', failureReason: 'Upload interrupted (server restart during upload)' },
+  });
+  return result.count;
 }
 
 /**
@@ -628,6 +645,7 @@ module.exports = {
   listCourseVideos,
   findById,
   findStaleProcessing,
+  recoverInterruptedUploads,
   reorderVideos,
   BUNNY_STATUS_MAP,
 };

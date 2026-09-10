@@ -675,67 +675,78 @@ async function saveAttempt(userId, attemptId, responses) {
  * @returns {Promise<object>} Updated attempt
  */
 async function gradeEssayAttempt(adminId, attemptId, essayScores, essayFeedbackMap = {}) {
-  const attempt = await prisma.quizAttempt.findUnique({
-    where: { id: attemptId },
-    include: { quiz: { select: { answerKey: true } } },
+  // Serialize with concurrent AI verdict applications on the same attempt:
+  // without the row lock, a human grade and an AI finalize racing each other
+  // read-modify-write essayFeedback/earnedPoints and one side's scores win
+  // silently. Released automatically at commit/rollback.
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "QuizAttempt" WHERE id = ${attemptId} FOR UPDATE`;
+
+    const attempt = await tx.quizAttempt.findUnique({
+      where: { id: attemptId },
+      include: { quiz: { select: { answerKey: true } } },
+    });
+
+    if (!attempt) throw Object.assign(new Error('Attempt not found'), { statusCode: 404 });
+    if (attempt.status !== STATUS.GRADING) {
+      throw Object.assign(new Error(`Attempt status is "${attempt.status}", expected GRADING`), { statusCode: 409 });
+    }
+
+    const answerKey = attempt.quiz.answerKey;
+    let essayEarned = 0;
+    const feedbackRecord = {};
+
+    // Refuse partial grading: every essay in the key must be scored, otherwise
+    // ungraded essays would silently bank 0 and finalize. (AI verdicts arrive
+    // per-question via applyAiVerdict instead, which finalizes only when whole.)
+    const essayNames = Object.entries(answerKey)
+      .filter(([, e]) => e && e.type === 'comment')
+      .map(([n]) => n);
+    const missing = essayNames.filter((n) => essayScores[n] === undefined);
+    if (missing.length > 0) {
+      throw Object.assign(
+        new Error(`Missing scores for essay questions: ${missing.join(', ')}`),
+        { statusCode: 409 }
+      );
+    }
+
+    for (const [qName, awardedPts] of Object.entries(essayScores)) {
+      const keyEntry = answerKey[qName];
+      if (!keyEntry || keyEntry.type !== 'comment') continue;
+      const pts = Math.min(Math.max(0, Number(awardedPts)), keyEntry.points); // clamp 0..max
+      if (!Number.isFinite(pts)) {
+        throw Object.assign(new Error(`Score for "${qName}" must be a number`), { statusCode: 422 });
+      }
+      essayEarned += pts;
+      feedbackRecord[qName] = {
+        awarded: pts,
+        max: keyEntry.points,
+        feedback: essayFeedbackMap[qName] || null,
+      };
+    }
+
+    const totalPoints = attempt.totalPoints || 0;
+    const mcqEarned = attempt.mcqEarned || 0;
+    const earnedPoints = mcqEarned + essayEarned;
+    const scorePercent = computeScorePercent(earnedPoints, totalPoints);
+
+    const updated = await tx.quizAttempt.update({
+      where: { id: attemptId },
+      data: {
+        status: STATUS.GRADED,
+        essayEarned,
+        earnedPoints,
+        scorePercent,
+        essayFeedback: feedbackRecord,
+        essayGradedBy: adminId,
+        essayGradedAt: new Date(),
+      },
+    });
+
+    notifyGradedSafe(updated.id);
+
+    return updated;
   });
-
-  if (!attempt) throw Object.assign(new Error('Attempt not found'), { statusCode: 404 });
-  if (attempt.status !== STATUS.GRADING) {
-    throw Object.assign(new Error(`Attempt status is "${attempt.status}", expected GRADING`), { statusCode: 409 });
-  }
-
-  const answerKey = attempt.quiz.answerKey;
-  let essayEarned = 0;
-  const feedbackRecord = {};
-
-  // Refuse partial grading: every essay in the key must be scored, otherwise
-  // ungraded essays would silently bank 0 and finalize. (AI verdicts arrive
-  // per-question via applyAiVerdict instead, which finalizes only when whole.)
-  const essayNames = Object.entries(answerKey)
-    .filter(([, e]) => e && e.type === 'comment')
-    .map(([n]) => n);
-  const missing = essayNames.filter((n) => essayScores[n] === undefined);
-  if (missing.length > 0) {
-    throw Object.assign(
-      new Error(`Missing scores for essay questions: ${missing.join(', ')}`),
-      { statusCode: 409 }
-    );
-  }
-
-  for (const [qName, awardedPts] of Object.entries(essayScores)) {
-    const keyEntry = answerKey[qName];
-    if (!keyEntry || keyEntry.type !== 'comment') continue;
-    const pts = Math.min(Math.max(0, Number(awardedPts)), keyEntry.points); // clamp 0..max
-    essayEarned += pts;
-    feedbackRecord[qName] = {
-      awarded: pts,
-      max: keyEntry.points,
-      feedback: essayFeedbackMap[qName] || null,
-    };
-  }
-
-  const totalPoints = attempt.totalPoints || 0;
-  const mcqEarned = attempt.mcqEarned || 0;
-  const earnedPoints = mcqEarned + essayEarned;
-  const scorePercent = computeScorePercent(earnedPoints, totalPoints);
-
-  const updated = await prisma.quizAttempt.update({
-    where: { id: attemptId },
-    data: {
-      status: STATUS.GRADED,
-      essayEarned,
-      earnedPoints,
-      scorePercent,
-      essayFeedback: feedbackRecord,
-      essayGradedBy: adminId,
-      essayGradedAt: new Date(),
-    },
-  });
-
-  notifyGradedSafe(updated.id);
-
-  return updated;
 }
 
 /**
@@ -746,75 +757,82 @@ async function gradeEssayAttempt(adminId, attemptId, essayScores, essayFeedbackM
  * Never overwrites an existing numeric score. Returns { finalized }.
  */
 async function applyAiVerdict(attemptId, qName, verdict) {
-  const attempt = await prisma.quizAttempt.findUnique({
-    where: { id: attemptId },
-    include: { quiz: { select: { answerKey: true } } },
-  });
+  // Same row lock as gradeEssayAttempt: concurrent AI verdicts (worker
+  // concurrency 2) or a racing human grade must not read-modify-write
+  // essayFeedback over each other and drop a verdict.
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "QuizAttempt" WHERE id = ${attemptId} FOR UPDATE`;
 
-  if (!attempt) throw Object.assign(new Error('Attempt not found'), { statusCode: 404 });
-  if (attempt.status !== STATUS.GRADING) {
-    return { finalized: false, reason: 'not-grading' };
-  }
-
-  const answerKey = attempt.quiz.answerKey || {};
-  const keyEntry = answerKey[qName];
-  if (!keyEntry || keyEntry.type !== 'comment') {
-    return { finalized: false, reason: 'not-essay' };
-  }
-
-  const feedbackRecord = { ...(attempt.essayFeedback || {}) };
-  const current = feedbackRecord[qName];
-  if (current && typeof current.awarded === 'number') {
-    return { finalized: false, reason: 'already-graded' }; // human (or prior AI) grade stands
-  }
-
-  const awarded = Math.min(Math.max(0, Number(verdict.awarded)), keyEntry.points);
-  if (!Number.isFinite(awarded)) {
-    throw Object.assign(new Error('AI verdict awarded is not a number'), { statusCode: 422 });
-  }
-  feedbackRecord[qName] = {
-    awarded,
-    max: keyEntry.points,
-    feedback: typeof verdict.feedback === 'string' ? verdict.feedback.slice(0, 2000) : null,
-    gradedBy: 'ai',
-    confidence: verdict.confidence,
-    model: verdict.model || null,
-    promptVersion: verdict.promptVersion || null,
-    gradedAt: new Date().toISOString(),
-  };
-
-  const essayNames = Object.entries(answerKey)
-    .filter(([, e]) => e && e.type === 'comment')
-    .map(([n]) => n);
-  const allScored = essayNames.every(
-    (n) => feedbackRecord[n] && typeof feedbackRecord[n].awarded === 'number'
-  );
-
-  if (!allScored) {
-    await prisma.quizAttempt.update({
+    const attempt = await tx.quizAttempt.findUnique({
       where: { id: attemptId },
-      data: { essayFeedback: feedbackRecord },
+      include: { quiz: { select: { answerKey: true } } },
     });
-    return { finalized: false };
-  }
 
-  const essayEarned = essayNames.reduce((sum, n) => sum + feedbackRecord[n].awarded, 0);
-  const totalPoints = attempt.totalPoints || 0;
-  const mcqEarned = attempt.mcqEarned || 0;
-  await prisma.quizAttempt.update({
-    where: { id: attemptId },
-    data: {
-      status: STATUS.GRADED,
-      essayEarned,
-      earnedPoints: mcqEarned + essayEarned,
-      scorePercent: computeScorePercent(mcqEarned + essayEarned, totalPoints),
-      essayFeedback: feedbackRecord,
-      essayGradedBy: null, // mixed/AI attribution lives per-question in essayFeedback
-      essayGradedAt: new Date(),
-    },
+    if (!attempt) throw Object.assign(new Error('Attempt not found'), { statusCode: 404 });
+    if (attempt.status !== STATUS.GRADING) {
+      return { finalized: false, reason: 'not-grading' };
+    }
+
+    const answerKey = attempt.quiz.answerKey || {};
+    const keyEntry = answerKey[qName];
+    if (!keyEntry || keyEntry.type !== 'comment') {
+      return { finalized: false, reason: 'not-essay' };
+    }
+
+    const feedbackRecord = { ...(attempt.essayFeedback || {}) };
+    const current = feedbackRecord[qName];
+    if (current && typeof current.awarded === 'number') {
+      return { finalized: false, reason: 'already-graded' }; // human (or prior AI) grade stands
+    }
+
+    const awarded = Math.min(Math.max(0, Number(verdict.awarded)), keyEntry.points);
+    if (!Number.isFinite(awarded)) {
+      throw Object.assign(new Error('AI verdict awarded is not a number'), { statusCode: 422 });
+    }
+    feedbackRecord[qName] = {
+      awarded,
+      max: keyEntry.points,
+      feedback: typeof verdict.feedback === 'string' ? verdict.feedback.slice(0, 2000) : null,
+      gradedBy: 'ai',
+      confidence: verdict.confidence,
+      model: verdict.model || null,
+      promptVersion: verdict.promptVersion || null,
+      gradedAt: new Date().toISOString(),
+    };
+
+    const essayNames = Object.entries(answerKey)
+      .filter(([, e]) => e && e.type === 'comment')
+      .map(([n]) => n);
+    const allScored = essayNames.every(
+      (n) => feedbackRecord[n] && typeof feedbackRecord[n].awarded === 'number'
+    );
+
+    if (!allScored) {
+      await tx.quizAttempt.update({
+        where: { id: attemptId },
+        data: { essayFeedback: feedbackRecord },
+      });
+      return { finalized: false };
+    }
+
+    const essayEarned = essayNames.reduce((sum, n) => sum + feedbackRecord[n].awarded, 0);
+    const totalPoints = attempt.totalPoints || 0;
+    const mcqEarned = attempt.mcqEarned || 0;
+    await tx.quizAttempt.update({
+      where: { id: attemptId },
+      data: {
+        status: STATUS.GRADED,
+        essayEarned,
+        earnedPoints: mcqEarned + essayEarned,
+        scorePercent: computeScorePercent(mcqEarned + essayEarned, totalPoints),
+        essayFeedback: feedbackRecord,
+        essayGradedBy: null, // mixed/AI attribution lives per-question in essayFeedback
+        essayGradedAt: new Date(),
+      },
+    });
+    notifyGradedSafe(attemptId);
+    return { finalized: true };
   });
-  notifyGradedSafe(attemptId);
-  return { finalized: true };
 }
 
 // ─── Image Upload ─────────────────────────────────────────────────────────────
