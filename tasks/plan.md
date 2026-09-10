@@ -1,50 +1,47 @@
-# Implementation Plan: Q-5 attempt snapshot (grade-from-frozen-key)
+# Implementation Plan: run-to-zero (remaining audit tail)
 
 ## Overview
-`startAttempt` freezes `{ surveyJson, answerKey }` onto the attempt row
-(`quizSnapshot Json?`, NULL = pre-snapshot row). Every attempt-scoped read
-(submit, stale-finalize, essay grade, AI verdict/worker/queue, result review)
-resolves the key snapshot-first with live-key fallback. Quiz-level surfaces
-(meta totals, start-time sanitize) stay live deliberately. One migration, no
-backfill, fully net-zero verification (scratch student + restored key).
+After Q-5, the confirmed remaining work is ordered below by dependency and
+risk. Each item is independently verifiable and net-zero where fixtures are
+needed. Parked items (need user answers or out-of-scope approvals) are listed
+separately and NEVER started without explicit order.
 
-## Architecture decisions
-- Single `quizSnapshot Json?` column holding `{ surveyJson, answerKey }`
-  (one column, not two; surveyJson frozen for future result-rendering proof).
-- `resolveAttemptKey(attempt)` / `resolveAttemptSurvey(attempt)` helpers in
-  `quizService.js`, exported for controller + AI worker/queue. NULL snapshot →
-  live key (current behavior preserved for old rows).
-- Snapshot write happens inside the existing advisory-locked `startAttempt`
-  transaction (no new race). All invalidation/caching behavior unchanged.
-- Migration via `migrate dev`; fallback if Supabase blocks shadow DB: hand-write
-  `migration.sql` + `migrate resolve --applied` + `generate` (used before).
-- Commits: T1 migration alone; T2–T5 one code commit; T6 verification evidence
-  in message. Server restart after migrate (Prisma client reload).
+## Order rationale
+Deployability first (Docker/env blocks all future prod verification), then
+small isolated correctness (AI-4, log hygiene), then supply chain (prune +
+targeted upgrades), then schema/concurrency work (D-5), then FE behavior
+(F-1, F-4), then process (test runner). Risky/ambiguous items sit last or
+parked.
 
 ## Task list (also in `tasks/todo.md`)
-- [x] T1 — migration + generate
-- [x] Checkpoint A — migrate status clean, client has field
-- [x] T2 — snapshot-on-start + resolvers
-- [x] T3 — submit/stale/expired snapshot-first
-- [x] T4 — essay + AI paths snapshot-first
-- [x] T5 — result endpoint snapshot-first
-- [x] T6 — mid-flight proof + compat + commit
+- [ ] R1 — Docker/env repair
+- [ ] R2 — AI-4 budget counts retries (+ fail-open doc line)
+- [ ] R3 — dep prune (axios, nodemailer, bare langchain) + audit triage
+- [ ] R4 — D-5 assignment indexes (migration)
+- [ ] R5 — notify trigger catch{} warn logs
+- [ ] R6 — F-1 autosave queues behind in-flight save
+- [ ] R7 — F-4 dead weight: import-graph proof, then delete-or-mount
+- [ ] R8 — test runner seed (node:test BE quiz-lifecycle + vitest FE result-gating)
+- [ ] Checkpoint Z — trees clean, servers live, matrix green
+
+## Parked (need user — see Open questions)
+- P-A S-8 trust proxy (blocked on L-1 topology answer)
+- P-B V-1 Bunny Token-Authentication dashboard check (user clicks)
+- P-C Q-5 essay/AI live proof (blocked on GEMINI_API_KEY provisioning)
+- P-D F-4 toast bridge: mount vs delete is a product call (queued in R7 grill)
 
 ## Risks and mitigations
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Supabase shadow-DB block on `migrate dev` | Med | Fallback: hand-written SQL + resolve-applied (documented above) |
-| Attempt rows bloat (≤512KB snapshot each) | Low | Typical keys are small; noted, not optimized (no premature compression) |
-| Missed live-key reader (76 grep hits) | Med | Enumerated: only attempt-scoped readers change (§below); meta/start stay live by decision |
-| Fixture pollution during proof | Low | Scratch student (cascade-deleted) + byte-identical key restore, asserted |
+| Dep upgrade breaks runtime (qs/express chain) | High | One dep per commit, changelog read, full matrix re-run; prune (deletion) before upgrades |
+| D-5 migration locks tables | Low | `CREATE INDEX CONCURRENTLY` aware; off-peak; small tables today |
+| F-1 changes save timing | Med | Keep 25s debounce + flush triggers; queue only the dropped write |
+| R7 deletes something actually used | Med | Import-graph proof committed as evidence BEFORE any deletion |
 
-## Attempt-scoped readers changing (all others stay live)
-`submitAttempt` (:632/:638), `finalizeStaleAttempt` (:490-493),
-`gradeEssayAttempt` (:752/:760), `applyAiVerdict` (:837/:845),
-`aiGrader/worker.js:131/138`, `aiGrader/queue.js:62/68`,
-`quizController getQuizResult` (:326/:339). Start-time EXPIRED branch (:424)
-keeps the in-tx live row (identical to the snapshot being written).
-
-## Open questions
-1. Batch-2 order after Q-5: Docker/env repair next, or AI-4?
-2. L-1 topology still unanswered (S-8 parked regardless).
+## Open questions (grill — user must answer)
+1. L-1: prod behind proxy/LB? (unlocks P-A)
+2. V-1: is Bunny Token-Authentication ON? (P-B, one dashboard look)
+3. Confirm deletions: axios, nodemailer (+EMAIL_* env), bare langchain? (R3)
+4. Toast bridge: mount it or delete it? (decides R7 outcome)
+5. Test runner adoption: node:test + vitest, starting with 7 flows? (R8)
+6. Batch order: R1→R8 as listed, or re-prioritize?

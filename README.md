@@ -48,7 +48,7 @@ Equivalent to `prisma migrate deploy && prisma generate`. During development you
 npm run dev      # nodemon, watches app.js
 ```
 
-There is **no `npm start`** script defined — use `node app.js` or `npm run dev`.
+`npm start` runs the server (`node app.js`); `npm run dev` is nodemon.
 
 ### Environment variables
 

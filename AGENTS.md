@@ -121,7 +121,7 @@ Students must complete prerequisites before accessing the next video:
 
 ## Gotchas
 
-- No `npm start` script defined in package.json — the Dockerfile references it but it will fail. Use `node app.js` or `npm run dev`.
+- `npm start` runs `node app.js` (prod); `npm run dev` is nodemon. Docker CMD + compose rely on this.
 - Admin auto-created on startup via `src/config/setupAdmin.js` (email from `ADMIN_EMAIL` env).
 - `uploads/` directory is used for local file storage (e.g., assignment submissions).
 - Port 3005 is used everywhere (app.js, Dockerfile, docker-compose.yml).

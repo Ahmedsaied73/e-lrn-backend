@@ -1,15 +1,13 @@
-version: '3.8'
-
 services:
   app:
     build: .
     ports:
       - "3005:3005"
+    # All runtime config comes from .env (see .env.example for real var names).
+    # NODE_ENV stays production for the container even if .env says otherwise.
+    env_file:
+      - .env
     environment:
-      # Single database for all envs: Supabase Postgres (pooled).
-      # Set DATABASE_URL in .env (see .env.example). No local DB container.
-      - DATABASE_URL=${DATABASE_URL}
-      - JWT_SECRET=your_jwt_secret_key
       - NODE_ENV=production
     volumes:
       - ./uploads:/usr/src/app/uploads

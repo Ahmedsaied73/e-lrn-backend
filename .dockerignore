@@ -1,0 +1,8 @@
+node_modules/
+.git/
+.env
+uploads/
+server*.log
+be*.log
+*.log
+coverage/
