@@ -15,6 +15,7 @@ const adminRoutes = require('./src/routes/adminRoutes');
 const { logger } = require('./src/middlewares/index');
 const requestLogger = logger();
 const rateLimit = require('express-rate-limit');
+const helmet = require('helmet'); // S-5: security headers WITHOUT CSP (full CSP needs FE coordination)
 // Bunny Stream — new modules
 const bunnyVideoRoutes = require('./src/routes/bunnyVideoRoutes');
 const { handleBunnyWebhook } = require('./src/controllers/bunnyWebhookController');
@@ -58,6 +59,10 @@ app.use(cors({
   exposedHeaders: ['Set-Cookie'],
   maxAge: 86400
 }));
+
+// S-5: baseline security headers. CSP stays OFF — a full policy needs FE
+// coordination (Bunny embed host, fonts, SurveyJS) and is explicitly deferred.
+app.use(helmet({ contentSecurityPolicy: false }));
 
 
 // ── CRITICAL: Bunny webhook must be mounted BEFORE express.json() ─────────────

@@ -635,10 +635,29 @@ async function listQuizAttempts(req, res) {
       where.status = status;
     }
 
+    // Z-1: explicit select — never leak per-question `responses` in the list
+    // view (grading UI opens one attempt via the result endpoint for answers).
     const attempts = await prisma.quizAttempt.findMany({
       where,
       orderBy: { startedAt: 'desc' },
-      include: {
+      select: {
+        id: true,
+        quizId: true,
+        userId: true,
+        attemptNumber: true,
+        status: true,
+        startedAt: true,
+        deadlineAt: true,
+        submittedAt: true,
+        autoSubmitted: true,
+        mcqEarned: true,
+        essayEarned: true,
+        earnedPoints: true,
+        totalPoints: true,
+        scorePercent: true,
+        essayFeedback: true,
+        essayGradedBy: true,
+        essayGradedAt: true,
         user: { select: { id: true, name: true, email: true } },
       },
     });

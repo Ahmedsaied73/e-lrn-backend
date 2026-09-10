@@ -22,18 +22,6 @@ const MAX_KEY_LENGTH = 500;
 const MAX_VALUE_BYTES = 256 * 1024; // 256KB — matches the quiz JSON cap convention
 const COMMAND_TIMEOUT_MS = 500;
 
-const counters = {
-  hits: 0,
-  misses: 0,
-  sets: 0,
-  invalidations: 0,
-  errors: 0,
-};
-
-function stats() {
-  return { ...counters };
-}
-
 function buildKey(...parts) {
   const key = KEY_PREFIX + parts.map((p) => String(p)).join(':');
   if (key.length > MAX_KEY_LENGTH) {
@@ -77,20 +65,16 @@ async function get(key) {
   try {
     const raw = await withTimeout(client.get(key));
     if (raw === null || raw === undefined) {
-      counters.misses += 1;
       return null;
     }
     try {
       const value = JSON.parse(raw);
-      counters.hits += 1;
       return value;
     } catch {
-      counters.errors += 1;
       await client.del(key).catch(() => {});
       return null;
     }
   } catch {
-    counters.errors += 1;
     return null;
   }
 }
@@ -103,17 +87,14 @@ async function set(key, value, ttlSec) {
   try {
     raw = JSON.stringify(value);
   } catch {
-    counters.errors += 1;
     return false;
   }
   if (raw === undefined || Buffer.byteLength(raw, 'utf8') > MAX_VALUE_BYTES) return false;
   const ttl = Number.isSafeInteger(ttlSec) && ttlSec > 0 ? ttlSec : 60;
   try {
     await withTimeout(client.set(key, raw, 'EX', ttl));
-    counters.sets += 1;
     return true;
   } catch {
-    counters.errors += 1;
     return false;
   }
 }
@@ -125,10 +106,8 @@ async function del(...keys) {
   if (!client) return 0;
   try {
     const n = await withTimeout(client.del(...flat));
-    counters.invalidations += Number(n) || 0;
     return Number(n) || 0;
   } catch {
-    counters.errors += 1;
     return 0;
   }
 }
@@ -153,14 +132,12 @@ async function delPrefix(prefix, maxRounds = 100) {
       if (cursor === '0') break;
     }
   } catch {
-    counters.errors += 1;
+    // Fail-open: callers treat partial invalidation as a self-healing miss.
   }
-  counters.invalidations += removed;
   return removed;
 }
 
 async function withCache(key, ttlSec, loader) {
-  // Hit/miss accounting lives in get() — do not double count here.
   let cached;
   try {
     cached = await get(key);
@@ -185,5 +162,4 @@ module.exports = {
   withCache,
   buildKey,
   shortHash,
-  stats,
 };
