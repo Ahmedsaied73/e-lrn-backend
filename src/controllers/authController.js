@@ -59,6 +59,7 @@ async function register(req, res) {
 
   if (!email || typeof email !== 'string') return res.status(400).json({ success: false, error: 'Email is required.' });
   if (!password || typeof password !== 'string') return res.status(400).json({ success: false, error: 'Password is required.' });
+  if (password.length < 8) return res.status(400).json({ success: false, error: 'Password must be at least 8 characters.' });
   if (!name || typeof name !== 'string') return res.status(400).json({ success: false, error: 'Name is required.' });
   if (!phoneNumber) return res.status(400).json({ success: false, error: 'Phone number is required.' });
   if (!grade) return res.status(400).json({ success: false, error: 'Grade is required (FIRST_SECONDARY, SECOND_SECONDARY, or THIRD_SECONDARY).' });
@@ -70,10 +71,10 @@ async function register(req, res) {
 
   try {
     const existingUser = await prisma.user.findUnique({ where: { email: email.trim().toLowerCase() } });
-    if (existingUser) return res.status(409).json({ success: false, error: 'Email already registered.' });
+    if (existingUser) return res.status(409).json({ success: false, error: 'An account with these details already exists.' });
 
     const existingPhone = await prisma.user.findUnique({ where: { phoneNumber: phoneNumber.trim() } });
-    if (existingPhone) return res.status(409).json({ success: false, error: 'Phone number already registered.' });
+    if (existingPhone) return res.status(409).json({ success: false, error: 'An account with these details already exists.' });
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const newUser = await prisma.user.create({
