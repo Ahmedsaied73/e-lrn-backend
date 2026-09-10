@@ -200,7 +200,9 @@ async function notifyQuizGraded(attemptId) {
       metadata: { quizId: quiz.id, videoId, courseId, attemptId: attempt.id },
     });
     return count;
-  } catch {
+  } catch (err) {
+    // R5: outage visibility — still never throws (callers rely on it).
+    console.warn('[WARN] notifyQuizGraded failed', { attemptId, error: String((err && err.message) || err).slice(0, 300) });
     return 0;
   }
 }
@@ -228,7 +230,9 @@ async function notifyVideoReady(videoId) {
       metadata: { videoId: video.id, courseId: video.courseId },
     });
     return count;
-  } catch {
+  } catch (err) {
+    // R5: outage visibility — still never throws (callers rely on it).
+    console.warn('[WARN] notifyVideoReady failed', { videoId, error: String((err && err.message) || err).slice(0, 300) });
     return 0;
   }
 }

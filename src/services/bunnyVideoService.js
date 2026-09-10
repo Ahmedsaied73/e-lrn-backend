@@ -45,9 +45,13 @@ async function invalidateVideoCaches(courseId) {
 function notifyReadySafe(videoId) {
   try {
     const { notifyVideoReady } = require('./notifications/notificationService');
-    notifyVideoReady(videoId).catch(() => {});
-  } catch {
+    // R5: warn on async failure (outage visibility) but keep swallowing.
+    notifyVideoReady(videoId).catch((err) => {
+      console.warn('[WARN] notifyVideoReady failed', { videoId, error: err && err.message });
+    });
+  } catch (err) {
     // Notifications module absent/disabled — video flow unaffected.
+    console.warn('[WARN] notifyVideoReady unavailable', { videoId, error: err && err.message });
   }
 }
 

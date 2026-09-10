@@ -53,7 +53,7 @@ assignmentId/userId, AssignmentAnswer.questionId) via migration.
 **Description:** `catch{}` on notify trigger paths swallows outages silently —
 add warn-level log, keep swallowing (failure-isolation stays).
 **Acceptance criteria:**
-- [ ] Every trigger catch logs warn with context; no throw added
+- [x] Every trigger catch logs warn with context; no throw added
 **Verification:** [ ] `node --check`; [ ] notifications verify script green
 **Dependencies:** None
 **Files likely touched:** `src/services/notifications/*`, call sites

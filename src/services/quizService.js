@@ -612,9 +612,14 @@ async function invalidateQuizMetaForUser(userId) {
 function notifyGradedSafe(attemptId) {
   try {
     const { notifyQuizGraded } = require('./notifications/notificationService');
-    notifyQuizGraded(attemptId).catch(() => {});
-  } catch {
+    // R5: warn on async failure (outage visibility) but keep swallowing —
+    // failure isolation stays: silence, not corruption.
+    notifyQuizGraded(attemptId).catch((err) => {
+      console.warn('[WARN] notifyQuizGraded failed', { attemptId, error: err && err.message });
+    });
+  } catch (err) {
     // Notifications module absent/disabled — normal grading unaffected.
+    console.warn('[WARN] notifyQuizGraded unavailable', { attemptId, error: err && err.message });
   }
 }
 
