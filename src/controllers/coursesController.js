@@ -191,6 +191,7 @@ const createCourse = async (req, res) => {
     });
 
     await cache.delPrefix('v1:courses:');
+    await cache.del(cache.buildKey('search', 'cats'));
     res.status(201).json({ success: true, message: 'Course created successfully', data: course });
   } catch (error) {
     console.error('Error creating course:', error);
@@ -234,6 +235,7 @@ const updateCourse = async (req, res) => {
     });
 
     await cache.delPrefix('v1:courses:');
+    await cache.del(cache.buildKey('search', 'cats'));
     res.json({ success: true, message: 'Course updated successfully', data: updatedCourse });
   } catch (error) {
     console.error('Error updating course:', error);
@@ -312,6 +314,7 @@ const deleteCourse = async (req, res) => {
 
     await cache.delPrefix('v1:courses:');
     await cache.delPrefix(`v1:videos:course:${courseId}:`);
+    await cache.del(cache.buildKey('search', 'cats'));
     res.json({ success: true, message: 'Course deleted successfully' });
   } catch (error) {
     console.error('Error deleting course:', error);

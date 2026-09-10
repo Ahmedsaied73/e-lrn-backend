@@ -385,9 +385,14 @@ const getRecommendedCourses = async (req, res) => {
 };
 
 /**
- * Helper function to get a list of all available categories
+ * Helper function to get a list of all available categories.
+ * Cached 10min — categories only change on course create/update/delete,
+ * which invalidate the `v1:search:cats` key.
  */
 const getCategoriesList = async () => {
+  const cacheKey = cache.buildKey('search', 'cats');
+  const cached = await cache.get(cacheKey);
+  if (cached) return cached;
   const courses = await prisma.course.findMany({
     select: {
       category: true
@@ -399,11 +404,13 @@ const getCategoriesList = async () => {
     },
     distinct: ['category']
   });
-  
-  return courses
+
+  const list = courses
     .map(course => course.category)
     .filter(Boolean) // Remove null or undefined
     .sort();
+  await cache.set(cacheKey, list, 600);
+  return list;
 };
 
 module.exports = {
