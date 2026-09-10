@@ -833,19 +833,41 @@ async function grantExemption(req, res) {
       return res.status(400).json({ success: false, error: 'videoId and userId are required' });
     }
 
-    const exemption = await prisma.gateExemption.upsert({
-      where: { userId_bunnyVideoId: { userId: parsedUserId, bunnyVideoId: videoId } },
-      create: {
-        userId: parsedUserId,
-        bunnyVideoId: videoId,
-        grantedBy: adminId,
-        reason: reason || null,
-      },
-      update: {
-        grantedBy: adminId,
-        reason: reason || null,
-      },
-    });
+    // Validate FK targets up front: a missing user or video must be a 404,
+    // never a P2003 foreign-key 500 from the upsert below.
+    const [video, student] = await Promise.all([
+      prisma.bunnyVideo.findUnique({ where: { id: videoId }, select: { id: true } }),
+      prisma.user.findUnique({ where: { id: parsedUserId }, select: { id: true } }),
+    ]);
+    if (!video) {
+      return res.status(404).json({ success: false, error: 'Video not found' });
+    }
+    if (!student) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    let exemption;
+    try {
+      exemption = await prisma.gateExemption.upsert({
+        where: { userId_bunnyVideoId: { userId: parsedUserId, bunnyVideoId: videoId } },
+        create: {
+          userId: parsedUserId,
+          bunnyVideoId: videoId,
+          grantedBy: adminId,
+          reason: reason || null,
+        },
+        update: {
+          grantedBy: adminId,
+          reason: reason || null,
+        },
+      });
+    } catch (upsertError) {
+      // Narrow race (user/video deleted between check and write) → 404, not 500.
+      if (upsertError.code === 'P2003') {
+        return res.status(404).json({ success: false, error: 'User or video not found' });
+      }
+      throw upsertError;
+    }
 
     return res.status(200).json({
       success: true,
