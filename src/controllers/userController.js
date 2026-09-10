@@ -1,5 +1,6 @@
 const prisma = require('../config/db');
 const bcrypt = require('bcrypt');
+const config = require('../config/env');
 
 const selectWithoutPassword = {
   id: true,
@@ -29,7 +30,8 @@ const getUser = async (req, res) => {
     if (!user) {
       return res.status(404).json({ success: false, error: 'User not found.' });
     }
-    res.json({ success: true, data: user });
+    // Server-truth feature flags (clients must never decide enablement).
+    res.json({ success: true, data: { ...user, features: { ...(config.features || {}) } } });
   } catch (error) {
     handleError(res, error, 'Error fetching user data:');
   }

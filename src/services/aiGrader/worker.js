@@ -98,6 +98,14 @@ async function processGradingJob(job, providerFactory = defaultProviderFactory) 
     throw new Error('Invalid job payload (expected {attemptId, questionName})');
   }
 
+  // Module flag is honored at processing time too: disabling mid-queue parks
+  // jobs (they stay PENDING for later or human grading) instead of grading.
+  const modCfg = require('../../config/env');
+  if (modCfg.features && modCfg.features.aiGrader === false) {
+    logInfo('ai.worker.skipped_module_off', { attemptId, questionName });
+    return { skipped: 'module-off' };
+  }
+
   const attempt = await prisma.quizAttempt.findUnique({
     where: { id: attemptId },
     include: { quiz: { select: { answerKey: true } } },
@@ -193,11 +201,17 @@ let worker = null;
 function startAiGradingWorker(options = {}) {
   const config = require('../../config/env');
   const { isRedisEnabled } = require('../../integrations/redis/redisClient');
-  // An explicitly injected provider (checks) bypasses the key guard — the
-  // caller owns credentials in that case. Default path needs a real key.
+  // An explicitly injected provider (checks) bypasses the key/module guards —
+  // the caller owns credentials in that case. Default path needs Redis, a key,
+  // and the aiGrader module flag.
   const customProvider = Boolean(options.providerFactory);
-  if ((!customProvider && (!config.aiGrader || !config.aiGrader.configured)) || !isRedisEnabled()) {
-    logWarn('ai.worker.not_started', { reason: 'GEMINI_API_KEY missing or Redis disabled' });
+  if (!isRedisEnabled()) {
+    logWarn('ai.worker.not_started', { reason: 'Redis disabled' });
+    return null;
+  }
+  const moduleOn = !config.features || config.features.aiGrader !== false;
+  if (!customProvider && ((!config.aiGrader || !config.aiGrader.configured) || !moduleOn)) {
+    logWarn('ai.worker.not_started', { reason: 'AI grader disabled or GEMINI_API_KEY missing' });
     return null;
   }
   if (worker) return worker;

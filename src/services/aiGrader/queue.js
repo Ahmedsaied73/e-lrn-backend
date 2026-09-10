@@ -42,6 +42,9 @@ function isAiQueueAvailable() {
   // server simply wait until a keyed worker drains them; every guard in the
   // processor (still GRADING? still enabled? still ungraded?) makes late
   // processing safe. The worker itself still requires the key (see worker.js).
+  // The AI_GRADER_ENABLED module flag gates everything (see M0a).
+  const config = require('../../config/env');
+  if (config.features && config.features.aiGrader === false) return false;
   const { isRedisEnabled } = require('../../integrations/redis/redisClient');
   return isRedisEnabled();
 }

@@ -10,6 +10,7 @@
  */
 
 const prisma = require('../config/db');
+const config = require('../config/env');
 
 const RECENT_WINDOW_DAYS = 7;
 const STALE_PROCESSING_MS = 30 * 60 * 1000;
@@ -139,6 +140,8 @@ async function getDashboardStats(req, res) {
         enrollments: newestEnrollments,
         attempts: recentAttempts,
       },
+      // Server-truth feature flags for admin UI gating (never client-decided).
+      features: { ...(config.features || {}) },
     };
 
     return res.status(200).json({ success: true, data });
