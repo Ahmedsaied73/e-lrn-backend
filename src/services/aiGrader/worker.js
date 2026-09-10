@@ -17,7 +17,7 @@
  */
 
 const prisma = require('../../config/db');
-const { gradeEssay } = require('./index');
+const { gradeEssay, DEFAULT_MAX_ATTEMPTS } = require('./index');
 const { createGeminiProvider } = require('./provider');
 const { QUEUE_NAME } = require('./queue');
 
@@ -53,10 +53,16 @@ function budgetKey(date = new Date()) {
 
 /**
  * Cost guard: at most N paid model calls per UTC day (Redis counter, 24h TTL).
- * Returns true when the call may proceed (and counts it), false when the
- * budget is exhausted — the job stays queued for human grading. Never throws.
+ * Counts RESERVED worst-case calls, not actuals: one job may invoke the model
+ * up to maxAttempts times (gradeEssay retries technical failures), so we
+ * increment by `cost` (= that bound) up front. Over-counts when the first try
+ * succeeds — the safe direction for a tripwire. Failing jobs may use fewer;
+ * the gap is accepted and documented here, never silently grown.
+ * Returns true when the call may proceed, false when exhausted — the job stays
+ * queued for human grading. Never throws.
  */
-async function checkBudget() {
+async function checkBudget(cost = 1) {
+  const n = Number.isSafeInteger(cost) && cost > 0 ? cost : 1;
   try {
     const { getRedis, ensureConnected } = require('../../integrations/redis/redisClient');
     // Await the handshake (bounded): without this, a cold client rejects and
@@ -70,10 +76,11 @@ async function checkBudget() {
       logWarn('ai.budget.exhausted', { used, budget: dailyBudget() });
       return false;
     }
-    const count = await client.incr(key);
-    if (count === 1) {
+    const count = await client.incrby(key, n);
+    if (used === 0) {
       await client.expire(key, 86400).catch(() => {});
     }
+    void count;
     return true;
   } catch (err) {
     logWarn('ai.budget.check_failed', { error: err.message });
@@ -158,7 +165,9 @@ async function processGradingJob(job, providerFactory = defaultProviderFactory) 
 
   await markJob(attemptId, questionName, { tries: { increment: 1 }, claimedAt: new Date() });
 
-  if (!(await checkBudget())) {
+  // AI-4: reserve the worst case (gradeEssay may call the model up to
+  // maxAttempts times). Over-counts first-try successes — safe direction.
+  if (!(await checkBudget(DEFAULT_MAX_ATTEMPTS))) {
     logInfo('ai.worker.skipped_budget', { attemptId, questionName });
     return { skipped: 'budget-exhausted' };
   }
@@ -278,4 +287,5 @@ module.exports = {
   QUEUE_NAME,
   processGradingJob,
   startAiGradingWorker,
+  checkBudget, // exported for harness verification (tripwire math)
 };

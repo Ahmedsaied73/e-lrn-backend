@@ -20,7 +20,7 @@ app.js`), sync compose vars with real names, add PORT/EMAIL_* to
 calls). Count attempts (incr per try) or document the undercount + keep
 fail-open explicitly.
 **Acceptance criteria:**
-- [ ] Budget reflects worst-case calls, or code comment records the accepted gap
+- [x] Budget reflects worst-case calls, or code comment records the accepted gap
 **Verification:** [ ] `node --check`; [ ] mock-provider budget-trip test green
 **Dependencies:** None
 **Files likely touched:** `src/services/aiGrader/worker.js` and/or `index.js`

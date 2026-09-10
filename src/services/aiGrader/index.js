@@ -85,4 +85,5 @@ module.exports = {
   gradeEssay,
   PROMPT_VERSION,
   DEFAULT_TIMEOUT_MS,
+  DEFAULT_MAX_ATTEMPTS, // worst-case model calls per gradeEssay invocation
 };
