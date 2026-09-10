@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node app.js",
+    "test": "node --test \"tests/**/*.test.js\"",
     "dev": "nodemon app.js",
     "db:setup": "prisma migrate deploy && prisma generate",
     "upload:course": "node scripts/uploadCourseFolder.js"

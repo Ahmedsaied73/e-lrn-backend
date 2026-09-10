@@ -88,8 +88,8 @@ user product call).
 EXPIRED/gates) + `vitest` (FE result-gating render). First suites only — no
 full retrofit.
 **Acceptance criteria:**
-- [ ] `npm test` (BE) + FE test cmd green on the seeded suites
-- [ ] Suites encode the behaviors proven live in Q-5 + hide-proof runs
+- [x] `npm test` (BE, node:test, 3/3 green, exit 0) encodes Q-5 + hide-proof runs
+- [ ] FE test cmd (vitest adoption — needs user approval, new devDep)
 **Verification:** [ ] Both suites pass from clean checkout state
 **Dependencies:** User confirms adoption (grill Q5)
 **Files likely touched:** `package.json` scripts, `tests/*`, FE test setup
