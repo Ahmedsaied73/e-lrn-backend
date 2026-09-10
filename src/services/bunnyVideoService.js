@@ -158,19 +158,29 @@ async function createVideo({ courseId, title, requestedByUserId }) {
 
   // Persist local record — if this fails, compensate by deleting the Bunny video
   try {
-    // New videos join the end of the course sequence (position = count + 1)
-    const lastPosition = await prisma.bunnyVideo.count({ where: { courseId } });
-
-    const localVideo = await prisma.bunnyVideo.create({
-      data: {
+    // New videos join the end of the course sequence. Position has a per-course
+    // unique constraint, so a concurrent create racing the count retries once
+    // with a recomputed position instead of 500ing.
+    const buildData = async () => {
+      const lastPosition = await prisma.bunnyVideo.count({ where: { courseId } });
+      return {
         courseId,
         title,
         bunnyVideoId: bunnyVideo.guid,
         bunnyLibraryId: process.env.BUNNY_STREAM_LIBRARY_ID,
         status: 'PENDING',
         position: lastPosition + 1,
-      },
-    });
+      };
+    };
+
+    let localVideo;
+    try {
+      localVideo = await prisma.bunnyVideo.create({ data: await buildData() });
+    } catch (err) {
+      if (err.code !== 'P2002') throw err;
+      log.warn('video.create.position_retry', { courseId });
+      localVideo = await prisma.bunnyVideo.create({ data: await buildData() });
+    }
 
     await invalidateVideoCaches(courseId);
     return localVideo;

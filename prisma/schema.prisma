@@ -251,6 +251,7 @@ model GateExemption {
   createdAt DateTime @default(now())
 
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  video     BunnyVideo @relation(fields: [bunnyVideoId], references: [id], onDelete: Cascade)
 
   @@unique([userId, bunnyVideoId])
   @@index([bunnyVideoId])
@@ -355,10 +356,14 @@ model BunnyVideo {
   course        Course               @relation(fields: [courseId], references: [id], onDelete: Cascade)
   quiz          Quiz?
   progress      BunnyVideoProgress[]
+  exemptions    GateExemption[]
 
   // Query patterns: list by course, filter by status, webhook lookup by bunnyVideoId (unique index)
   @@index([courseId])
   @@index([status])
+  // Positions are unique per course (NULLs exempt — legacy rows); the gate
+  // orders by position, so duplicates would make unlocking ambiguous.
+  @@unique([courseId, position])
 }
 
 model BunnyVideoProgress {

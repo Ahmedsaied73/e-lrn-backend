@@ -689,6 +689,20 @@ async function gradeEssayAttempt(adminId, attemptId, essayScores, essayFeedbackM
   let essayEarned = 0;
   const feedbackRecord = {};
 
+  // Refuse partial grading: every essay in the key must be scored, otherwise
+  // ungraded essays would silently bank 0 and finalize. (AI verdicts arrive
+  // per-question via applyAiVerdict instead, which finalizes only when whole.)
+  const essayNames = Object.entries(answerKey)
+    .filter(([, e]) => e && e.type === 'comment')
+    .map(([n]) => n);
+  const missing = essayNames.filter((n) => essayScores[n] === undefined);
+  if (missing.length > 0) {
+    throw Object.assign(
+      new Error(`Missing scores for essay questions: ${missing.join(', ')}`),
+      { statusCode: 409 }
+    );
+  }
+
   for (const [qName, awardedPts] of Object.entries(essayScores)) {
     const keyEntry = answerKey[qName];
     if (!keyEntry || keyEntry.type !== 'comment') continue;
