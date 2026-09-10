@@ -123,6 +123,15 @@ function resolveAiGrader() {
   };
 }
 
+// ── Optional feature modules (building blocks) ─────────────────────────────
+// Each module reads enabled here; absence means the approved default (true =
+// current behavior preserved). Restart to change. See plans/ai-grader-plan.md
+// and the notifications plan for the per-module contract.
+function resolveFlag(rawValue, defaultValue) {
+  if (rawValue === undefined || rawValue === null || String(rawValue).trim() === '') return defaultValue;
+  return ['true', '1', 'yes', 'on'].includes(String(rawValue).trim().toLowerCase());
+}
+
 const config = {
   jwt: {
     secret: process.env.JWTSECRET,
@@ -133,6 +142,10 @@ const config = {
   supabase: resolveSupabase(),
   redis: resolveRedis(),
   aiGrader: resolveAiGrader(),
+  features: {
+    notifications: resolveFlag(process.env.NOTIFICATIONS_ENABLED, true),
+    aiGrader: resolveFlag(process.env.AI_GRADER_ENABLED, true),
+  },
   admin: {
     // [C-2] Credentials come from env only — no hardcoded fallbacks
     email: process.env.ADMIN_EMAIL || 'admin@elearning.com',
