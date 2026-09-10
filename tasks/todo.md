@@ -1,86 +1,87 @@
-# Todo — Hardening Batch 1 (audit tail)
+# Todo — Q-5 attempt snapshot
 
-Branch/repo note: Tasks 1–2 + 5 on `H:\e-learning-platform` (`ai-grader`);
-Tasks 3–4 on `L:\E-LRN-FRONTEND\a-e-lrn-frontend` (`Dev`).
+Repo: `H:\e-learning-platform` (`ai-grader`). Prior batch-1 record preserved in git.
 
-## Task 1: helmet-without-CSP (BE, S)
-**Description:** Install pinned `helmet@7.x`, mount with `contentSecurityPolicy:
-false`, keep all other defaults. Closes S-5 in its approved form.
+## T1: migration + generate (M)
+**Description:** Add `quizSnapshot Json?` to `QuizAttempt` with Q-5 comment;
+migrate + regenerate client.
 **Acceptance criteria:**
-- [x] `node -e "require('helmet')"` passes immediately after install
-- [x] Responses carry `X-Content-Type-Options`, `X-Frame-Options`,
-      `Strict-Transport-Security`, `Referrer-Policy`, no `X-Powered-By`
-- [x] No `Content-Security-Policy` header emitted
-- [x] Bunny iframe playback + quiz runner + fonts still load (Playwright spot)
+- [x] `prisma migrate status` clean; Prisma client exposes `quizSnapshot`
+- [x] Existing rows read as NULL (no backfill, no data change)
 **Verification:**
-- [x] `node --check app.js`; BE boots, `/user/me` 401-anon shape unchanged
-- [x] `curl -I` header dump saved as evidence
-- [x] Lockfile diff reviewed (helmet has zero deps)
+- [x] `npx prisma migrate status`; `node -e` import check on generated client
+- [x] Fallback used only if shadow DB blocked (record which path in commit msg)
 **Dependencies:** None
-**Files likely touched:** `package.json`, `package-lock.json`, `app.js`
-**Estimated scope:** Small (1–2 files + lockfile)
+**Files likely touched:** `prisma/schema.prisma`, `prisma/migrations/*/migration.sql`
+**Estimated scope:** Medium (schema + migration)
 
-## Task 2: Z-1 trim attempt-list select (BE, XS)
-**Description:** `listQuizAttempts` returns full rows incl. `responses`; replace
-with an explicit select mirroring `listAllAttempts` (no `responses`/`answers`).
+## Checkpoint A
+- [x] Migration applied; server restarted on new client; `/user/me` smoke OK
+
+## T2: snapshot-on-start + resolvers (S)
+**Description:** `startAttempt` create writes `quizSnapshot: { surveyJson,
+answerKey }` from the in-tx quiz row; add exported
+`resolveAttemptKey`/`resolveAttemptSurvey` (snapshot-first, live fallback).
 **Acceptance criteria:**
-- [x] `GET /quizzes/:quizId/attempts` (admin) response contains no `responses`
-      key on any item
-- [x] Every field the FE grading inbox renders from the list is still present
-      (FE consumer grep done first; detail endpoint untouched)
+- [x] New attempt row carries byte-identical snapshot of the start-time key
+- [x] Resolver returns snapshot when present, live key when NULL
 **Verification:**
-- [x] `node --check src/controllers/quizController.js`
-- [x] Admin list + open-attempt grading flow green in Playwright
-**Dependencies:** None (FE grep is a step inside this task, not a blocker)
+- [x] `node --check`; V1 probe script (start as scratch student → read row)
+**Dependencies:** T1
+**Files likely touched:** `src/services/quizService.js`
+**Estimated scope:** Small (1 file)
+
+## T3: submit/stale/expired snapshot-first (M)
+**Description:** `submitAttempt`, `finalizeStaleAttempt`, EXPIRED branches
+resolve via helpers instead of `attempt.quiz.answerKey`.
+**Acceptance criteria:**
+- [x] Mid-flight key edit does not change grading of an in-flight attempt
+- [x] EXPIRED totals use the attempt's key
+**Verification:**
+- [x] V2 proof script (edit → submit → assert OLD-key scores → restore key)
+**Dependencies:** T2
+**Files likely touched:** `src/services/quizService.js`
+**Estimated scope:** Medium (1 file, 3 paths)
+
+## T4: essay + AI paths snapshot-first (S)
+**Description:** `gradeEssayAttempt`, `applyAiVerdict`, AI `worker.js` prompt
+load, `queue.js` enqueue enumeration resolve via snapshot.
+**Acceptance criteria:**
+- [x] Essay question set + points come from the attempt's key on all 4 paths
+- [x] Enqueue after a mid-flight edit still targets the attempt's essays
+**Verification:**
+- [x] V3 script (grade/verdict after key edit → old-key essay set)
+**Dependencies:** T2
+**Files likely touched:** `src/services/quizService.js`,
+  `src/services/aiGrader/worker.js`, `src/services/aiGrader/queue.js`
+**Estimated scope:** Small (3 files, one-line-ish each)
+
+## T5: result endpoint snapshot-first (S)
+**Description:** `getQuizResult` per-question review resolves via snapshot
+(result must show the key the attempt was graded against).
+**Acceptance criteria:**
+- [x] Post-edit result review shows OLD correct answers + scores
+- [x] NULL-snapshot old attempts still render (live fallback)
+**Verification:**
+- [x] V4/V5 script asserts
+**Dependencies:** T2
 **Files likely touched:** `src/controllers/quizController.js`
-**Estimated scope:** XS (1 file)
+**Estimated scope:** Small (1 file)
 
-## Checkpoint A: BE boot + header smoke
-- [x] BE boots on fresh `node app.js`, admin auto-setup line present in log
-- [x] Anon `/user/me` → 401 envelope unchanged; admin `/admin/dashboard` → 200
-- [x] Header dump shows helmet set, no CSP
-- [x] Review with human before FE tasks? (optional — FE tasks are independent)
-
-## Task 3: /admin middleware matcher (FE, XS)
-**Description:** Add `middleware.ts` redirecting cookie-less visitors away from
-`/admin/:path*` (flash-of-shell fix; data still guarded by BE 403s).
+## T6: proof run + compat + commit (M)
+**Description:** Full V1–V5 run, net-zero asserts (scratch student deleted,
+key restored byte-identical), BE smoke, single code commit (+ T1 migration
+commit already landed).
 **Acceptance criteria:**
-- [x] Authed admin reaches `/admin` (existing layout guard still passes)
-- [x] Cookie-less visitor to `/admin/grading` lands on login, no admin shell flash
-- [x] Public pages (`/`, `/login`, course pages) unaffected
+- [x] V1–V5 all pass; fixtures byte-identical after cleanup
+- [x] p2-verify perf matrix still green (no regression from resolvers)
 **Verification:**
-- [x] `tsc --noEmit` clean; Playwright login + anon checks
-**Dependencies:** None
-**Files likely touched:** `middleware.ts` (new — check absence first)
-**Estimated scope:** XS (1 file)
-
-## Task 4: result poller SUBMITTED align (FE, XS)
-**Description:** Poller condition also fires on `SUBMITTED`, matching the
-displayed pending state (`isPending` already covers both).
-**Acceptance criteria:**
-- [x] Poller runs while status is `GRADING` or `SUBMITTED`, stops otherwise,
-      same 10s/~2min bounds
-**Verification:**
-- [x] `tsc --noEmit` clean; result-page review of condition (SUBMITTED is
-      server-dead, so live-fire is display-logic only)
-**Dependencies:** None
-**Files likely touched:** `app/course/[id]/video/[video]/quiz/result/[attemptId]/page.tsx`
-**Estimated scope:** XS (1 file)
-
-## Task 5: delete cache.stats() (BE, XS)
-**Description:** Remove zero-caller `stats()` + `counters` from
-`src/integrations/redis/cache.js` (R-3). Plan approval = deletion approval.
-**Acceptance criteria:**
-- [x] No `stats`/`counters` remains in `cache.js`; module exports unchanged
-      otherwise; repo-wide grep shows no new breakage
-**Verification:**
-- [x] `node --check`; BE boot + one cached endpoint still hits cache
-**Dependencies:** None
-**Files likely touched:** `src/integrations/redis/cache.js`
-**Estimated scope:** XS (1 file)
+- [x] Scripts in Temp; BE smoke; `git status` shows only intended files
+**Dependencies:** T3, T4, T5
+**Files likely touched:** (none — verification + commit)
+**Estimated scope:** Medium (verification-heavy)
 
 ## Checkpoint B: complete
-- [x] BE commit (Tasks 1, 2, 5) on `ai-grader`; FE commit (Tasks 3, 4) on `Dev`
-- [x] Working trees clean; servers left running on the new code
-- [x] Explicitly NOT in this batch: S-8/L-1, Q-5, AI-4, Docker/compose/env sync,
-      dep prune, D-5, F-1, F-4, test runner
+- [x] Commits: T1 migration; T2–T5 code; evidence in messages
+- [x] Explicitly NOT in this batch: Docker/env, AI-4, S-8, dep prune, D-5,
+      F-1, F-4, tests

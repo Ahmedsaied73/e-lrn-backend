@@ -234,6 +234,32 @@ function computeScorePercent(earnedPoints, totalPoints) {
   return parseFloat(((earnedPoints / totalPoints) * 100).toFixed(2));
 }
 
+/**
+ * Q-5 snapshot resolvers. Grading/review must use the key frozen at start,
+ * not the live quiz row (admins may edit mid-flight). Pre-snapshot rows
+ * (quizSnapshot NULL) fall back to the live key — the old behavior.
+ * Never throws (malformed snapshot → live key → {}).
+ */
+function resolveAttemptKey(attempt) {
+  try {
+    const snap = attempt && attempt.quizSnapshot;
+    if (snap && snap.answerKey && typeof snap.answerKey === 'object' && !Array.isArray(snap.answerKey)) {
+      return snap.answerKey;
+    }
+    if (attempt && attempt.quiz && attempt.quiz.answerKey) return attempt.quiz.answerKey;
+  } catch { /* fall through */ }
+  return {};
+}
+
+function resolveAttemptSurvey(attempt) {
+  try {
+    const snap = attempt && attempt.quizSnapshot;
+    if (snap && snap.surveyJson && typeof snap.surveyJson === 'object') return snap.surveyJson;
+    if (attempt && attempt.quiz && attempt.quiz.surveyJson) return attempt.quiz.surveyJson;
+  } catch { /* fall through */ }
+  return null;
+}
+
 // ─── Gate Evaluation ─────────────────────────────────────────────────────────
 
 /**
@@ -459,7 +485,17 @@ async function startAttempt(userId, quizId, options = {}) {
     const deadlineAt = quiz.timeLimitSec ? new Date(startedAt.getTime() + quiz.timeLimitSec * 1000) : null;
 
     const attempt = await tx.quizAttempt.create({
-      data: { userId, quizId, attemptNumber, startedAt, deadlineAt, status: STATUS.IN_PROGRESS },
+      data: {
+        userId,
+        quizId,
+        attemptNumber,
+        startedAt,
+        deadlineAt,
+        status: STATUS.IN_PROGRESS,
+        // Q-5: freeze the start-time key on the row — all grading/review
+        // resolves snapshot-first so mid-flight quiz edits can't re-grade it.
+        quizSnapshot: { surveyJson: quiz.surveyJson, answerKey: quiz.answerKey },
+      },
     });
 
     return { attempt, quiz, resumed: false };
@@ -481,13 +517,14 @@ async function startAttempt(userId, quizId, options = {}) {
  * responses it had saved (autosave). Used to keep stale attempts from lingering
  * forever while never losing a real answer set. Essay quizzes go to GRADING.
  *
- * @param {object} attempt - Raw Prisma quizAttempt row (IN_PROGRESS)
- * @param {object} quiz    - The quiz row (with answerKey)
+ * @param {object} attempt - Raw Prisma quizAttempt row (IN_PROGRESS, with quizSnapshot)
+ * @param {object} quiz    - The quiz row (live-key fallback for pre-snapshot rows)
  * @param {object} [db]    - Prisma client or transaction client (defaults to prisma)
  * @returns {Promise<object>} Updated attempt
  */
 async function finalizeStaleAttempt(attempt, quiz, db = prisma) {
-  const answerKey = quiz.answerKey || {};
+  // Q-5: the attempt row carries its frozen key; the live quiz is fallback only.
+  const answerKey = resolveAttemptKey({ quizSnapshot: attempt.quizSnapshot, quiz });
   const responses = attempt.responses || {};
   const { mcqEarned } = gradeMcq(answerKey, responses);
   const { totalPoints, totalEssayPoints } = computeTotalPoints(answerKey);
@@ -629,13 +666,14 @@ async function submitAttempt(userId, attemptId, responses, autoSubmitted = false
     if (new Date() > deadline) {
       await prisma.quizAttempt.update({
         where: { id: attemptId },
-        data: { status: STATUS.EXPIRED, scorePercent: 0, earnedPoints: 0, totalPoints: computeTotalPoints(attempt.quiz.answerKey).totalPoints },
+        data: { status: STATUS.EXPIRED, scorePercent: 0, earnedPoints: 0, totalPoints: computeTotalPoints(resolveAttemptKey(attempt)).totalPoints },
       });
       throw Object.assign(new Error('Submission deadline has passed. Attempt expired.'), { statusCode: 403 });
     }
   }
 
-  const answerKey = attempt.quiz.answerKey;
+  // Q-5: grade against the frozen start-time key, never the live quiz row.
+  const answerKey = resolveAttemptKey(attempt);
   const { mcqEarned, totalMcqPoints, perQuestion } = gradeMcq(answerKey, responses);
   const { totalPoints, totalEssayPoints } = computeTotalPoints(answerKey);
 
@@ -757,7 +795,8 @@ async function gradeEssayAttempt(adminId, attemptId, essayScores, essayFeedbackM
       throw Object.assign(new Error(`Attempt status is "${attempt.status}", expected GRADING`), { statusCode: 409 });
     }
 
-    const answerKey = attempt.quiz.answerKey;
+    // Q-5: essay set comes from the frozen start-time key.
+    const answerKey = resolveAttemptKey(attempt);
     let essayEarned = 0;
     const feedbackRecord = {};
 
@@ -842,7 +881,8 @@ async function applyAiVerdict(attemptId, qName, verdict) {
       return { finalized: false, reason: 'not-grading' };
     }
 
-    const answerKey = attempt.quiz.answerKey || {};
+    // Q-5: essay set comes from the frozen start-time key.
+    const answerKey = resolveAttemptKey(attempt);
     const keyEntry = answerKey[qName];
     if (!keyEntry || keyEntry.type !== 'comment') {
       return { finalized: false, reason: 'not-essay' };
@@ -946,5 +986,7 @@ module.exports = {
   invalidateQuizMeta,
   invalidateQuizMetaForAttempt,
   invalidateQuizMetaForUser,
+  resolveAttemptKey,
+  resolveAttemptSurvey,
   uploadQuestionImage,
 };

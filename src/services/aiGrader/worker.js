@@ -135,7 +135,9 @@ async function processGradingJob(job, providerFactory = defaultProviderFactory) 
     return { skipped: 'not-grading' };
   }
 
-  const entry = (attempt.quiz.answerKey || {})[questionName];
+  // Q-5: prompt context comes from the frozen start-time key.
+  const { resolveAttemptKey } = require('../quizService');
+  const entry = (resolveAttemptKey(attempt) || {})[questionName];
   if (!entry || entry.type !== 'comment' || !entry.ai || entry.ai.enabled !== true) {
     logInfo('ai.worker.skipped_not_enabled', { attemptId, questionName });
     return { skipped: 'not-enabled' };

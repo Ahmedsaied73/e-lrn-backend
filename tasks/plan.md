@@ -1,50 +1,50 @@
-# Implementation Plan: Hardening Batch 1 (audit tail)
+# Implementation Plan: Q-5 attempt snapshot (grade-from-frozen-key)
 
 ## Overview
-Close the five smallest confirmed audit leftovers in one batch: `helmet` headers
-without CSP (S-5, approved variant), trim `responses` from the per-quiz admin
-attempt list (Z-1), add a Next middleware gate for `/admin/*` (F-3), align the
-result poller with the SUBMITTED display state (F-2), delete dead
-`cache.stats()` (R-3). All additive or subtractive-dead-code; no migrations, no
-response-shape changes for authorized callers, no auth-logic changes.
+`startAttempt` freezes `{ surveyJson, answerKey }` onto the attempt row
+(`quizSnapshot Json?`, NULL = pre-snapshot row). Every attempt-scoped read
+(submit, stale-finalize, essay grade, AI verdict/worker/queue, result review)
+resolves the key snapshot-first with live-key fallback. Quiz-level surfaces
+(meta totals, start-time sanitize) stay live deliberately. One migration, no
+backfill, fully net-zero verification (scratch student + restored key).
 
 ## Architecture decisions
-- Helmet WITHOUT CSP (`contentSecurityPolicy: false`): full CSP needs FE
-  coordination (Bunny embed host, fonts, SurveyJS) and is explicitly deferred.
-  All other default helmet headers ship (nosniff, frameguard, HSTS, referrer,
-  hidePoweredBy). Frameguard SAMEORIGIN does not affect Bunny playback (those
-  are Bunny's responses, not ours).
-- Pin `helmet` to v7.x exact: CJS `require()` compatibility must be proven at
-  install time (`node -e "require('helmet')"`) before touching `app.js`. If the
-  pinned major refuses, stop and re-plan instead of forcing ESM interop.
-- Z-1 keeps every field the FE grading inbox consumes; only `responses` (and
-  any answer-key-adjacent field) is removed. FE already fetches single-attempt
-  detail via `/quizzes/attempts/:id/result` (per frontend-handoff §99.3).
-- F-3 middleware checks cookie *presence* only (no JWT verify in Edge runtime;
-  no secret leaves BE). Data stays protected by BE 403s; the matcher only kills
-  the flash-of-admin-shell.
-- Commits split by repo: BE items one commit on `H:\e-learning-platform`
-  (`ai-grader`), FE items one commit on `L:\E-LRN-FRONTEND\a-e-lrn-frontend`
-  (`Dev`). Never `git add -A`; never touch user WIP files.
+- Single `quizSnapshot Json?` column holding `{ surveyJson, answerKey }`
+  (one column, not two; surveyJson frozen for future result-rendering proof).
+- `resolveAttemptKey(attempt)` / `resolveAttemptSurvey(attempt)` helpers in
+  `quizService.js`, exported for controller + AI worker/queue. NULL snapshot →
+  live key (current behavior preserved for old rows).
+- Snapshot write happens inside the existing advisory-locked `startAttempt`
+  transaction (no new race). All invalidation/caching behavior unchanged.
+- Migration via `migrate dev`; fallback if Supabase blocks shadow DB: hand-write
+  `migration.sql` + `migrate resolve --applied` + `generate` (used before).
+- Commits: T1 migration alone; T2–T5 one code commit; T6 verification evidence
+  in message. Server restart after migrate (Prisma client reload).
 
 ## Task list (also in `tasks/todo.md`)
-- [x] Task 1 — helmet-without-CSP (BE, S)
-- [x] Task 2 — Z-1 trim attempt-list select (BE, XS)
-- [x] Checkpoint A — BE boot + header smoke
-- [x] Task 3 — /admin middleware matcher (FE, XS)
-- [x] Task 4 — result poller SUBMITTED align (FE, XS)
-- [x] Task 5 — delete cache.stats() (BE, XS)
-- [x] Checkpoint B — full verify + commits
+- [x] T1 — migration + generate
+- [x] Checkpoint A — migrate status clean, client has field
+- [x] T2 — snapshot-on-start + resolvers
+- [x] T3 — submit/stale/expired snapshot-first
+- [x] T4 — essay + AI paths snapshot-first
+- [x] T5 — result endpoint snapshot-first
+- [x] T6 — mid-flight proof + compat + commit
 
 ## Risks and mitigations
 | Risk | Impact | Mitigation |
 |---|---|---|
-| helmet major is ESM-only / breaks boot | Med | Pin v7.x exact; `require()` probe + boot smoke before wiring; abort to re-plan on failure |
-| HSTS/frameguard breaks local dev or embeds | Low | HSTS harmless on localhost; frameguard affects only our pages being iframed (nothing does); Playwright spot-checks Bunny iframe + quiz runner |
-| Z-1 drops a field FE list view needs | Med | Grep FE consumers first; keep all consumed fields; detail endpoint unchanged |
-| FE middleware matcher over-matches (e.g. `/admin` static) | Low | Matcher `/admin/:path*` only; verify public pages unaffected |
-| `npm install` mutates lockfile unexpectedly | Low | Inspect `git diff package*.json` before committing; helmet has zero deps |
+| Supabase shadow-DB block on `migrate dev` | Med | Fallback: hand-written SQL + resolve-applied (documented above) |
+| Attempt rows bloat (≤512KB snapshot each) | Low | Typical keys are small; noted, not optimized (no premature compression) |
+| Missed live-key reader (76 grep hits) | Med | Enumerated: only attempt-scoped readers change (§below); meta/start stay live by decision |
+| Fixture pollution during proof | Low | Scratch student (cascade-deleted) + byte-identical key restore, asserted |
 
-## Open questions (need human answers before/during build)
-1. L-1: prod topology (proxy/LB in front?) — decides whether S-8 trust-proxy joins a later batch. NOT in this batch either way.
-2. Confirm batch composition: these 5 only, Q-5/AI-4/Docker still deferred to batch 2?
+## Attempt-scoped readers changing (all others stay live)
+`submitAttempt` (:632/:638), `finalizeStaleAttempt` (:490-493),
+`gradeEssayAttempt` (:752/:760), `applyAiVerdict` (:837/:845),
+`aiGrader/worker.js:131/138`, `aiGrader/queue.js:62/68`,
+`quizController getQuizResult` (:326/:339). Start-time EXPIRED branch (:424)
+keeps the in-tx live row (identical to the snapshot being written).
+
+## Open questions
+1. Batch-2 order after Q-5: Docker/env repair next, or AI-4?
+2. L-1 topology still unanswered (S-8 parked regardless).

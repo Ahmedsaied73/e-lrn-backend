@@ -323,7 +323,9 @@ async function getQuizResult(req, res) {
       return res.status(400).json({ success: false, error: 'Quiz attempt is still in progress' });
     }
 
-    const answerKey = attempt.quiz.answerKey || {};
+    // Q-5: review renders the frozen start-time key (the one the attempt was
+    // graded against), with live-key fallback for pre-snapshot rows.
+    const answerKey = quizService.resolveAttemptKey(attempt);
     const responses = attempt.responses || {};
     const feedback = attempt.essayFeedback || {};
 
