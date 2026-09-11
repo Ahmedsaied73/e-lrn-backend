@@ -47,11 +47,11 @@ async function readyClient() {
   return clientOrThrow();
 }
 
-function createRateLimitStore() {
+function createRateLimitStore(keyPrefix = PREFIX) {
   let windowMs = 15 * 60 * 1000;
 
   return {
-    prefix: PREFIX,
+    prefix: keyPrefix,
     localKeys: false,
 
     init(options) {
@@ -62,7 +62,7 @@ function createRateLimitStore() {
 
     async increment(key) {
       const client = await readyClient();
-      const fullKey = `${PREFIX}${key}`;
+      const fullKey = `${keyPrefix}${key}`;
       // Atomic INCR + first-hit expiry in one Lua step: a crash between the
       // two can no longer leave a TTL-less key throttling an IP forever.
       // NOTE: resetTime stays approximate (full window, not remaining TTL) —
@@ -82,12 +82,12 @@ function createRateLimitStore() {
 
     async decrement(key) {
       const client = await readyClient();
-      await withTimeout(client.decr(`${PREFIX}${key}`));
+      await withTimeout(client.decr(`${keyPrefix}${key}`));
     },
 
     async resetKey(key) {
       const client = await readyClient();
-      await withTimeout(client.del(`${PREFIX}${key}`));
+      await withTimeout(client.del(`${keyPrefix}${key}`));
     },
   };
 }

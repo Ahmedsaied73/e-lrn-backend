@@ -97,23 +97,32 @@ const limiter = rateLimit({
   ...(redisStoreEnabled ? { store: createRateLimitStore(), passOnStoreError: true } : {}),
 });
 
-// Stricter rate limiter for auth routes
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20, // Limit each IP to 10 login requests per windowMs
-  message: 'Too many login attempts from this IP, please try again later.',
-  ...(redisStoreEnabled ? { store: createRateLimitStore(), passOnStoreError: true } : {}),
-});
+// Strict limiters for auth routes. SEPARATE buckets per endpoint: login,
+// register, and refresh previously shared one `rl:<ip>` counter, so routine
+// refresh traffic ate the login budget and logouts ended in 429s on re-login.
+// Refresh gets headroom (cookie-bound + DB-matched + rotated: low abuse value,
+// multi-tab rotation needs it); login/register keep 20 (brute-force posture).
+function makeAuthLimiter(prefix, max) {
+  return rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max,
+    message: 'Too many login attempts from this IP, please try again later.',
+    ...(redisStoreEnabled ? { store: createRateLimitStore(prefix), passOnStoreError: true } : {}),
+  });
+}
+const loginLimiter = makeAuthLimiter('rl:login:', 20);
+const registerLimiter = makeAuthLimiter('rl:register:', 20);
+const refreshLimiter = makeAuthLimiter('rl:refresh:', 60);
 
 // Apply rate limiter to all requests
 app.use(limiter);
 
-// Apply strict limiter to auth routes specifically (login, register, and
+// Apply strict per-endpoint limiters to auth routes (login, register, and
 // refresh — refresh accepts body tokens, so it gets the same replay probing
-// protection; 20/15min comfortably covers the 15-min access-token cycle).
-app.use('/auth/login', authLimiter);
-app.use('/auth/register', authLimiter);
-app.use('/auth/refresh-token', authLimiter);
+// protection; 60/15min comfortably covers multi-tab 15-min rotation cycles).
+app.use('/auth/login', loginLimiter);
+app.use('/auth/register', registerLimiter);
+app.use('/auth/refresh-token', refreshLimiter);
 
 // Existing routes
 app.use("/user", Userrouter);
