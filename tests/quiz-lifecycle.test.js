@@ -29,6 +29,28 @@ async function req(method, path, cookie, body) {
   return { status: res.status, json };
 }
 
+/**
+ * Pick the first MCQ with ≥2 choices from a live quiz row.
+ * Returns { q, correct, wrong }. Throws loudly if the fixture quiz has no
+ * MCQ — the suite must fail visibly, never silently pass on a wrong shape.
+ */
+function pickMcq(live) {
+  const key = (live && live.answerKey) || {};
+  const pages = ((live && live.surveyJson && live.surveyJson.pages) || []);
+  for (const page of pages) {
+    for (const el of (page.elements || [])) {
+      if (!el || el.type !== 'radiogroup') continue;
+      const entry = key[el.name];
+      if (!entry || entry.correctValue === undefined || entry.correctValue === null) continue;
+      const values = (el.choices || []).map((c) => (c && typeof c === 'object' ? c.value : c));
+      const wrong = values.find((v) => String(v) !== String(entry.correctValue));
+      if (wrong === undefined) continue;
+      return { q: el.name, correct: entry.correctValue, wrong };
+    }
+  }
+  throw new Error('fixture quiz 2 has no MCQ with ≥2 choices — cannot prove grading/hiding');
+}
+
 async function makeStudent(tag) {
   const email = `seed-${tag}-${Date.now()}@localhost.test`;
   const stu = await prisma.user.create({ data: { name: 'Seed', email, password: 'x', grade: 'FIRST_SECONDARY' } });
@@ -63,21 +85,25 @@ describe('quiz lifecycle', () => {
   after(async () => { await prisma.$disconnect(); });
 
   it('hide-until-pass: failed attempt reveals scores only, retake allowed', async () => {
+    // Fixture-independent: derive a wrong answer from the LIVE key (quiz 2 is
+    // re-authorable via admin UI; hardcoding choices rotted this test before).
+    const live = await prisma.quiz.findUnique({ where: { bunnyVideoId: 2 } });
+    const target = pickMcq(live);
     const fx = await makeStudent('hide');
     try {
       const start = await req('POST', '/quizzes/videos/2/start', fx.cookie, {});
       assert.equal(start.status, 200);
       const attId = start.json.data.attemptId;
-      const sub = await req('POST', `/quizzes/attempts/${attId}/submit`, fx.cookie, { answers: { q1: 'الإسكندرية' } });
+      const sub = await req('POST', `/quizzes/attempts/${attId}/submit`, fx.cookie, { answers: { [target.q]: target.wrong } });
       assert.equal(sub.status, 200);
-      assert.equal(sub.json.data.scorePercent, 0);
-      assert.ok(!JSON.stringify(sub.json).includes('القاهرة'), 'submit leaks no answers');
+      assert.ok(sub.json.data.scorePercent < live.passingScore, 'attempt failed');
+      assert.ok(!JSON.stringify(sub.json).includes(target.correct), 'submit leaks no answers');
       const res = await req('GET', `/quizzes/attempts/${attId}/result`, fx.cookie);
       assert.equal(res.status, 200);
-      const q1 = res.json.data.questions.find((q) => q.name === 'q1');
-      assert.equal(q1.correctAnswer, null);
-      assert.equal(q1.isCorrect, false);
-      assert.ok(!JSON.stringify(res.json).includes('القاهرة'), 'result leaks no answers');
+      const q = res.json.data.questions.find((x) => x.name === target.q);
+      assert.equal(q.correctAnswer, null);
+      assert.equal(q.isCorrect, false);
+      assert.ok(!JSON.stringify(res.json).includes(target.correct), 'result leaks no answers');
       const retry = await req('POST', '/quizzes/videos/2/start', fx.cookie, {});
       assert.equal(retry.status, 200, 'retake allowed after fail');
       const retryId = retry.json.data.attemptId;
@@ -88,22 +114,30 @@ describe('quiz lifecycle', () => {
   });
 
   it('Q-5: mid-flight key edit cannot re-grade an in-flight attempt', async () => {
+    // Fixture-independent: flip the live correct value, submit the ORIGINAL
+    // answer, prove grading + review honor the frozen start-time key.
     const live0 = await prisma.quiz.findUnique({ where: { bunnyVideoId: 2 } });
+    const target = pickMcq(live0);
     const fx = await makeStudent('snap');
     try {
       const start = await req('POST', '/quizzes/videos/2/start', fx.cookie, {});
       const attId = start.json.data.attemptId;
       const Kflip = JSON.parse(JSON.stringify(live0.answerKey));
-      Kflip.q1.correctValue = 'الإسكندرية';
+      Kflip[target.q].correctValue = target.wrong;
       const flip = await req('POST', '/quizzes/videos/2', adminCookie(),
         { title: live0.title, surveyJson: live0.surveyJson, answerKey: Kflip });
       assert.equal(flip.status, 200);
       try {
-        const sub = await req('POST', `/quizzes/attempts/${attId}/submit`, fx.cookie, { answers: { q1: 'القاهرة' } });
-        assert.equal(sub.json.data.scorePercent, 100, 'graded against frozen key');
+        const sub = await req('POST', `/quizzes/attempts/${attId}/submit`, fx.cookie, { answers: { [target.q]: target.correct } });
+        assert.equal(sub.status, 200);
+        const pq = sub.json.data.perQuestion.find((x) => x.qName === target.q);
+        assert.ok(pq && pq.isCorrect === true && pq.earned === pq.max, 'graded against frozen key');
         const res = await req('GET', `/quizzes/attempts/${attId}/result`, fx.cookie);
-        const q1 = res.json.data.questions.find((q) => q.name === 'q1');
-        assert.equal(q1.correctAnswer, 'القاهرة');
+        const q = res.json.data.questions.find((x) => x.name === target.q);
+        const st = res.json.data.status;
+        const showAnswers = st === 'GRADED' && (res.json.data.scorePercent || 0) >= live0.passingScore;
+        assert.equal(q.correctAnswer, showAnswers ? target.correct : null, 'review honors frozen key + hide-until-pass');
+        assert.equal(q.isCorrect, true);
       } finally {
         const restore = await req('POST', '/quizzes/videos/2', adminCookie(),
           { title: live0.title, surveyJson: live0.surveyJson, answerKey: live0.answerKey });
