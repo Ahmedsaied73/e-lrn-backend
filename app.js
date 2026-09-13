@@ -120,8 +120,11 @@ app.use(limiter);
 // Apply strict per-endpoint limiters to auth routes (login, register, and
 // refresh — refresh accepts body tokens, so it gets the same replay probing
 // protection; 60/15min comfortably covers multi-tab 15-min rotation cycles).
+// Forgot-password shares the register bucket: same abuse shape (anonymous DB
+// write, future email send), so it must not have its own unlimited lane.
 app.use('/auth/login', loginLimiter);
 app.use('/auth/register', registerLimiter);
+app.use('/auth/forgot-password', registerLimiter);
 app.use('/auth/refresh-token', refreshLimiter);
 
 // Existing routes
