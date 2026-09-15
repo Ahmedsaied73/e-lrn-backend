@@ -11,3 +11,4 @@ server.log
 server.err.log
 server*.log
 server*.err.log
+graphify-out/
