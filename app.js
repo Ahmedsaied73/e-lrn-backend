@@ -29,6 +29,12 @@ const port = process.env.PORT || 3005;
 const events = require('events');
 events.EventEmitter.defaultMaxListeners = 15;
 
+// Trust the first proxy hop (Railway's TLS-terminating router). Without this,
+// `req.ip` is the proxy's address and the IP-keyed rate limiters + request
+// logger see a single shared IP under load. `1` = trust one hop only; override
+// with TRUST_PROXY for other topologies (e.g. "loopback" or a hop count).
+app.set('trust proxy', process.env.TRUST_PROXY || 1);
+
 // Initialize default admin on startup
 setupDefaultAdmin().catch(console.error);
 
@@ -38,7 +44,9 @@ const allowedOrigins = [
   'http://127.0.0.1:3000',
     'http://127.0.0.1:3002',
 
-  process.env.FRONTEND_URL,
+  // FRONTEND_URL may be comma-separated: prod Vercel domain plus any PR/preview
+  // deployments share the same cookie + JWT machinery without code changes.
+  ...(process.env.FRONTEND_URL || '').split(',').map(s => s.trim()).filter(Boolean),
 ].filter(Boolean);
 
 // Configure CORS for HttpOnly cookie credential support
@@ -60,9 +68,27 @@ app.use(cors({
   maxAge: 86400
 }));
 
-// S-5: baseline security headers. CSP stays OFF — a full policy needs FE
-// coordination (Bunny embed host, fonts, SurveyJS) and is explicitly deferred.
-app.use(helmet({ contentSecurityPolicy: false }));
+// S-5: security headers. CSP was previously OFF ("needs FE coordination") —
+// now locked to our real asset origins. The backend is a JSON API, so the
+// script/style directives are tight; connect-src permits the FE (Vercel) +
+// Supabase + Bunny CDN the browser talks to when proxying through this API.
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", 'data:', 'https:'],
+      fontSrc: ["'self'", 'data:', 'https:'],
+      connectSrc: ["'self'", 'https://*.b-cdn.net', 'https://*.supabase.co'],
+      frameAncestors: ["'self'"],
+      objectSrc: ["'none'"],
+      baseUri: ["'self'"],
+      formAction: ["'self'"],
+    },
+  },
+  crossOriginEmbedderPolicy: false,
+}));
 
 
 // ── CRITICAL: Bunny webhook must be mounted BEFORE express.json() ─────────────
@@ -113,6 +139,27 @@ function makeAuthLimiter(prefix, max) {
 const loginLimiter = makeAuthLimiter('rl:login:', 20);
 const registerLimiter = makeAuthLimiter('rl:register:', 20);
 const refreshLimiter = makeAuthLimiter('rl:refresh:', 60);
+
+// ── Health check (mounted BEFORE the rate limiter — probes must never be
+//     throttled, and this doubles as Railway's `/health` healthcheck path).
+//     Errors are logged by the process-level handlers; the route itself stays
+//     silent to keep health probes quiet in the request logs.
+app.get('/health', async (req, res) => {
+  const started = Date.now();
+  try {
+    const prisma = require('./src/config/db');
+    // Live DB ping — a 200 without this only proves the process is up, not
+    // that it can serve requests (the pool collapsing is exactly what killed
+    // it under load in the DB-audit incident).
+    await Promise.race([
+      prisma.$queryRaw`SELECT 1`,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('db ping timeout')), 3000)),
+    ]);
+    res.status(200).json({ status: 'ok', db: 'up', uptime: Math.round(process.uptime()), ms: Date.now() - started });
+  } catch (err) {
+    res.status(503).json({ status: 'error', db: 'down', ms: Date.now() - started });
+  }
+});
 
 // Apply rate limiter to all requests
 app.use(limiter);
@@ -193,9 +240,24 @@ app.use((err, req, res, next) => {
   });
 });
 
-app.listen(port, () => {
+// ── Process-level crash handlers ─────────────────────────────────────────────
+// An uncaught exception / unhandled rejection that slips past route-level
+// try/catch must not leave the process half-alive serving stale state — log it,
+// then exit so the platform (Railway) restarts us cleanly. Railway restarts on
+// exit; systemd/docker restart policies handle it elsewhere.
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] uncaughtException:', err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[FATAL] unhandledRejection:', reason);
+  process.exit(1);
+});
+
+const server = app.listen(port, () => {
     console.log(`Example app listening at http://localhost:${port}`);
-    console.log('CORS enabled for all origins');
+    console.log('CORS enabled for configured origins');
 
     // Start Bunny video reconciliation job (every 10 minutes)
     startReconciliationJob();
@@ -222,5 +284,37 @@ app.listen(port, () => {
       console.warn('[WARN] AI grading worker failed to start:', err.message);
     }
 });
+
+// ── Graceful shutdown (SIGTERM/SIGINT) ──────────────────────────────────────
+// Closes the HTTP server, then drains Prisma + Redis so queued writes finish
+// instead of the platform SIGKILL-ing mid-transaction. Force-exit after 10s
+// so a hung connection can't keep the instance "up" after detach.
+function shutdown(signal) {
+  console.log(`[SHUTDOWN] ${signal} received — draining connections...`);
+  server.close(async () => {
+    try {
+      const prisma = require('./src/config/db');
+      await prisma.$disconnect();
+    } catch (err) {
+      console.warn('[WARN] Prisma disconnect failed:', err.message);
+    }
+    try {
+      const { disconnectRedis } = require('./src/integrations/redis/redisClient');
+      await disconnectRedis();
+    } catch (err) {
+      console.warn('[WARN] Redis disconnect failed:', err.message);
+    }
+    console.log('[SHUTDOWN] clean exit');
+    process.exit(0);
+  });
+  // Force-exit if connections refuse to drain (keeps Railway's healthcheck honest).
+  setTimeout(() => {
+    console.error('[SHUTDOWN] drain timeout — forcing exit');
+    process.exit(1);
+  }, 10000).unref();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 module.exports = app; // Export for testing
