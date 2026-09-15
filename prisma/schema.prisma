@@ -26,6 +26,8 @@ certificates      Certificate[]
   assignmentAnswers AssignmentAnswer[] // Answers to MCQ assignment questions
   submissions       Submission[] // Assignment submissions by the user
   notifications     Notification[] // In-app inbox rows (optional module)
+  passwordResetToken String?            @db.Text
+  passwordResetExpires DateTime?
   refreshToken      String?            @db.Text
   refreshTokenFamily String?           @db.VarChar(36) // groups rotated refresh tokens; null = quarantined/logged out everywhere
   createdAt         DateTime           @default(now())
@@ -273,8 +275,10 @@ model Assignment {
   id           Int          @id @default(autoincrement())
   title        String
   description  String?      @db.Text
-  video        Video        @relation(fields: [videoId], references: [id], onDelete: Cascade)
-  videoId      Int
+  video        Video?       @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  videoId      Int?
+  bunnyVideo   BunnyVideo?  @relation(fields: [bunnyVideoId], references: [id], onDelete: Cascade)
+  bunnyVideoId Int?
   dueDate      DateTime?
   isMCQ        Boolean      @default(false)
   passingScore Float        @default(70.0) // Percentage needed to pass MCQ assignments
@@ -285,6 +289,7 @@ model Assignment {
   AssignmentQuestion AssignmentQuestion[]
 
   @@index([videoId])
+  @@index([bunnyVideoId])
 }
 
 // New model for assignment questions (for MCQ assignments)
@@ -374,6 +379,7 @@ model BunnyVideo {
   quiz          Quiz?
   progress      BunnyVideoProgress[]
   exemptions    GateExemption[]
+  assignments   Assignment[]
 
   // Query patterns: list by course, filter by status, webhook lookup by bunnyVideoId (unique index)
   @@index([courseId])

@@ -235,30 +235,11 @@ function computeScorePercent(earnedPoints, totalPoints) {
 }
 
 /**
- * Q-5 snapshot resolvers. Grading/review must use the key frozen at start,
- * not the live quiz row (admins may edit mid-flight). Pre-snapshot rows
- * (quizSnapshot NULL) fall back to the live key — the old behavior.
- * Never throws (malformed snapshot → live key → {}).
+ * Q-5 snapshot resolvers live in utils/quizKeyResolver.js (pure, dependency-
+ * free) so both quizService and aiGrader/queue.js share one copy. Re-exported
+ * here so existing callers (controllers, worker) keep working unchanged.
  */
-function resolveAttemptKey(attempt) {
-  try {
-    const snap = attempt && attempt.quizSnapshot;
-    if (snap && snap.answerKey && typeof snap.answerKey === 'object' && !Array.isArray(snap.answerKey)) {
-      return snap.answerKey;
-    }
-    if (attempt && attempt.quiz && attempt.quiz.answerKey) return attempt.quiz.answerKey;
-  } catch { /* fall through */ }
-  return {};
-}
-
-function resolveAttemptSurvey(attempt) {
-  try {
-    const snap = attempt && attempt.quizSnapshot;
-    if (snap && snap.surveyJson && typeof snap.surveyJson === 'object') return snap.surveyJson;
-    if (attempt && attempt.quiz && attempt.quiz.surveyJson) return attempt.quiz.surveyJson;
-  } catch { /* fall through */ }
-  return null;
-}
+const { resolveAttemptKey, resolveAttemptSurvey } = require('../utils/quizKeyResolver');
 
 // ─── Gate Evaluation ─────────────────────────────────────────────────────────
 

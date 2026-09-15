@@ -63,7 +63,7 @@ async function enqueueAiGrading(attemptId) {
     });
     if (!attempt || attempt.status !== 'GRADING') return 0;
     // Q-5: enumerate the attempt's frozen essays, never the live quiz row.
-    const { resolveAttemptKey } = require('../quizService');
+    const { resolveAttemptKey } = require('../../utils/quizKeyResolver');
     const answerKey = resolveAttemptKey(attempt);
     const responses = attempt.responses || {};
     let enqueued = 0;
