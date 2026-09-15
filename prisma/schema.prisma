@@ -26,8 +26,6 @@ certificates      Certificate[]
   assignmentAnswers AssignmentAnswer[] // Answers to MCQ assignment questions
   submissions       Submission[] // Assignment submissions by the user
   notifications     Notification[] // In-app inbox rows (optional module)
-  passwordResetToken String?            @db.Text
-  passwordResetExpires DateTime?
   refreshToken      String?            @db.Text
   refreshTokenFamily String?           @db.VarChar(36) // groups rotated refresh tokens; null = quarantined/logged out everywhere
   createdAt         DateTime           @default(now())
