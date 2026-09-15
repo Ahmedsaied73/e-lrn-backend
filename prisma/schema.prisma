@@ -104,6 +104,7 @@ model Certificate {
   certificateUrl    String?
 
   @@unique([userId, courseId])
+  @@index([courseId])
 }
 
 model LearningPath {
