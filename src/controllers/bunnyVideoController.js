@@ -285,6 +285,28 @@ const getBunnyVideoPlayback = async (req, res, next) => {
     }
 
     // Student path: enrollment + READY checks enforced in service
+    //
+    // Fast path: the sequential gate already fetched this video's playback
+    // fields AND verified enrollment (via the gate).  Skip the redundant
+    // video re-fetch + enrollment re-check that getPlaybackAccess would
+    // otherwise repeat — saving 2 DB round-trips per request.  `status` is
+    // re-verified from the gate data before building the URL; on any doubt
+    // (gate returned nothing / not READY) we fall through to the authoritative
+    // service method.
+    if (req.gateVideo) {
+      const v = req.gateVideo;
+      if (v.status !== 'READY') {
+        throw new AppError(
+          `Video is not ready for playback (current status: ${v.status})`,
+          422,
+          ErrorCodes.VIDEO_NOT_READY
+        );
+      }
+      const { token, expiresAt } = bunnyClient.generatePlaybackToken(v.bunnyVideoId);
+      const playbackUrl = `https://iframe.mediadelivery.net/embed/${v.bunnyLibraryId}/${v.bunnyVideoId}?token=${token}&expires=${expiresAt}`;
+      return res.json({ success: true, data: { videoId: v.id, playbackUrl, expiresAt } });
+    }
+
     const result = await bunnyVideoService.getPlaybackAccess(videoId, userId);
 
     return res.json({ success: true, data: result });
@@ -369,6 +391,22 @@ const reorderCourseVideos = async (req, res, next) => {
     }
 
     const videos = await bunnyVideoService.reorderVideos(courseId, videoIds, req.user.id);
+
+    // Reordering changes the gate sequence for every enrolled student — their
+    // cached gate verdicts may now point at the wrong "previous" video.
+    // Best-effort: invalidate per-user for all enrolled students. Never throws;
+    // a Redis failure merely leaves stale gates to expire on their TTL.
+    const prisma = require('../config/db');
+    const quizService = require('../services/quizService');
+    try {
+      const enrolled = await prisma.enrollment.findMany({
+        where: { courseId },
+        select: { userId: true },
+      });
+      await Promise.all(enrolled.map((e) => quizService.invalidateGateForUser(e.userId)));
+    } catch (err) {
+      console.error('[BunnyVideoController] gate invalidation after reorder failed:', err);
+    }
 
     return res.json({
       success: true,

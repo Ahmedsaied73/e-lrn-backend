@@ -62,6 +62,10 @@ const enrollUserInCourse = async (req, res) => {
       }
     });
 
+    // New enrollment clears any cached NOT_ENROLLED gate verdict for this user.
+    const quizService = require('../services/quizService');
+    await quizService.invalidateGateForUser(userId);
+
     return res.status(201).json({
       success: true,
       message: 'Enrollment successful!',
@@ -246,6 +250,10 @@ const adminEnroll = async (req, res) => {
       },
     });
 
+    // New enrollment clears any cached NOT_ENROLLED gate verdict for the student.
+    const quizService = require('../services/quizService');
+    await quizService.invalidateGateForUser(parsedUserId);
+
     return res.status(201).json({
       success: true,
       message: 'Student enrolled successfully.',
@@ -272,12 +280,16 @@ const unenroll = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid enrollment ID.' });
     }
 
-    const enrollment = await prisma.enrollment.findUnique({ where: { id }, select: { id: true } });
+    const enrollment = await prisma.enrollment.findUnique({ where: { id }, select: { id: true, userId: true } });
     if (!enrollment) {
       return res.status(404).json({ success: false, error: 'Enrollment not found.' });
     }
 
     await prisma.enrollment.delete({ where: { id } });
+
+    // Removing enrollment revokes video access — invalidate the user's gate cache.
+    const quizService = require('../services/quizService');
+    await quizService.invalidateGateForUser(enrollment.userId);
 
     return res.status(200).json({ success: true, message: 'Enrollment removed successfully.' });
   } catch (error) {

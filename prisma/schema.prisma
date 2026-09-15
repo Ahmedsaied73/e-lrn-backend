@@ -203,6 +203,12 @@ model QuizAttempt {
   @@index([userId, quizId])
   @@index([quizId])
   @@index([userId])
+  // P1 (Stage-2 audit, 2026-09-14): best-attempt lookup (userId, quizId,
+  // status) + scorePercent DESC ordering; and per-quiz status-filtered lists
+  // ordered by startedAt DESC. Applied CONCURRENTLY out-of-band; see migration
+  // 20260914120000_p1_perf_indexes (recorded via resolve --applied).
+  @@index([userId, quizId, status, scorePercent(sort: Desc)])
+  @@index([quizId, status, startedAt(sort: Desc)])
 }
 
 enum QuizAttemptStatus {
@@ -371,6 +377,10 @@ model BunnyVideo {
   // Query patterns: list by course, filter by status, webhook lookup by bunnyVideoId (unique index)
   @@index([courseId])
   @@index([status])
+  // P1 (Stage-2 audit, 2026-09-14): sequential-gate ordering (courseId, status)
+  // + position sort. Applied CONCURRENTLY out-of-band; see migration
+  // 20260914120000_p1_perf_indexes (recorded via resolve --applied).
+  @@index([courseId, status, position])
   // Positions are unique per course (NULLs exempt — legacy rows); the gate
   // orders by position, so duplicates would make unlocking ambiguous.
   @@unique([courseId, position])

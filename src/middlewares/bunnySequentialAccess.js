@@ -5,7 +5,13 @@ async function ensureBunnySequentialAccess(req, res, next) {
 
   try {
     const gate = await quizService.evaluateGate(req.user.id, Number(req.params.videoId), req.user.role);
-    if (gate.allowed) return next();
+    if (gate.allowed) {
+      // Gate already fetched the video (and verified enrollment + READY status
+      // ordering). Attach its slim row so the playback handler can skip the
+      // redundant video re-fetch + enrollment re-check in getPlaybackAccess.
+      if (gate._video) req.gateVideo = gate._video;
+      return next();
+    }
 
     // Pass the gate's structured code through (NOT_ENROLLED / SEQUENTIAL_GATE)
     // so callers can distinguish "not enrolled" from "complete the previous

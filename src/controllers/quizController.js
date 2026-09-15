@@ -902,6 +902,8 @@ async function resetAttempt(req, res) {
     // above since the helper's own row lookup would miss post-delete.
     // (Helpers never throw by contract — safe to await inline.)
     if (attempt.quiz) await quizService.invalidateQuizMeta(attempt.userId, attempt.quiz.bunnyVideoId);
+    // Reset removes a GRADED score that may gate the next video.
+    await quizService.invalidateGateForUser(attempt.userId);
 
     return res.status(200).json({ success: true, message: 'Attempt reset successfully' });
   } catch (error) {
@@ -966,6 +968,9 @@ async function grantExemption(req, res) {
     // carries no gate verdict today — invalidate defensively so future
     // gate-derived fields can never go stale.
     await quizService.invalidateQuizMetaForUser(parsedUserId);
+    // Gate cache depends on exemptions — invalidate so the new exemption
+    // is reflected immediately in the sequential gate.
+    await quizService.invalidateGateForUser(parsedUserId);
 
     return res.status(200).json({
       success: true,
@@ -996,6 +1001,7 @@ async function revokeExemption(req, res) {
       });
       await prisma.gateExemption.delete({ where: { id: exemptionId } });
       if (doomed) await quizService.invalidateQuizMetaForUser(doomed.userId);
+      if (doomed) await quizService.invalidateGateForUser(doomed.userId);
     } catch (error) {
       if (error.code === 'P2025') {
         return res.status(404).json({ success: false, error: 'Exemption not found' });

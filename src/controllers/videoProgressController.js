@@ -1,5 +1,5 @@
 const prisma = require('../config/db');
-const { evaluateGate, invalidateQuizMeta } = require('../services/quizService');
+const { evaluateGate, invalidateQuizMeta, invalidateGateForUser } = require('../services/quizService');
 
 function parseBunnyVideoId(value) {
   const videoId = Number(value);
@@ -72,6 +72,9 @@ const markVideoCompleted = async (req, res) => {
     // Completion flips the quiz meta `unlocked` flag — drop its cache.
     // (invalidateQuizMeta never throws by contract.)
     await invalidateQuizMeta(req.user.id, videoId);
+    // Completing video N unlocks video N+1's gate — invalidate all gate
+    // results for this user so downstream gates reflect the new progress.
+    await invalidateGateForUser(req.user.id);
 
     return res.json({
       message: 'Video marked as completed',
