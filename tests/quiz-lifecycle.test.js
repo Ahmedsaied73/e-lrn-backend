@@ -97,13 +97,20 @@ describe('quiz lifecycle', () => {
       const sub = await req('POST', `/quizzes/attempts/${attId}/submit`, fx.cookie, { answers: { [target.q]: target.wrong } });
       assert.equal(sub.status, 200);
       assert.ok(sub.json.data.scorePercent < live.passingScore, 'attempt failed');
-      assert.ok(!JSON.stringify(sub.json).includes(target.correct), 'submit leaks no answers');
+      // Guard the real leak vectors, not raw string containment: a failed
+      // attempt must expose neither the answerKey object nor the correctValue
+      // field (submitting the raw correct value appears in answer-bearing
+      // fields only; timestamps/IDs legitimately contain answer values as
+      // substrings, so `includes(correct)` would flake).
+      assert.ok(!JSON.stringify(sub.json).includes('answerKey'), 'submit leaks answerKey');
+      assert.ok(!JSON.stringify(sub.json).includes('correctValue'), 'submit leaks correctValue');
       const res = await req('GET', `/quizzes/attempts/${attId}/result`, fx.cookie);
       assert.equal(res.status, 200);
       const q = res.json.data.questions.find((x) => x.name === target.q);
       assert.equal(q.correctAnswer, null);
       assert.equal(q.isCorrect, false);
-      assert.ok(!JSON.stringify(res.json).includes(target.correct), 'result leaks no answers');
+      assert.ok(!JSON.stringify(res.json).includes('answerKey'), 'result leaks answerKey');
+      assert.ok(!JSON.stringify(res.json).includes('correctValue'), 'result leaks correctValue');
       const retry = await req('POST', '/quizzes/videos/2/start', fx.cookie, {});
       assert.equal(retry.status, 200, 'retake allowed after fail');
       const retryId = retry.json.data.attemptId;

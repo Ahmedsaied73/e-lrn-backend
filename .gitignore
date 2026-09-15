@@ -12,3 +12,6 @@ server.err.log
 server*.log
 server*.err.log
 graphify-out/
+
+# agent/boot logs (PowerShell hidden window redirects)
+be-*.log

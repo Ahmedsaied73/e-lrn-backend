@@ -49,13 +49,22 @@ const allowedOrigins = [
   ...(process.env.FRONTEND_URL || '').split(',').map(s => s.trim()).filter(Boolean),
 ].filter(Boolean);
 
+// Vercel deploys a fresh random subdomain per git push (https://<hash>.vercel.app)
+// plus stable aliases (prod, preview) — allow every *.vercel.app deployment so
+// any branch/PR/preview origin works out-of-the-box after the next deploy.
+const vercelOriginPattern = /^https:\/\/[a-z0-9-]+\.vercel\.app$/i;
+
+function isAllowedOrigin(origin) {
+  return allowedOrigins.includes(origin) || vercelOriginPattern.test(origin);
+}
+
 // Configure CORS for HttpOnly cookie credential support
 app.use(cors({
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps or curl)
     if (!origin) return callback(null, true);
     
-    if (allowedOrigins.includes(origin)) {
+    if (isAllowedOrigin(origin)) {
       return callback(null, true);
     } else {
       return callback(new Error(`CORS policy does not allow access from ${origin}`));

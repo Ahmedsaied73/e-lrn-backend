@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [Dev, main, master]
+  pull_request:
+    branches: [Dev, main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # Auth-limiter tests assert REAL 429 tripping — the app needs a real Redis
+    # (it falls back to a per-instance MemoryStore, which would make the
+    # bucket-separation assertions moot). Service container provides one.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      NODE_ENV: production
+      PORT: 3106
+      REDIS_ENABLED: "true"
+      REDIS_URL: redis://127.0.0.1:6379
+
+      # Secrets → env (required by src/config/env.js fail-fast guards)
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      DIRECT_URL: ${{ secrets.DIRECT_URL }}
+      JWTSECRET: ${{ secrets.JWTSECRET }}
+      ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+      ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+      BUNNY_STREAM_LIBRARY_ID: ${{ secrets.BUNNY_STREAM_LIBRARY_ID }}
+      BUNNY_STREAM_API_KEY: ${{ secrets.BUNNY_STREAM_API_KEY }}
+      BUNNY_STREAM_READ_ONLY_API_KEY: ${{ secrets.BUNNY_STREAM_READ_ONLY_API_KEY }}
+      BUNNY_STREAM_TOKEN_KEY: ${{ secrets.BUNNY_STREAM_TOKEN_KEY }}
+      # resolveSupabase() fatals on boot in production without these (quiz image
+      # upload bucket), even though the suite never touches them.
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      # npm test self-hosts the server on PORT (env above) and tears it down.
+      # The suite is net-zero against the shared DB (scratch users deleted,
+      # quiz keys restored, exemptions revoked) — safe to run on the staging
+      # Supabase the tests already require for fixtures (course 1, quiz video 1/2,
+      # seqaccess/grader demo users).
+      - name: Run test suite (self-hosted server)
+        run: npm test
+
+      - name: Verify Prisma schema + migration status
+        run: npx prisma validate && npx prisma migrate status
