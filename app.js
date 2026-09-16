@@ -25,6 +25,15 @@ const { startReconciliationJob } = require('./src/jobs/reconcileStaleVideos');
 const { AppError } = require('./src/utils/AppError');
 
 const { setupDefaultAdmin } = require('./src/config/setupAdmin');
+
+// Express 4 does not catch rejected promises from async handlers — a throw
+// inside `async (req,res)` becomes an unhandledRejection, which the
+// process-level crash handler below treats as FATAL (exit 1). Patch Express's
+// Layer so async rejections route to next(err) → the global error handler,
+// keeping one bad route from taking down the whole API. Must run before the
+// first request.
+require('./src/utils/sanitizeAsyncErrors');
+
 const app = express();
 const port = process.env.PORT || 3005;
 

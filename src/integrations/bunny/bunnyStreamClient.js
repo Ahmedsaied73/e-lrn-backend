@@ -66,11 +66,129 @@ class BunnyApiError extends Error {
   }
 }
 
+/**
+ * Thrown when the Bunny circuit is OPEN and the caller cannot proceed.
+ * Surfaces as HTTP 503 at the global error handler.
+ */
+class BunnyCircuitOpenError extends Error {
+  constructor() {
+    super('Bunny Stream API is temporarily unavailable (circuit open). Retry shortly.');
+    this.name = 'BunnyCircuitOpenError';
+    this.statusCode = 503;
+  }
+}
+
+// ─── Circuit breaker ─────────────────────────────────────────────────────────
+//
+// State machine: CLOSED → (threshold 5xx/network failures) → OPEN
+//                OPEN   → (cooldown elapsed)             → HALF_OPEN
+//                HALF_OPEN → (single probe succeeds)     → CLOSED
+//                           (probe fails)                → OPEN
+//
+// Fail-open for reads (getVideo): when OPEN, return last-known-good metadata
+// so reconciliation/playback flows are non-fatal during a Bunny outage.
+// Fail-fast for writes (create/delete/upload): when OPEN, throw immediately
+// instead of waiting for timeouts that would just fail.
+
+const CIRCUIT_FAILURE_THRESHOLD = 3;
+const CIRCUIT_COOLDOWN_MS = 30000;
+
+const circuit = {
+  state: 'CLOSED',          // CLOSED | OPEN | HALF_OPEN
+  consecutiveFailures: 0,
+  openedAt: 0,
+  probeInFlight: false,
+  /** @type {Map<string, { data: object, at: number }>} last successful getVideo per bunnyVideoId */
+  lastKnownGood: new Map(),
+};
+
+function checkCircuit() {
+  if (circuit.state === 'OPEN') {
+    if (circuit.probeInFlight) {
+      return 'CIRCUIT_OPEN';
+    }
+    if (Date.now() - circuit.openedAt >= CIRCUIT_COOLDOWN_MS) {
+      circuit.state = 'HALF_OPEN';
+      // fall through — one probe allowed
+    } else {
+      return 'CIRCUIT_OPEN';
+    }
+  }
+  if (circuit.state === 'HALF_OPEN') {
+    if (circuit.probeInFlight) return 'CIRCUIT_OPEN';
+    circuit.probeInFlight = true;
+    return 'HALF_OPEN_PROBE';
+  }
+  // CLOSED
+  return 'CLOSED';
+}
+
+/** Mark a call as successful (reset failures; close circuit if probe passed). */
+function circuitSuccess() {
+  circuit.consecutiveFailures = 0;
+  if (circuit.state === 'HALF_OPEN') {
+    circuit.state = 'CLOSED';
+    circuit.probeInFlight = false;
+  }
+}
+
+/**
+ * Mark a call as a failure toward the circuit (5xx / timeout / network error).
+ * 4xx are NOT circuit failures — they're client errors, not Bunny outages.
+ */
+function circuitFailure(err, statusCode) {
+  const isFailure =
+    (statusCode >= 500 && statusCode < 600) ||
+    (err && (
+      err.name === 'TimeoutError' ||
+      err.name === 'AbortError' ||
+      err.code === 'ECONNRESET' ||
+      err.code === 'ECONNREFUSED' ||
+      err.code === 'EPIPE' ||
+      err.code === 'UND_ERR_SOCKET' ||
+      err.code === 'BUNNY_UPLOAD_STALLED'
+    ));
+
+  if (!isFailure) return; // 4xx / unknown → don't count
+
+  circuit.consecutiveFailures += 1;
+  if (circuit.state === 'HALF_OPEN' || circuit.consecutiveFailures >= CIRCUIT_FAILURE_THRESHOLD) {
+    circuit.state = 'OPEN';
+    circuit.openedAt = Date.now();
+  }
+  circuit.probeInFlight = false;
+}
+
+/**
+ * Generic gate wrapper. `fn` must return the promise. `failOpenFallback` is
+ * called instead of throwing when the circuit is OPEN and available (only
+ * used by getVideo to return cached metadata). If fallback is null/undefined
+ * the circuit-open error is thrown.
+ */
+async function gateCall(fn, failOpenFallback) {
+  const gate = checkCircuit();
+  if (gate === 'CIRCUIT_OPEN') {
+    if (typeof failOpenFallback === 'function') return failOpenFallback();
+    throw new BunnyCircuitOpenError();
+  }
+  try {
+    const result = await fn();
+    circuitSuccess();
+    return result;
+  } catch (err) {
+    // Circuit tracking for the raw HTTP layer: pass the status code
+    // from BunnyApiError (if present) to circuitFailure for 5xx detection.
+    circuitFailure(err, err instanceof BunnyApiError ? err.statusCode : undefined);
+    throw err;
+  }
+}
+
 // ─── Video CRUD ───────────────────────────────────────────────────────────────
 
 /**
  * Create a new video object in Bunny's library.
  * Must be called before uploading — Bunny requires a video object to exist first.
+ * Trips the circuit breaker on 5xx/network errors.
  *
  * @param {object} params
  * @param {string} params.title - Video title
@@ -78,72 +196,102 @@ class BunnyApiError extends Error {
  * @returns {Promise<object>} Bunny video object (contains .guid used as bunnyVideoId)
  */
 async function createVideo({ title, collectionId }) {
-  const url = `https://${BUNNY_HOST}/library/${libId()}/videos`;
-  const body = { title };
-  if (collectionId) body.collectionId = collectionId;
+  return gateCall(async () => {
+    const url = `https://${BUNNY_HOST}/library/${libId()}/videos`;
+    const body = { title };
+    if (collectionId) body.collectionId = collectionId;
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: authHeaders(),
-    body: JSON.stringify(body),
-    // Hung metadata calls must not pin handlers: the upload stream itself
-    // stays untimed (multi-GB uploads are legitimately slow).
-    signal: AbortSignal.timeout(BUNNY_API_TIMEOUT_MS),
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify(body),
+      // Hung metadata calls must not pin handlers: the upload stream itself
+      // stays untimed (multi-GB uploads are legitimately slow).
+      signal: AbortSignal.timeout(BUNNY_API_TIMEOUT_MS),
+    });
+
+    if (!res.ok) {
+      throw new BunnyApiError(res.status, await res.text());
+    }
+
+    return res.json(); // { guid, videoLibraryId, title, ... }
   });
-
-  if (!res.ok) {
-    throw new BunnyApiError(res.status, await res.text());
-  }
-
-  return res.json(); // { guid, videoLibraryId, title, ... }
 }
 
 /**
  * Fetch metadata for an existing Bunny video.
  * Used by the reconciliation job to poll encoding status.
+ * Fail-open: when the circuit is OPEN, serves last-known-good metadata (with
+ * a `_stale` flag) so reads never fail fully during a Bunny outage. Writes
+ * trip; reads degrade.
  *
  * @param {string} bunnyVideoId - The Bunny video GUID
  * @returns {Promise<object>} Bunny video metadata (contains .status, .duration, etc.)
  */
 async function getVideo(bunnyVideoId) {
-  const url = `https://${BUNNY_HOST}/library/${libId()}/videos/${bunnyVideoId}`;
+  return gateCall(
+    async () => {
+      const url = `https://${BUNNY_HOST}/library/${libId()}/videos/${bunnyVideoId}`;
 
-  const res = await fetch(url, {
-    headers: {
-      AccessKey: process.env.BUNNY_STREAM_API_KEY,
-      Accept: 'application/json',
+      const res = await fetch(url, {
+        headers: {
+          AccessKey: process.env.BUNNY_STREAM_API_KEY,
+          Accept: 'application/json',
+        },
+        signal: AbortSignal.timeout(BUNNY_API_TIMEOUT_MS),
+      });
+
+      if (!res.ok) {
+        throw new BunnyApiError(res.status, await res.text());
+      }
+
+      const data = await res.json();
+      // Cache the latest successful metadata for fail-open reads. Bound the
+      // map to the reconciliation job's worked set (only PROCESSING/READY
+      // videos are ever polled); evict by FIFO when the cap is hit.
+      if (circuit.lastKnownGood.size >= 10000) {
+        const oldestKey = circuit.lastKnownGood.keys().next().value;
+        circuit.lastKnownGood.delete(oldestKey);
+      }
+      circuit.lastKnownGood.set(bunnyVideoId, { data, at: Date.now() });
+      return data;
     },
-    signal: AbortSignal.timeout(BUNNY_API_TIMEOUT_MS),
-  });
-
-  if (!res.ok) {
-    throw new BunnyApiError(res.status, await res.text());
-  }
-
-  return res.json();
+    () => {
+      // OPEN fallback: serve cached metadata with a stale marker. Callers
+      // (reconciliation) treat stale data non-destructively — see
+      // reconcileStaleVideos's re-check on next tick.
+      const cached = circuit.lastKnownGood.get(bunnyVideoId);
+      if (cached) return { ...cached.data, _stale: true, _cachedAt: cached.at };
+      throw new BunnyCircuitOpenError();
+    }
+  );
 }
 
 /**
  * Delete a Bunny video object.
  * Called as compensation when a DB insert fails after a successful Bunny create.
+ * Trips the circuit breaker on 5xx/network errors (404 is NOT a trip — it's a
+ * benign "already gone").
  *
  * @param {string} bunnyVideoId - The Bunny video GUID
  * @returns {Promise<void>}
  */
 async function deleteVideo(bunnyVideoId) {
-  const url = `https://${BUNNY_HOST}/library/${libId()}/videos/${bunnyVideoId}`;
+  return gateCall(async () => {
+    const url = `https://${BUNNY_HOST}/library/${libId()}/videos/${bunnyVideoId}`;
 
-  const res = await fetch(url, {
-    method: 'DELETE',
-    headers: {
-      AccessKey: process.env.BUNNY_STREAM_API_KEY,
-    },
-    signal: AbortSignal.timeout(BUNNY_API_TIMEOUT_MS),
+    const res = await fetch(url, {
+      method: 'DELETE',
+      headers: {
+        AccessKey: process.env.BUNNY_STREAM_API_KEY,
+      },
+      signal: AbortSignal.timeout(BUNNY_API_TIMEOUT_MS),
+    });
+
+    if (!res.ok) {
+      throw new BunnyApiError(res.status, await res.text());
+    }
   });
-
-  if (!res.ok) {
-    throw new BunnyApiError(res.status, await res.text());
-  }
 }
 
 // ─── Upload ───────────────────────────────────────────────────────────────────
@@ -163,7 +311,7 @@ async function deleteVideo(bunnyVideoId) {
  * @returns {Promise<object>} Bunny upload response body
  */
 function uploadVideoStream({ bunnyVideoId, fileStream }) {
-  return new Promise((resolve, reject) => {
+  return gateCall(async () => new Promise((resolve, reject) => {
     // Guard: once the promise settles (success or error), the watchdog must
     // no-op.  Without this, a timer armed on a keep-alive socket could fire
     // after the upload completes, calling req.destroy() on a pooled socket
@@ -210,6 +358,9 @@ function uploadVideoStream({ bunnyVideoId, fileStream }) {
       const err = new Error(
         `Bunny upload stalled — no data for ${Math.round(BUNNY_UPLOAD_INACTIVITY_TIMEOUT_MS / 1000)}s`
       );
+      // Tag for the circuit breaker: a stall is an outage signal, not a
+      // sample failure.
+      err.code = 'BUNNY_UPLOAD_STALLED';
       settled = true;
       fileStream.unpipe(req);
       req.destroy(err);
@@ -223,7 +374,7 @@ function uploadVideoStream({ bunnyVideoId, fileStream }) {
     });
 
     fileStream.pipe(req);
-  });
+  }));
 }
 
 // ─── Token Auth ───────────────────────────────────────────────────────────────
@@ -311,4 +462,5 @@ module.exports = {
   generatePlaybackToken,
   verifyWebhookSignature,
   BunnyApiError,
+  BunnyCircuitOpenError,
 };
