@@ -151,7 +151,14 @@ const uploadBunnyVideo = async (req, res, next) => {
     }
 
     // Validate MIME type from busboy info (server-parsed, not client-trusted directly —
-    // we use it as a hint; Bunny will also validate the actual bitstream)
+    // we use it as a hint; Bunny will also validate the actual bitstream).
+    //
+    // SECURITY DECISION (S4, Security Round 2 — deliberate, documented): we
+    // deliberately do NOT implement magic-byte sniffing. The MIME hint here is
+    // a coarse allow-list gate; authoritative video validation is Bunny's own
+    // bitstream parsing after upload (an attacker who fakes a MIME type gets a
+    // FAILED processing state, never a stored/non-video object). Residual risk
+    // is upload-processing cost on files Bunny then rejects — accepted.
     const mimeType = (info.mimeType || '').toLowerCase();
     if (!ALLOWED_MIME_TYPES.has(mimeType)) {
       fileStream.resume(); // drain stream to avoid hanging connection

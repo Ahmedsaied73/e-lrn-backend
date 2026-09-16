@@ -164,14 +164,29 @@ last and the deprecation parked.
 
 ### Checkpoint F — complete
 - [x] All per-task acceptance criteria met; `node --check` clean; `npm test`
-  green; per-item commits (`8928745`); no BE API/behavior change requiring FE
+  green; per-item commits (`d0c0907`, `8928745`); no BE API/behavior change requiring FE
   `frontend-handoff.md` updates (I2 matches cookie that was already 15 min; J1
   is a new admin-only surface).
+
+### Post-Checkpoint F review pass (three-engineer adversarial review, `8928745..1aceaa6`)
+
+Five-axis review (correctness, security, architecture, performance, reliability)
+of the full round diff before declaring "done." Three real findings caught and
+fixed in two commits:
+
+| Finding | Axis | Severity | Fix | Commit |
+|---------|------|----------|-----|--------|
+| `getCourseById` destructures `null` from cache loader on unknown id → 500 instead of 404 | Correctness | **Critical** | Capture withCache result, check `!cachedResult` before destructure. Live smoke confirmed 404 restored (R404 5/5). | `a3cd676` |
+| `uploadVideoStream` inactivity watchdog armed on socket fires post-settlement → latent `req.destroy()` on a pooled socket if keepAlive agent introduced | Reliability | Required | Settled-guard flag (`let settled = false`) on all resolve/reject/destroy paths; no-op once promise settled. | `a3cd676` |
+| `removeQuizImagesBestEffort` runs `extractBucketObjectNames` + `getSupabaseAdmin()` even when Supabase is not configured → noisy error log + wasted JSON.parse | Correctness/Nit | Optional | Early `if (!isSupabaseConfigured()) return;` guard. | `a3cd676` |
+| `gradeSubmission` claims "0-100" but `!grade` rejects the raw integer `0` | Correctness | Required | Parse via explicit `Number(rawGrade)` with null/undefined/empty check; reuse single parsed value. | `1aceaa6` |
 
 ## Parked (need user order — do NOT start)
 - **P-A S4: MIME magic-byte sniffing** — **DECIDED (grill, held): keep client MIME
   hint + document limitation (comment + tracking note); do NOT implement the
   transform stream.** Bunny re-validates the bitstream, so residual risk is low.
+  **Documentation done:** SECURITY DECISION comment on the upload MIME allow-list
+  gate (`bunnyVideoController.js`, commit `f3a2d7e` round).
 - **P-B I4: legacy `Video` model deprecation/migration** — ADR + migration plan
   needed; large, cross-cutting, out of scope until user directs.
 - **P-C** Existing `tasks/todo.md` run-to-zero leftovers (R3, R6, R7, R8 FE parts)
