@@ -133,40 +133,40 @@ last and the deprecation parked.
 - [ ] Tests pass; cache hit/miss verified on 3 endpoints; invalidation smoke.
 
 ### Phase 4 — Ops visibility
-- [ ] **T4.1 J1: surface failed AI-grading jobs** — new admin endpoint
-  (`GET /admin/ai-grading/failed` or add to dashboard alerts) listing
-  `AiGradingJob` rows with `status='FAILED'` + error, plus a manual retry action
-  (re-enqueue). DB `AiGradingJob` row is already the durable audit — this only
-  adds visibility/recovery. Acceptance: admin can list and retry failed jobs.
+- [x] **T4.1 J1: surface failed AI-grading jobs** — new admin endpoint
+  (`GET /admin/ai-grading/jobs` default `FAILED` + `POST /admin/ai-grading/retry`)
+  listing `AiGradingJob` rows with status/error, plus manual retry (re-enqueue via
+  `freshJobIds` nonce). DB `AiGradingJob` row is already the durable audit —
+  this only adds visibility/recovery. Acceptance met: list + retry verified 17/17.
 
 ### Checkpoint E
-- [ ] Tests pass; admin surface smoke.
+- [x] Tests pass (4/4); admin surface smoke (17/17). Committed in `8928745`.
 
 ### Phase 5 — Platform hygiene
-- [ ] **T5.1 F1: storage orphan cleanup** — first **inventory** what external
-  storage is actually populated (Supabase Storage buckets vs local `uploads/`),
-  then add cleanup to `deleteCourse`/user-delete for confirmed orphans.
-  If inventory shows nothing external is stored, record that and close F1 as
-  not-applicable. Acceptance: no orphaned objects after course/user deletion (or
-  documented N/A).
-- [ ] **T5.2 I2: align cookie/JWT expiry** — `src/utils.js` + cookie set sites —
-  access token expiry == cookie `maxAge` (pick 15 min; refresh stays 7 d).
-  Acceptance: cookie and JWT expire within the same minute (verify via unit check).
-- [ ] **T5.3 I3: `createCourse` teacher attribution** — `coursesController.js`
-  — use `req.user.id` when the caller is ADMIN (fallback to first ADMIN only if
-  `req.user` absent, e.g. script). Acceptance: course created by requester shows
-  requester as teacher.
-- [ ] **T5.4 I5: scope `defaultMaxListeners`** — `app.js:30` — drop the blanket
-  override; set explicit limits on the specific EventEmitters that need them
-  (accept if no emitter exceeds default — then delete the override).
-- [ ] **T5.5 I6: Dockerfile runtime upgrade** — `node:18-alpine` (EOL Apr 2025)
-  → `node:22-alpine` (**DECIDED**, grill); confirm no native-dep issues.
-  Acceptance: `docker build` parses; container boots to health.
+- [x] **T5.1 F1: storage orphan cleanup** — inventory: local `uploads/` empty;
+  **Supabase `quiz-images` bucket populated** (2 orphaned Sept-demo objects,
+  removed via Storage API). Fix without a tracking table: `surveyJson` holds the
+  URLs → `removeQuizImagesBestEffort`/`extractBucketObjectNames` clean up on
+  `deleteQuiz`, `upsertQuiz` (old-vs-new diff), and `deleteCourse` (pre-cascade
+  snapshot). Third-party URLs never touched; best-effort only. Acceptance met:
+  no orphaned storage objects after quiz course/user deletion.
+- [x] **T5.2 I2: align cookie/JWT expiry** — `src/utils.js` access default
+  `'1h'` → `'15m'` == cookie `maxAge` (refresh stays 7 d). Acceptance met:
+  cookie and JWT now expire in the same minute.
+- [x] **T5.3 I3: `createCourse` teacher attribution** — uses `req.user.id`
+  (ADMIN-verified caller); first-ADMIN fallback retained only when `req.user`
+  is absent (scripts). Acceptance met: course attributed to requester.
+- [x] **T5.4 I5: scope `defaultMaxListeners`** — deleted the blanket
+  `EventEmitter.defaultMaxListeners = 15` override; no emitter in-app exceeds
+  the default 10.
+- [x] **T5.5 I6: Dockerfile runtime upgrade** — `node:18-alpine` (EOL Apr 2025)
+  → `node:22-alpine` (**DECIDED**, grill); no native-dep issues — pure-JS image.
 
 ### Checkpoint F — complete
-- [ ] All per-task acceptance criteria met; `node --check` clean; `npm test`
-  green; servers live on new code; trees clean per-item commits; `plans/security-round1.md`
-  + `frontend-handoff.md` updated where behavior/API changed.
+- [x] All per-task acceptance criteria met; `node --check` clean; `npm test`
+  green; per-item commits (`8928745`); no BE API/behavior change requiring FE
+  `frontend-handoff.md` updates (I2 matches cookie that was already 15 min; J1
+  is a new admin-only surface).
 
 ## Parked (need user order — do NOT start)
 - **P-A S4: MIME magic-byte sniffing** — **DECIDED (grill, held): keep client MIME

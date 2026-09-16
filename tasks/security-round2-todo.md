@@ -36,17 +36,22 @@ Do NOT touch the unrelated `tasks/todo.md` run-to-zero workstream.
 - [x] Tests pass (4/4); smoke 17/17 incl. single-flight 5→1, P2 cross-user isolation + enroll/unenroll invalidation, dashboard + search identical-repeat; DB net-zero after runs
 
 ## Phase 4 — Ops visibility
-- [ ] T4.1 J1: admin surface for failed `AiGradingJob`s (list + retry)
+- [x] T4.1 J1: admin surface for failed `AiGradingJob`s (list + retry)
+  - GET `/admin/ai-grading/jobs?status=&page=&limit=&search=` — default **FAILED**, leak-safe select (never answerKey/responses/essayFeedback), limit clamp 1..100, `{ success, data, pagination }`
+  - POST `/admin/ai-grading/retry` — body `{ attemptIds?: number[] }`; 400 on invalid; absent body → **all FAILED attempts**; per-attempt before/after FAILED counts; lazy-require + never-throw (no-op if aiGrader folder deleted)
+  - `enqueueAiGrading(attemptId, { freshJobIds })` — appends `-<base36 ts>` nonce to BullMQ jobId so a manual retry re-adds past `removeOnFail: 5000` dedupe (DB upsert + worker re-validation keep idempotency; normal submit path untouched)
 
 ### Checkpoint E
-- [ ] Tests pass; admin surface smoke
+- [x] Tests pass (4/4); J1 smoke 17/17 (list envelope, leak-safe, status filters, 400/limit-clamp, 401/403 authz, retry validation, no-op, synthetic FAILED row search+retry, zero side effects; non-GRADING attempt so no real Gemini job fires)
 
 ## Phase 5 — Platform hygiene
-- [ ] T5.1 F1: inventory external storage usage, then orphan cleanup (or record N/A)
-- [ ] T5.2 I2: align access cookie maxAge ↔ JWT expiry (15 min; refresh 7 d)
-- [ ] T5.3 I3: `createCourse` attributes to `req.user.id` when ADMIN
-- [ ] T5.4 I5: remove/scope blanket `defaultMaxListeners = 15` (`app.js:30`)
-- [ ] T5.5 I6: Dockerfile `node:22-alpine` (DECIDED)
+- [x] T5.1 F1: inventory external storage usage, then orphan cleanup
+  - Inventory: local `uploads/` = 0 files (5 empty subdirs); **Supabase `quiz-images` bucket IS used** (upload `POST /quizzes/images` → UUID filename, no tracking table). Found 2 orphaned objects (Sept 9 demo) → cross-checked zero quiz references → removed via Storage API. Bucket now empty.
+  - Fix (no schema change needed — surveyJson IS the source of truth): `removeQuizImagesBestEffort` + `extractBucketObjectNames` in `supabaseClient.js`; wired into `deleteQuiz`, `upsertQuiz` old-vs-new image diff, and `deleteCourse` (snapshot quiz surveyJsons pre-cascade). Third-party URLs never touched; best-effort only.
+- [x] T5.2 I2: align access cookie maxAge ↔ JWT expiry (15 min; refresh 7 d) — `src/utils.js` default `'1h'` → `'15m'` (matches `cookie.js` access maxAge exactly)
+- [x] T5.3 I3: `createCourse` attributes to `req.user.id` (authenticated ADMIN) with first-ADMIN fallback for scripts
+- [x] T5.4 I5: removed blanket `defaultMaxListeners = 15` (`app.js`) — no emitter in-app needs >10
+- [x] T5.5 I6: Dockerfile `node:22-alpine` (DECIDED)
 
 ### Checkpoint F — complete
 - [ ] All acceptance criteria met; `node --check` clean; `npm test` green; servers live on new code; per-item commits; `plans/security-round1.md` + FE `frontend-handoff.md` updated where behavior changed
