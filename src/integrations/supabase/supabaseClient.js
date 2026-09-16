@@ -85,6 +85,7 @@ function extractBucketObjectNames(surveyJson) {
  */
 async function removeQuizImagesBestEffort(surveyJson) {
   try {
+    if (!isSupabaseConfigured()) return;
     const objects = extractBucketObjectNames(surveyJson);
     if (objects.length === 0) return;
     const { error } = await getSupabaseAdmin().storage.from(getSupabaseBucket()).remove(objects);

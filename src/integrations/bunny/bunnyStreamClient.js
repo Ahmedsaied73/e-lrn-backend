@@ -164,6 +164,12 @@ async function deleteVideo(bunnyVideoId) {
  */
 function uploadVideoStream({ bunnyVideoId, fileStream }) {
   return new Promise((resolve, reject) => {
+    // Guard: once the promise settles (success or error), the watchdog must
+    // no-op.  Without this, a timer armed on a keep-alive socket could fire
+    // after the upload completes, calling req.destroy() on a pooled socket
+    // that another request may have started using.
+    let settled = false;
+
     const req = https.request(
       {
         hostname: BUNNY_HOST,
@@ -180,19 +186,19 @@ function uploadVideoStream({ bunnyVideoId, fileStream }) {
         res.on('end', () => {
           if (res.statusCode >= 200 && res.statusCode < 300) {
             try {
-              resolve(JSON.parse(body));
+              if (!settled) { settled = true; resolve(JSON.parse(body)); }
             } catch {
-              resolve({ success: true }); // Bunny may return empty body on success
+              if (!settled) { settled = true; resolve({ success: true }); }
             }
           } else {
-            reject(new BunnyApiError(res.statusCode, body));
+            if (!settled) { settled = true; reject(new BunnyApiError(res.statusCode, body)); }
           }
         });
       }
     );
 
     req.on('error', (err) => {
-      reject(err);
+      if (!settled) { settled = true; reject(err); }
     });
 
     // Inactivity watchdog (F2/S3): if NO bytes flow through the socket for
@@ -200,11 +206,11 @@ function uploadVideoStream({ bunnyVideoId, fileStream }) {
     // socket idle timer resets on every activity, so a slow-but-flowing
     // multi-GB upload is never affected.
     req.setTimeout(BUNNY_UPLOAD_INACTIVITY_TIMEOUT_MS, () => {
+      if (settled) return; // upload already succeeded/failed — idle timer is on a pooled socket
       const err = new Error(
         `Bunny upload stalled — no data for ${Math.round(BUNNY_UPLOAD_INACTIVITY_TIMEOUT_MS / 1000)}s`
       );
-      // Stop feeding Bunny and reject. req.destroy() also triggers req 'error'
-      // downstream, but reject() here is idempotent — the promise settles once.
+      settled = true;
       fileStream.unpipe(req);
       req.destroy(err);
       reject(err);
@@ -213,8 +219,7 @@ function uploadVideoStream({ bunnyVideoId, fileStream }) {
     // If the incoming file stream errors (e.g. client disconnected),
     // destroy the outgoing Bunny request and propagate the error.
     fileStream.on('error', (err) => {
-      req.destroy();
-      reject(err);
+      if (!settled) { settled = true; req.destroy(); reject(err); }
     });
 
     fileStream.pipe(req);

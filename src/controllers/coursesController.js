@@ -114,7 +114,7 @@ const getCourseById = async (req, res) => {
     // create/update/delete already invalidate all `v1:courses:*` keys via
     // delPrefix; enrollment/progress mutations del their own key below.
     const cacheKey = cache.buildKey('courses', 'byid', courseId, `u${userId}`);
-    const { course, progress, enrollment } = await cache.withCache(cacheKey, 60, async () => {
+    const cachedResult = await cache.withCache(cacheKey, 60, async () => {
       const row = await prisma.course.findUnique({
         where: { id: courseId },
         include: {
@@ -164,9 +164,10 @@ const getCourseById = async (req, res) => {
       };
     });
 
-    if (!course) {
+    if (!cachedResult) {
       return res.status(404).json({ success: false, error: 'Course not found' });
     }
+    const { course, progress, enrollment } = cachedResult;
 
     const baseUrl = `${req.protocol}://${req.get('host')}`;
 
