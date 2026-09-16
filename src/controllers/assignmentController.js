@@ -479,7 +479,9 @@ const gradeSubmission = async (req, res) => {
     const { submissionId } = req.params;
     const { grade, feedback, status } = req.body;
 
-    if (!grade || isNaN(parseFloat(grade)) || parseFloat(grade) < 0 || parseFloat(grade) > 100) {
+    const rawGrade = grade;
+    const parsedGrade = rawGrade === null || rawGrade === undefined || rawGrade === '' ? NaN : Number(rawGrade);
+    if (!Number.isFinite(parsedGrade) || parsedGrade < 0 || parsedGrade > 100) {
       return res.status(400).json({ error: 'Valid grade (0-100) is required' });
     }
 
@@ -504,7 +506,7 @@ const gradeSubmission = async (req, res) => {
     const updatedSubmission = await prisma.submission.update({
       where: { id: parsedSubmissionId },
       data: {
-        grade: parseFloat(grade),
+        grade: parsedGrade,
         feedback,
         status: status || 'GRADED',
         gradedAt: new Date()
