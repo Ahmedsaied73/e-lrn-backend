@@ -1,4 +1,34 @@
 const prisma = require('../config/db');
+const { isAdmin } = require('../middlewares');
+
+/**
+ * Parse a positive-signed 32-bit integer from a route/body param.
+ * Returns null when input is missing, not a safe integer, or non-positive —
+ * malformed IDs ("abc", "1.5", "-1", overflow) otherwise 500 in Prisma.
+ */
+function parseId(raw) {
+  const n = parseInt(raw, 10);
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+
+const MAX_FILE_URL_LENGTH = 2048;
+
+/**
+ * Validate a student-supplied file URL. Only http(s) is accepted and the
+ * length is capped so a hostile value cannot poison stored responses or
+ * script-like URLs (javascript:/data:/file:) be persisted.
+ */
+function isValidFileUrl(fileUrl) {
+  if (typeof fileUrl !== 'string' || fileUrl.length === 0 || fileUrl.length > MAX_FILE_URL_LENGTH) {
+    return false;
+  }
+  try {
+    const parsed = new URL(fileUrl);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Create a new assignment (admin only)
@@ -18,9 +48,14 @@ const createAssignment = async (req, res) => {
       return res.status(400).json({ error: 'Video ID is required' });
     }
 
+    const parsedVideoId = parseId(videoId);
+    if (parsedVideoId === null) {
+      return res.status(400).json({ error: 'Valid video ID is required' });
+    }
+
     // Verify the video exists
     const video = await prisma.video.findUnique({
-      where: { id: parseInt(videoId) },
+      where: { id: parsedVideoId },
       select: { id: true, courseId: true }
     });
 
@@ -37,7 +72,7 @@ const createAssignment = async (req, res) => {
         isMCQ: isMCQ === true,
         passingScore: isMCQ === true ? parseFloat(passingScore) || 70.0 : 70.0, // Default value for non-MCQ assignments
         video: {
-          connect: { id: parseInt(videoId) }
+          connect: { id: parsedVideoId }
         }
       }
     });
@@ -94,9 +129,14 @@ const getAssignment = async (req, res) => {
     const { id } = req.params;
     const userId = req.user.id;
 
+    const assignmentId = parseId(id);
+    if (assignmentId === null) {
+      return res.status(400).json({ error: 'Invalid assignment ID format' });
+    }
+
     // Fetch the assignment
     const assignment = await prisma.assignment.findUnique({
-      where: { id: parseInt(id, 10) },
+      where: { id: assignmentId },
       include: {
         video: {
           select: {
@@ -113,8 +153,8 @@ const getAssignment = async (req, res) => {
       return res.status(404).json({ error: 'Assignment not found' });
     }
 
-    // Check if user is enrolled in the course
-    if (req.user.role !== 'ADMIN') {
+    // Check if user is enrolled in the course (DB-verified admin bypass)
+    if (!(await isAdmin(req))) {
       const enrollment = await prisma.enrollment.findFirst({
         where: {
           userId: userId,
@@ -135,7 +175,7 @@ const getAssignment = async (req, res) => {
       where: {
         userId_assignmentId: {
           userId: userId,
-          assignmentId: parseInt(id)
+          assignmentId: assignmentId
         }
       }
     });
@@ -166,7 +206,7 @@ const getAssignment = async (req, res) => {
 
     // Security: never leak answer keys (correctOption/explanation) to students
     // who have NOT submitted yet — they could read the keys before attempting.
-    if (!submission && req.user.role !== 'ADMIN') {
+    if (!submission && !(await isAdmin(req))) {
       assignment.AssignmentQuestion = assignment.AssignmentQuestion.map((question) => {
         const { correctOption, explanation, ...safeQuestion } = question;
         return safeQuestion;
@@ -199,9 +239,14 @@ const submitAssignment = async (req, res) => {
       return res.status(400).json({ error: 'Assignment ID is required' });
     }
 
+    const parsedAssignmentId = parseId(assignmentId);
+    if (parsedAssignmentId === null) {
+      return res.status(400).json({ error: 'Valid assignment ID is required' });
+    }
+
     // Verify the assignment exists
     const assignment = await prisma.assignment.findUnique({
-      where: { id: parseInt(assignmentId, 10) },
+      where: { id: parsedAssignmentId },
       include: {
         video: {
           select: {
@@ -225,10 +270,15 @@ const submitAssignment = async (req, res) => {
       if (!content && !fileUrl) {
         return res.status(400).json({ error: 'Content or file URL is required for non-MCQ assignments' });
       }
+      // Security: only well-formed http(s) URLs may be persisted — nothing
+      // script-like (javascript:/data:), and a hard length ceiling.
+      if (fileUrl && !isValidFileUrl(fileUrl)) {
+        return res.status(400).json({ error: 'A valid http(s) file URL (max 2048 chars) is required' });
+      }
     }
 
-    // Verify user is enrolled in the course
-    if (req.user.role !== 'ADMIN') {
+    // Verify user is enrolled in the course (DB-verified admin bypass)
+    if (!(await isAdmin(req))) {
       const enrollment = await prisma.enrollment.findFirst({
         where: {
           userId: userId,
@@ -257,7 +307,7 @@ const submitAssignment = async (req, res) => {
       where: {
         userId_assignmentId: {
           userId: userId,
-          assignmentId: parseInt(assignmentId)
+          assignmentId: parsedAssignmentId
         }
       }
     });
@@ -351,7 +401,7 @@ const submitAssignment = async (req, res) => {
         return tx.submission.create({
           data: {
             userId: userId,
-            assignmentId: parseInt(assignmentId),
+            assignmentId: parsedAssignmentId,
             content: assignment.isMCQ ? null : content,
             fileUrl: assignment.isMCQ ? null : fileUrl,
             mcqScore: assignment.isMCQ ? mcqScore : null,
@@ -385,7 +435,7 @@ const submitAssignment = async (req, res) => {
         return tx.submission.create({
           data: {
             userId: userId,
-            assignmentId: parseInt(assignmentId),
+            assignmentId: parsedAssignmentId,
             content: assignment.isMCQ ? null : content,
             fileUrl: assignment.isMCQ ? null : fileUrl,
             mcqScore: assignment.isMCQ ? mcqScore : null,
@@ -429,13 +479,18 @@ const gradeSubmission = async (req, res) => {
     const { submissionId } = req.params;
     const { grade, feedback, status } = req.body;
 
-    if (!grade || isNaN(parseFloat(grade))) {
-      return res.status(400).json({ error: 'Valid grade is required' });
+    if (!grade || isNaN(parseFloat(grade)) || parseFloat(grade) < 0 || parseFloat(grade) > 100) {
+      return res.status(400).json({ error: 'Valid grade (0-100) is required' });
+    }
+
+    const parsedSubmissionId = parseId(submissionId);
+    if (parsedSubmissionId === null) {
+      return res.status(400).json({ error: 'Valid submission ID is required' });
     }
 
     // Verify the submission exists
     const submission = await prisma.submission.findUnique({
-      where: { id: parseInt(submissionId) },
+      where: { id: parsedSubmissionId },
       include: {
         assignment: true
       }
@@ -447,7 +502,7 @@ const gradeSubmission = async (req, res) => {
 
     // Update the submission with grade and feedback
     const updatedSubmission = await prisma.submission.update({
-      where: { id: parseInt(submissionId) },
+      where: { id: parsedSubmissionId },
       data: {
         grade: parseFloat(grade),
         feedback,
@@ -476,9 +531,14 @@ const getVideoAssignments = async (req, res) => {
     const { videoId } = req.params;
     const userId = req.user.id;
 
+    const parsedVideoId = parseId(videoId);
+    if (parsedVideoId === null) {
+      return res.status(400).json({ error: 'Valid video ID is required' });
+    }
+
     // Verify the video exists
     const video = await prisma.video.findUnique({
-      where: { id: parseInt(videoId) },
+      where: { id: parsedVideoId },
       select: { id: true, courseId: true }
     });
 
@@ -486,8 +546,8 @@ const getVideoAssignments = async (req, res) => {
       return res.status(404).json({ error: 'Video not found' });
     }
 
-    // Check if user is enrolled in the course
-    if (req.user.role !== 'ADMIN') {
+    // Check if user is enrolled in the course (DB-verified admin bypass)
+    if (!(await isAdmin(req))) {
       const enrollment = await prisma.enrollment.findFirst({
         where: {
           userId: userId,
@@ -505,7 +565,7 @@ const getVideoAssignments = async (req, res) => {
 
     // Get all assignments for the video
     const assignments = await prisma.assignment.findMany({
-      where: { videoId: parseInt(videoId) },
+      where: { videoId: parsedVideoId },
       orderBy: { createdAt: 'desc' }
     });
 
@@ -669,6 +729,24 @@ const getAssignmentStatus = async (req, res) => {
       return res.status(404).json({ error: 'Assignment not found' });
     }
 
+    // Enrollment gate (DB-verified admin bypass) — mirrors getAssignment so an
+    // unenrolled user can't probe assignment existence/titles for other courses.
+    if (!(await isAdmin(req))) {
+      const enrollment = await prisma.enrollment.findFirst({
+        where: {
+          userId: userId,
+          courseId: assignment.video.courseId,
+          isPaid: true
+        }
+      });
+
+      if (!enrollment) {
+        return res.status(403).json({
+          error: 'You must be enrolled in this course to access this assignment'
+        });
+      }
+    }
+
     // Check if the user has submitted this assignment
     const submission = await prisma.submission.findUnique({
       where: {
@@ -742,7 +820,7 @@ const getCourseAssignments = async (req, res) => {
       return res.status(404).json({ error: 'Course not found' });
     }
     // Check if user is enrolled in the course (same rule as video assignments)
-    if (req.user.role !== 'ADMIN') {
+    if (!(await isAdmin(req))) {
       const enrollment = await prisma.enrollment.findFirst({
         where: {
           userId: req.user.id,

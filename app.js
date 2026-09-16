@@ -15,6 +15,9 @@ const adminRoutes = require('./src/routes/adminRoutes');
 const { logger } = require('./src/middlewares/index');
 const requestLogger = logger();
 const rateLimit = require('express-rate-limit');
+const { createRateLimitStore } = require('./src/integrations/redis/rateLimitStore');
+const { isRedisEnabled } = require('./src/integrations/redis/redisClient');
+const redisStoreEnabled = isRedisEnabled();
 const helmet = require('helmet'); // S-5: security headers WITHOUT CSP (full CSP needs FE coordination)
 // Bunny Stream — new modules
 const bunnyVideoRoutes = require('./src/routes/bunnyVideoRoutes');
@@ -104,8 +107,25 @@ app.use(helmet({
 // The webhook handler needs the raw body Buffer for HMAC-SHA256 signature verification.
 // express.json() would consume and parse the body before we can read it as raw bytes.
 // express.raw() is scoped to this single path — it does NOT affect other routes.
+//
+// Scoped rate limiter (S3): runs FIRST so an attacker cannot spam status
+// updates. The limiter only counts requests by IP — it never parses the body,
+// so HMAC verification on the (possibly raw) body is unaffected. Distinct
+// `rl:webhook:` Redis namespace keeps webhook hits off the global counter.
+// 600 req / 5 min is generous for legit bursts (a whole course encoding can
+// fire hundreds of callbacks) while still cutting a flood; HMAC is the real
+// auth, the limiter is defense-in-depth. `keyGenerator` uses req.ip (already
+// resolved through `trust proxy`).
+const webhookLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 600,
+  message: 'Too many webhook requests, please try again later.',
+  ...(redisStoreEnabled ? { store: createRateLimitStore('rl:webhook:'), passOnStoreError: true } : {}),
+});
+
 app.post(
   '/webhooks/bunny/stream',
+  webhookLimiter,
   express.raw({ type: 'application/json', limit: '2mb' }),
   handleBunnyWebhook
 );
@@ -122,9 +142,6 @@ app.use(requestLogger);
 // (each admin page load costs ~2-3 API calls). Login stays at 20/15min below.
 // Store: shared Redis when configured (correct across instances), otherwise the
 // built-in MemoryStore. passOnStoreError keeps fail-open if Redis dies.
-const { createRateLimitStore } = require('./src/integrations/redis/rateLimitStore');
-const { isRedisEnabled } = require('./src/integrations/redis/redisClient');
-const redisStoreEnabled = isRedisEnabled();
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 1000, // limit each IP to 1000 requests per windowMs
@@ -268,8 +285,9 @@ const server = app.listen(port, () => {
     console.log(`Example app listening at http://localhost:${port}`);
     console.log('CORS enabled for configured origins');
 
-    // Start Bunny video reconciliation job (every 10 minutes)
-    startReconciliationJob();
+    // Start Bunny video reconciliation job (every 10 minutes). Keep the task
+    // handle so shutdown can stop it.
+    reconciliationTask = startReconciliationJob();
 
     // Crash recovery: uploads interrupted by a previous shutdown can never
     // resume (their process is gone) — mark them FAILED so re-upload works.
@@ -298,9 +316,46 @@ const server = app.listen(port, () => {
 // Closes the HTTP server, then drains Prisma + Redis so queued writes finish
 // instead of the platform SIGKILL-ing mid-transaction. Force-exit after 10s
 // so a hung connection can't keep the instance "up" after detach.
+let reconciliationTask = null; // node-cron task handle (stopped on shutdown)
+
 function shutdown(signal) {
   console.log(`[SHUTDOWN] ${signal} received — draining connections...`);
+
+  // Stop the reconciliation cron so a tick can't fire mid-drain.
+  try {
+    require('./src/jobs/reconcileStaleVideos').stopReconciliationJob(reconciliationTask);
+    reconciliationTask = null;
+  } catch (err) {
+    console.warn('[WARN] Reconciliation cron stop failed:', err.message);
+  }
+
+  // Close BullMQ worker + queue so their dedicated Redis connections are
+  // released before the shared client below. Guarded: modules self-exist only
+  // when started (Redis/AI key present).
+  const bullMqClosers = [];
+  try {
+    const worker = require('./src/services/aiGrader/worker');
+    if (worker && worker.stopAiGradingWorker) {
+      bullMqClosers.push(worker.stopAiGradingWorker());
+    }
+  } catch (err) {
+    console.warn('[WARN] AI worker stop failed:', err.message);
+  }
+  try {
+    const queue = require('./src/services/aiGrader/queue');
+    if (queue && queue.closeGradingQueue) {
+      bullMqClosers.push(queue.closeGradingQueue());
+    }
+  } catch (err) {
+    console.warn('[WARN] AI queue stop failed:', err.message);
+  }
+
   server.close(async () => {
+    try {
+      await Promise.allSettled(bullMqClosers);
+    } catch (err) {
+      console.warn('[WARN] BullMQ shutdown failed:', err.message);
+    }
     try {
       const prisma = require('./src/config/db');
       await prisma.$disconnect();

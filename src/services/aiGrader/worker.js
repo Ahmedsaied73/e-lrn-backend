@@ -283,9 +283,27 @@ function startAiGradingWorker(options = {}) {
   return worker;
 }
 
+/**
+ * Stop the worker gracefully (SIGTERM/SIGINT drain). No-op when never started.
+ * Closes the BullMQ worker so its dedicated Redis connection is released
+ * before the shared cache client is torn down.
+ */
+async function stopAiGradingWorker() {
+  if (!worker) return;
+  const toClose = worker;
+  worker = null;
+  try {
+    await toClose.close();
+    logInfo('ai.worker.stopped', { queue: QUEUE_NAME });
+  } catch (err) {
+    logWarn('ai.worker.stop_failed', { error: err.message });
+  }
+}
+
 module.exports = {
   QUEUE_NAME,
   processGradingJob,
   startAiGradingWorker,
+  stopAiGradingWorker,
   checkBudget, // exported for harness verification (tripwire math)
 };

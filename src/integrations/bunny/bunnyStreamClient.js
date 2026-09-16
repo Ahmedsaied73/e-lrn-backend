@@ -18,9 +18,16 @@ const crypto = require('crypto');
 const BUNNY_HOST = 'video.bunnycdn.com';
 
 // Hung metadata calls must not pin request handlers (Node fetch has no
-// timeout otherwise). The binary upload stream stays untimed — multi-GB
-// uploads are legitimately slow and busboy caps bound them instead.
+// timeout otherwise). The binary upload stream is *inactivity*-timed below
+// (BUNNY_UPLOAD_INACTIVITY_TIMEOUT_MS) — slow-but-flowing uploads survive;
+// only a socket that stops moving bytes gets killed.
 const BUNNY_API_TIMEOUT_MS = 20000;
+// Upload paths: timeout on *inactivity* only, not total wall-clock. A multi-GB
+// upload over a slow uplink can legitimately run for minutes — what must die is
+// a socket that stops flowing (hung Bunny, stalled pipe). `req.setTimeout`
+// arms the socket's idle timer, which Node resets on any socket activity, so
+// data still moving keeps the upload alive.
+const BUNNY_UPLOAD_INACTIVITY_TIMEOUT_MS = 30 * 1000;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -36,13 +43,23 @@ const authHeaders = () => ({
 
 // ─── Error class ─────────────────────────────────────────────────────────────
 
+// Bunny error bodies can be large and full of internal identifiers. Capping
+// what lands in `message` (which flows into logs, DB failureReason columns,
+// and any surfaced AppError) keeps Bunny internals out of operator/student
+// surfaces while still being useful. The full body stays on `this.body` for
+// any server-side consumer that needs it.
+const BUNNY_ERROR_BODY_MAX_CHARS = 500;
+
 /**
  * Represents an error response from the Bunny API.
  * Carries the HTTP status code and raw response body for logging/compensation.
  */
 class BunnyApiError extends Error {
   constructor(statusCode, body) {
-    super(`Bunny API error ${statusCode}: ${body}`);
+    const safeBody = typeof body === 'string' && body.length > BUNNY_ERROR_BODY_MAX_CHARS
+      ? `${body.slice(0, BUNNY_ERROR_BODY_MAX_CHARS)}… (truncated)`
+      : body;
+    super(`Bunny API error ${statusCode}: ${safeBody}`);
     this.name = 'BunnyApiError';
     this.statusCode = statusCode;
     this.body = body;
@@ -175,6 +192,21 @@ function uploadVideoStream({ bunnyVideoId, fileStream }) {
     );
 
     req.on('error', (err) => {
+      reject(err);
+    });
+
+    // Inactivity watchdog (F2/S3): if NO bytes flow through the socket for
+    // BUNNY_UPLOAD_INACTIVITY_TIMEOUT_MS the upload is hung — kill it. Node's
+    // socket idle timer resets on every activity, so a slow-but-flowing
+    // multi-GB upload is never affected.
+    req.setTimeout(BUNNY_UPLOAD_INACTIVITY_TIMEOUT_MS, () => {
+      const err = new Error(
+        `Bunny upload stalled — no data for ${Math.round(BUNNY_UPLOAD_INACTIVITY_TIMEOUT_MS / 1000)}s`
+      );
+      // Stop feeding Bunny and reject. req.destroy() also triggers req 'error'
+      // downstream, but reject() here is idempotent — the promise settles once.
+      fileStream.unpipe(req);
+      req.destroy(err);
       reject(err);
     });
 

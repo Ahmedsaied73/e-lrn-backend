@@ -37,6 +37,21 @@ function getGradingQueue() {
   return queue;
 }
 
+/**
+ * Close the queue's dedicated Redis connection (SIGTERM/SIGINT drain).
+ * No-op when the queue was never created.
+ */
+async function closeGradingQueue() {
+  if (!queue) return;
+  const toClose = queue;
+  queue = null;
+  try {
+    await toClose.close();
+  } catch (err) {
+    logWarn('ai.queue.close_failed', { error: err.message });
+  }
+}
+
 function isAiQueueAvailable() {
   // Queue usability needs Redis only — NOT the model key. Jobs for a keyless
   // server simply wait until a keyed worker drains them; every guard in the
@@ -67,6 +82,7 @@ async function enqueueAiGrading(attemptId) {
     const answerKey = resolveAttemptKey(attempt);
     const responses = attempt.responses || {};
     let enqueued = 0;
+    const { shortHash } = require('../../integrations/redis/cache');
     for (const [qName, entry] of Object.entries(answerKey)) {
       if (!entry || entry.type !== 'comment') continue;
       if (!entry.ai || entry.ai.enabled !== true) continue;
@@ -86,7 +102,10 @@ async function enqueueAiGrading(attemptId) {
         { attemptId, questionName: qName },
         {
           // BullMQ jobIds must not contain ':' — sanitize admin-authored names.
-          jobId: `ai-${attemptId}-${qName.replace(/[^a-zA-Z0-9_-]/g, '_')}`,
+          // A shortHash suffix keeps distinct question names that sanitize to
+          // the same string from colliding on the same BullMQ jobId (BullMQ
+          // dedupes by jobId, so a collision would silently drop a job).
+          jobId: `ai-${attemptId}-${qName.replace(/[^a-zA-Z0-9_-]/g, '_')}-${shortHash(qName)}`,
           attempts: 3,
           backoff: { type: 'exponential', delay: 30000 },
           removeOnComplete: 1000,
@@ -108,6 +127,7 @@ async function enqueueAiGrading(attemptId) {
 module.exports = {
   QUEUE_NAME,
   getGradingQueue,
+  closeGradingQueue,
   isAiQueueAvailable,
   enqueueAiGrading,
 };

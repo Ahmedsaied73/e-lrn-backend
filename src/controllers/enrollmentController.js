@@ -1,4 +1,5 @@
 const prisma = require('../config/db');
+const cache = require('../integrations/redis/cache');
 
 /**
  * Enroll the authenticated user in a course.
@@ -65,6 +66,10 @@ const enrollUserInCourse = async (req, res) => {
     // New enrollment clears any cached NOT_ENROLLED gate verdict for this user.
     const quizService = require('../services/quizService');
     await quizService.invalidateGateForUser(userId);
+    // Per-user course page cache (courses/controllers getCourseById) — the
+    // student's payload carries `enrollment`; drop it so the course page shows
+    // their new enrollment on next load.
+    await cache.del(cache.buildKey('courses', 'byid', parsedCourseId, `u${userId}`));
 
     return res.status(201).json({
       success: true,
@@ -253,6 +258,7 @@ const adminEnroll = async (req, res) => {
     // New enrollment clears any cached NOT_ENROLLED gate verdict for the student.
     const quizService = require('../services/quizService');
     await quizService.invalidateGateForUser(parsedUserId);
+    await cache.del(cache.buildKey('courses', 'byid', parsedCourseId, `u${parsedUserId}`));
 
     return res.status(201).json({
       success: true,
@@ -280,7 +286,10 @@ const unenroll = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid enrollment ID.' });
     }
 
-    const enrollment = await prisma.enrollment.findUnique({ where: { id }, select: { id: true, userId: true } });
+    const enrollment = await prisma.enrollment.findUnique({
+      where: { id },
+      select: { id: true, userId: true, courseId: true },
+    });
     if (!enrollment) {
       return res.status(404).json({ success: false, error: 'Enrollment not found.' });
     }
@@ -290,6 +299,9 @@ const unenroll = async (req, res) => {
     // Removing enrollment revokes video access — invalidate the user's gate cache.
     const quizService = require('../services/quizService');
     await quizService.invalidateGateForUser(enrollment.userId);
+    // Per-user course page cache — drop it so the course page stops showing the
+    // removed enrollment immediately.
+    await cache.del(cache.buildKey('courses', 'byid', enrollment.courseId, `u${enrollment.userId}`));
 
     return res.status(200).json({ success: true, message: 'Enrollment removed successfully.' });
   } catch (error) {

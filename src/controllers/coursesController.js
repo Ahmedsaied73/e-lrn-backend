@@ -2,10 +2,29 @@ const prisma = require('../config/db');
 const bunnyClient = require('../integrations/bunny/bunnyStreamClient');
 const cache = require('../integrations/redis/cache');
 
+/**
+ * Parse a positive-signed 32-bit integer from a route/query param.
+ * Returns null when the input is missing, not a safe integer, or non-positive
+ * (malformed IDs such as "abc", "1.5", "-1", or overflow otherwise turn into
+ * Prisma's P2025/P2030 and a 500 — reject them as 400 here instead).
+ */
+function parseId(raw) {
+  const n = parseInt(raw, 10);
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+
+/** Validate a course price: finite, >= 0, and within a sane ceiling. */
+function isInvalidPrice(value) {
+  const price = Number(value);
+  return !Number.isFinite(price) || price < 0 || price > 1e9;
+}
+
 // Get all courses (with pagination)
 const getAllCourses = async (req, res) => {
   try {
-    const page = parseInt(req.query.page) || 1;
+    const rawPage = parseInt(req.query.page, 10);
+    // Clamp page to a safe positive integer (NaN/0/negatives fall back to 1).
+    const page = Number.isSafeInteger(rawPage) && rawPage > 0 ? rawPage : 1;
     // Clamp take 1..100 (house pattern): unbounded limits become heavy
     // queries and oversized cache values.
     const rawTake = parseInt(req.query.limit);
@@ -78,37 +97,71 @@ const getCourseById = async (req, res) => {
     const { id } = req.params;
     const userId = req.user.id;
 
+    const courseId = parseId(id);
+    if (courseId === null) {
+      return res.status(400).json({ success: false, error: 'Invalid course ID' });
+    }
+
     // Single Prisma call: videos + this user's progress per video + this user's
     // enrollment (if any) are all fetched via filtered relation includes, so no
     // additional per-video or per-user round trips are needed (no N+1).
-    const course = await prisma.course.findUnique({
-      where: { id: parseInt(id) },
-      include: {
-        teacher: { select: { id: true, name: true, email: true } },
-        // BunnyVideo is the only video system. No `url` is exposed here — a
-        // playable link is only ever issued per-request via the signed playback
-        // endpoint, never parked in the course payload.
-        bunnyVideos: {
-          where: { status: 'READY' },
-          orderBy: [{ position: 'asc' }, { createdAt: 'asc' }],
-          select: {
-            id: true,
-            title: true,
-            thumbnailUrl: true,
-            duration: true,
-            position: true,
-            // Scoped to the authenticated user only
-            progress: {
-              where: { userId },
-              select: { completed: true, watchedAt: true }
+    //
+    // Cache-aside 60s (P2). IMPORTANT: the payload is user-scoped (progress +
+    // enrollment below include `where: { userId }`), so the key MUST carry the
+    // userId — a courseId-only key would serve one student's completion state
+    // to every other student viewing the same course (cross-user leak). This
+    // mirrors the existing per-user quiz-meta cache (quizController). Course
+    // create/update/delete already invalidate all `v1:courses:*` keys via
+    // delPrefix; enrollment/progress mutations del their own key below.
+    const cacheKey = cache.buildKey('courses', 'byid', courseId, `u${userId}`);
+    const { course, progress, enrollment } = await cache.withCache(cacheKey, 60, async () => {
+      const row = await prisma.course.findUnique({
+        where: { id: courseId },
+        include: {
+          teacher: { select: { id: true, name: true, email: true } },
+          // BunnyVideo is the only video system. No `url` is exposed here — a
+          // playable link is only ever issued per-request via the signed playback
+          // endpoint, never parked in the course payload.
+          bunnyVideos: {
+            where: { status: 'READY' },
+            orderBy: [{ position: 'asc' }, { createdAt: 'asc' }],
+            select: {
+              id: true,
+              title: true,
+              thumbnailUrl: true,
+              duration: true,
+              position: true,
+              // Scoped to the authenticated user only
+              progress: {
+                where: { userId },
+                select: { completed: true, watchedAt: true }
+              }
             }
+          },
+          // Scoped to the authenticated user only — never expose other users' enrollments
+          enrollments: {
+            where: { userId }
           }
-        },
-        // Scoped to the authenticated user only — never expose other users' enrollments
-        enrollments: {
-          where: { userId }
         }
+      });
+
+      if (!row) {
+        return null;
       }
+
+      // Existing "no progress record" representation (see videoProgressController):
+      // completed: false, watchedAt: null
+      const derivedProgress = row.bunnyVideos.map(video => ({
+        videoId: video.id,
+        completed: video.progress[0] ? video.progress[0].completed : false,
+        watchedAt: video.progress[0] ? video.progress[0].watchedAt : null
+      }));
+
+      return {
+        course: row,
+        progress: derivedProgress,
+        enrollment: row.enrollments[0] || null
+      };
     });
 
     if (!course) {
@@ -121,23 +174,16 @@ const getCourseById = async (req, res) => {
       course.thumbnail = `${baseUrl}/${course.thumbnail}`;
     }
 
-    // Derive videos + progress from the same fetched relation (no extra queries).
+    // Derive videos from the fetched course relation (no extra queries).
     // `thumbnailUrl` is mapped onto the legacy `thumbnail` key so the response
     // envelope keeps its shape; `url` is intentionally absent (see above).
+    // The per-user `progress` array is dropped per row — it's already surfaced
+    // separately in the top-level `progress` list.
+    // Thumbnail absolutization is host-dependent → done per request, post-cache.
     const videos = course.bunnyVideos.map(({ progress, thumbnailUrl, ...video }) => ({
       ...video,
       thumbnail: thumbnailUrl && !thumbnailUrl.startsWith('http') ? `${baseUrl}/${thumbnailUrl}` : thumbnailUrl
     }));
-
-    // Existing "no progress record" representation (see videoProgressController):
-    // completed: false, watchedAt: null
-    const progress = course.bunnyVideos.map(video => ({
-      videoId: video.id,
-      completed: video.progress[0] ? video.progress[0].completed : false,
-      watchedAt: video.progress[0] ? video.progress[0].watchedAt : null
-    }));
-
-    const enrollment = course.enrollments[0] || null;
 
     const { bunnyVideos: _rawVideos, enrollments: _rawEnrollments, ...courseData } = course;
 
@@ -165,6 +211,10 @@ const createCourse = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Title, description, price, and grade are required' });
     }
 
+    if (isInvalidPrice(price)) {
+      return res.status(400).json({ success: false, error: 'Invalid price value' });
+    }
+
     const validGrades = ['FIRST_SECONDARY', 'SECOND_SECONDARY', 'THIRD_SECONDARY'];
     if (!validGrades.includes(grade)) {
       return res.status(400).json({ success: false, error: 'Invalid grade value' });
@@ -182,7 +232,7 @@ const createCourse = async (req, res) => {
       data: {
         title,
         description,
-        price: parseFloat(price),
+        price: Number(price),
         grade,
         category: category || undefined,
         thumbnail: thumbnail || 'https://via.placeholder.com/640x360?text=No+Thumbnail',
@@ -205,8 +255,17 @@ const updateCourse = async (req, res) => {
     const { id } = req.params;
     const { title, description, price, grade, category, thumbnail } = req.body;
 
+    const courseId = parseId(id);
+    if (courseId === null) {
+      return res.status(400).json({ success: false, error: 'Invalid course ID' });
+    }
+
+    if (price !== undefined && isInvalidPrice(price)) {
+      return res.status(400).json({ success: false, error: 'Invalid price value' });
+    }
+
     const existingCourse = await prisma.course.findUnique({
-      where: { id: parseInt(id) }
+      where: { id: courseId }
     });
 
     if (!existingCourse) {
@@ -223,14 +282,14 @@ const updateCourse = async (req, res) => {
     const updateData = {
       title: title || undefined,
       description: description || undefined,
-      price: price !== undefined ? parseFloat(price) : undefined,
+      price: price !== undefined ? Number(price) : undefined,
       grade: grade || undefined,
       category: category || undefined,
       thumbnail: thumbnail || undefined
     };
 
     const updatedCourse = await prisma.course.update({
-      where: { id: parseInt(id) },
+      where: { id: courseId },
       data: updateData
     });
 
@@ -246,7 +305,10 @@ const updateCourse = async (req, res) => {
 // Delete a course
 const deleteCourse = async (req, res) => {
   try {
-    const courseId = parseInt(req.params.id);
+    const courseId = parseId(req.params.id);
+    if (courseId === null) {
+      return res.status(400).json({ success: false, error: 'Invalid course ID' });
+    }
 
     const existingCourse = await prisma.course.findUnique({
       where: { id: courseId },

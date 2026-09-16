@@ -11,6 +11,7 @@
 
 const prisma = require('../config/db');
 const config = require('../config/env');
+const cache = require('../integrations/redis/cache');
 
 const RECENT_WINDOW_DAYS = 7;
 const STALE_PROCESSING_MS = 30 * 60 * 1000;
@@ -38,111 +39,119 @@ function toMap(grouped) {
  */
 async function getDashboardStats(req, res) {
   try {
-    const now = Date.now();
-    const sinceWeek = new Date(now - RECENT_WINDOW_DAYS * 24 * 60 * 60 * 1000);
-    const staleBefore = new Date(now - STALE_PROCESSING_MS);
+    // Cache-aside 30s (P3). Admin-only endpoint, admin-only data — no per-user
+    // scope, so a single global key is safe (cross-admin visibility is already
+    // the model). Counts and alert lists may lag up to 30s on the dashboard;
+    // Date fields round-trip through Redis as ISO strings, but JSON.stringify
+    // produces the same wire format, so the client sees no difference.
+    const cacheKey = cache.buildKey('admin', 'dashboard');
+    const data = await cache.withCache(cacheKey, 30, async () => {
+      const now = Date.now();
+      const sinceWeek = new Date(now - RECENT_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+      const staleBefore = new Date(now - STALE_PROCESSING_MS);
 
-    const [
-      students,
-      admins,
-      courses,
-      enrollments,
-      quizzes,
-      attemptsByStatus,
-      videosTotal,
-      videosByStatus,
-      submissionsPending,
-      newStudents,
-      failedVideos,
-      stuckProcessing,
-      essaysPending,
-      newestUsers,
-      newestEnrollments,
-      recentAttempts,
-    ] = await Promise.all([
-      prisma.user.count({ where: { role: 'STUDENT' } }),
-      prisma.user.count({ where: { role: 'ADMIN' } }),
-      prisma.course.count(),
-      prisma.enrollment.count(),
-      prisma.quiz.count(),
-      prisma.quizAttempt.groupBy({ by: ['status'], _count: { _all: true } }),
-      prisma.bunnyVideo.count(),
-      prisma.bunnyVideo.groupBy({ by: ['status'], _count: { _all: true } }),
-      prisma.submission.count({ where: { status: 'PENDING' } }),
-      prisma.user.count({ where: { role: 'STUDENT', createdAt: { gte: sinceWeek } } }),
-      prisma.bunnyVideo.findMany({
-        where: { status: 'FAILED' },
-        orderBy: { updatedAt: 'desc' },
-        take: 10,
-        select: { id: true, title: true, courseId: true, failureReason: true, updatedAt: true },
-      }),
-      prisma.bunnyVideo.findMany({
-        where: { status: 'PROCESSING', updatedAt: { lt: staleBefore } },
-        orderBy: { updatedAt: 'asc' },
-        take: 10,
-        select: { id: true, title: true, courseId: true, processingProgress: true, updatedAt: true },
-      }),
-      prisma.quizAttempt.findMany({
-        where: { status: 'GRADING' },
-        orderBy: { submittedAt: 'desc' },
-        take: 10,
-        include: {
-          user: { select: safeUserSelect },
-          quiz: { select: { id: true, title: true, bunnyVideo: { select: { id: true, title: true } } } },
-        },
-      }),
-      prisma.user.findMany({
-        orderBy: { createdAt: 'desc' },
-        take: 5,
-        select: safeUserSelect,
-      }),
-      prisma.enrollment.findMany({
-        orderBy: { createdAt: 'desc' },
-        take: 5,
-        include: {
-          user: { select: safeUserSelect },
-          course: { select: { id: true, title: true, grade: true } },
-        },
-      }),
-      prisma.quizAttempt.findMany({
-        orderBy: { startedAt: 'desc' },
-        take: 5,
-        include: {
-          user: { select: safeUserSelect },
-          quiz: { select: { id: true, title: true, passingScore: true, bunnyVideo: { select: { title: true } } } },
-        },
-      }),
-    ]);
-
-    const data = {
-      counts: {
+      const [
         students,
         admins,
         courses,
         enrollments,
         quizzes,
-        newStudentsLast7d: newStudents,
-        attempts: toMap(attemptsByStatus),
-        videos: { total: videosTotal, ...toMap(videosByStatus) },
+        attemptsByStatus,
+        videosTotal,
+        videosByStatus,
         submissionsPending,
-      },
-      alerts: {
+        newStudents,
         failedVideos,
-        stuckProcessingVideos: stuckProcessing.map((v) => ({
-          ...v,
-          stuckMinutes: Math.floor((now - v.updatedAt.getTime()) / 60000),
-        })),
-        essaysPendingGrading: essaysPending,
-        hasIssues: failedVideos.length > 0 || stuckProcessing.length > 0,
-      },
-      recent: {
-        users: newestUsers,
-        enrollments: newestEnrollments,
-        attempts: recentAttempts,
-      },
-      // Server-truth feature flags for admin UI gating (never client-decided).
-      features: { ...(config.features || {}) },
-    };
+        stuckProcessing,
+        essaysPending,
+        newestUsers,
+        newestEnrollments,
+        recentAttempts,
+      ] = await Promise.all([
+        prisma.user.count({ where: { role: 'STUDENT' } }),
+        prisma.user.count({ where: { role: 'ADMIN' } }),
+        prisma.course.count(),
+        prisma.enrollment.count(),
+        prisma.quiz.count(),
+        prisma.quizAttempt.groupBy({ by: ['status'], _count: { _all: true } }),
+        prisma.bunnyVideo.count(),
+        prisma.bunnyVideo.groupBy({ by: ['status'], _count: { _all: true } }),
+        prisma.submission.count({ where: { status: 'PENDING' } }),
+        prisma.user.count({ where: { role: 'STUDENT', createdAt: { gte: sinceWeek } } }),
+        prisma.bunnyVideo.findMany({
+          where: { status: 'FAILED' },
+          orderBy: { updatedAt: 'desc' },
+          take: 10,
+          select: { id: true, title: true, courseId: true, failureReason: true, updatedAt: true },
+        }),
+        prisma.bunnyVideo.findMany({
+          where: { status: 'PROCESSING', updatedAt: { lt: staleBefore } },
+          orderBy: { updatedAt: 'asc' },
+          take: 10,
+          select: { id: true, title: true, courseId: true, processingProgress: true, updatedAt: true },
+        }),
+        prisma.quizAttempt.findMany({
+          where: { status: 'GRADING' },
+          orderBy: { submittedAt: 'desc' },
+          take: 10,
+          include: {
+            user: { select: safeUserSelect },
+            quiz: { select: { id: true, title: true, bunnyVideo: { select: { id: true, title: true } } } },
+          },
+        }),
+        prisma.user.findMany({
+          orderBy: { createdAt: 'desc' },
+          take: 5,
+          select: safeUserSelect,
+        }),
+        prisma.enrollment.findMany({
+          orderBy: { createdAt: 'desc' },
+          take: 5,
+          include: {
+            user: { select: safeUserSelect },
+            course: { select: { id: true, title: true, grade: true } },
+          },
+        }),
+        prisma.quizAttempt.findMany({
+          orderBy: { startedAt: 'desc' },
+          take: 5,
+          include: {
+            user: { select: safeUserSelect },
+            quiz: { select: { id: true, title: true, passingScore: true, bunnyVideo: { select: { title: true } } } },
+          },
+        }),
+      ]);
+
+      return {
+        counts: {
+          students,
+          admins,
+          courses,
+          enrollments,
+          quizzes,
+          newStudentsLast7d: newStudents,
+          attempts: toMap(attemptsByStatus),
+          videos: { total: videosTotal, ...toMap(videosByStatus) },
+          submissionsPending,
+        },
+        alerts: {
+          failedVideos,
+          stuckProcessingVideos: stuckProcessing.map((v) => ({
+            ...v,
+            stuckMinutes: Math.floor((now - v.updatedAt.getTime()) / 60000),
+          })),
+          essaysPendingGrading: essaysPending,
+          hasIssues: failedVideos.length > 0 || stuckProcessing.length > 0,
+        },
+        recent: {
+          users: newestUsers,
+          enrollments: newestEnrollments,
+          attempts: recentAttempts,
+        },
+        // Server-truth feature flags for admin UI gating (never client-decided).
+        features: { ...(config.features || {}) },
+      };
+    });
 
     return res.status(200).json({ success: true, data });
   } catch (error) {

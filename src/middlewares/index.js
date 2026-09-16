@@ -93,9 +93,30 @@ const authorizeAdmin = (arg1, arg2, arg3) => {
   return (req, res, next) => enforce(req, res, next, roles);
 };
 
+/**
+ * DB-verified admin check for student-path handlers. The JWT `role` claim is
+ * only a speed bump — a stale claim (demoted admin, forged token) must not
+ * grant the admin bypass on owner/enrollment-gated routes. Cheap for the
+ * common path: tokens that do NOT claim ADMIN skip the DB read entirely.
+ * Returns the authoritative boolean, never throws.
+ */
+const isAdmin = async (req) => {
+  if (!req.user || req.user.role !== 'ADMIN') return false;
+  try {
+    const dbUser = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { role: true },
+    });
+    return !!(dbUser && dbUser.role === 'ADMIN');
+  } catch {
+    return false;
+  }
+};
+
 module.exports = {
   authenticateToken,
   optionalAuth,
   authorizeAdmin,
+  isAdmin,
   logger
 };

@@ -137,6 +137,13 @@ async function delPrefix(prefix, maxRounds = 100) {
   return removed;
 }
 
+// In-process single-flight registry: concurrent misses on the same key share
+// one loader call (no Redis lock — this only dedupes the stampede within one
+// process; multi-instance setups pay the normal miss each). Entries are
+// removed on settle — success or failure — so a failed load never parks a
+// rejected promise on the key and the next caller retries honestly.
+const inflight = new Map();
+
 async function withCache(key, ttlSec, loader) {
   let cached;
   try {
@@ -147,11 +154,29 @@ async function withCache(key, ttlSec, loader) {
   if (cached !== null && cached !== undefined) {
     return cached;
   }
-  const value = await loader();
-  if (value !== undefined && value !== null) {
-    await set(key, value, ttlSec);
+
+  // A loader for this key is already running — join it instead of stampeding.
+  const running = inflight.get(key);
+  if (running) {
+    return running;
   }
-  return value;
+
+  const promise = (async () => {
+    const value = await loader();
+    if (value !== undefined && value !== null) {
+      await set(key, value, ttlSec);
+    }
+    return value;
+  })();
+
+  inflight.set(key, promise);
+  promise
+    .finally(() => {
+      if (inflight.get(key) === promise) inflight.delete(key);
+    })
+    .catch(() => {}); // swallow on the finally chain — callers observe rejection via `promise`
+
+  return promise;
 }
 
 module.exports = {

@@ -26,6 +26,7 @@
 const cron = require('node-cron');
 const bunnyVideoService = require('../services/bunnyVideoService');
 const bunnyClient = require('../integrations/bunny/bunnyStreamClient');
+const { getRedis } = require('../integrations/redis/redisClient');
 
 const STALE_MINUTES = 30;
 
@@ -35,9 +36,46 @@ const STALE_MINUTES = 30;
 const MAX_BATCH = 50;
 const CONCURRENCY = 4;
 
+// Distributed lock — with more than one app instance the 10-minute tick would
+// fire on every instance, and each would applyBunnyStatus + fan out duplicate
+// notifications (no dedupe on that path). The lock lets exactly one instance
+// run per window. Fail-open: if Redis is down we proceed using only the
+// process-local guard below (the safety net stays available in degraded mode).
+const LOCK_KEY = 'lock:reconcile-stale-videos';
+const LOCK_TTL_SECONDS = 300; // 5 min — longer than any realistic run; auto-expires if a holder crashes.
+
 // Overlap guard — a slow run (many remote polls) must not stack on top of the
 // next 10-minute tick.
 let isRunning = false;
+
+async function acquireDistributedLock() {
+  const client = getRedis();
+  if (!client || client.status !== 'ready') return true; // Redis off — process-local guard is all we have
+  try {
+    const result = await Promise.race([
+      client.set(LOCK_KEY, process.pid.toString(), 'EX', LOCK_TTL_SECONDS, 'NX'),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('lock acquire timeout')), 3000)),
+    ]);
+    return result === 'OK';
+  } catch (err) {
+    // Commitment boundary: a Redis hiccup must never disable the safety net.
+    log.warn('video.reconcile.lock_failed', { error: err.message });
+    return true;
+  }
+}
+
+async function releaseDistributedLock() {
+  const client = getRedis();
+  if (!client || client.status !== 'ready') return;
+  try {
+    await Promise.race([
+      client.del(LOCK_KEY),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('lock release timeout')), 3000)),
+    ]);
+  } catch (err) {
+    log.warn('video.reconcile.lock_release_failed', { error: err.message });
+  }
+}
 
 const log = {
   info: (event, ctx = {}) => console.log(`[INFO] ${event}`, JSON.stringify(ctx)),
@@ -71,6 +109,12 @@ async function mapWithConcurrency(items, limit, fn) {
 async function reconcileStaleVideos() {
   if (isRunning) {
     log.warn('video.reconcile.skip_overlap');
+    return;
+  }
+
+  const lockAcquired = await acquireDistributedLock();
+  if (!lockAcquired) {
+    log.warn('video.reconcile.skip_lock_held');
     return;
   }
   isRunning = true;
@@ -135,6 +179,7 @@ async function reconcileStaleVideos() {
     log.info('video.reconcile.completed', { count: staleVideos.length });
   } finally {
     isRunning = false;
+    await releaseDistributedLock();
   }
 }
 
@@ -148,7 +193,7 @@ async function reconcileStaleVideos() {
  */
 function startReconciliationJob() {
   // Run every 10 minutes
-  cron.schedule('*/10 * * * *', async () => {
+  const task = cron.schedule('*/10 * * * *', async () => {
     try {
       await reconcileStaleVideos();
     } catch (err) {
@@ -161,6 +206,15 @@ function startReconciliationJob() {
     schedule: 'every 10 minutes',
     staleThreshold: `${STALE_MINUTES} minutes`,
   });
+  return task;
 }
 
-module.exports = { startReconciliationJob, reconcileStaleVideos };
+function stopReconciliationJob(task) {
+  try {
+    if (task && task.destroy) task.destroy();
+  } catch (err) {
+    log.warn('video.reconcile.job_stop_failed', { error: err.message });
+  }
+}
+
+module.exports = { startReconciliationJob, stopReconciliationJob, reconcileStaleVideos };

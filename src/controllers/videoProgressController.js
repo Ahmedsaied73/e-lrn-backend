@@ -1,4 +1,6 @@
 const prisma = require('../config/db');
+const cache = require('../integrations/redis/cache');
+const { isAdmin } = require('../middlewares');
 const { evaluateGate, invalidateQuizMeta, invalidateGateForUser } = require('../services/quizService');
 
 function parseBunnyVideoId(value) {
@@ -40,11 +42,15 @@ const markVideoCompleted = async (req, res) => {
     });
 
     // Sync enrollment progress/percentage (admins have no enrollment row).
-    if (req.user.role !== 'ADMIN') {
+    if (!(await isAdmin(req))) {
       const video = await prisma.bunnyVideo.findUnique({
         where: { id: videoId },
         select: { courseId: true },
       });
+      // Per-user course page cache (courses/controllers getCourseById) — a
+      // completion flips `progress` in that payload; drop the key now so the
+      // student's next course-page load reflects it (not up to 60s stale).
+      await cache.del(cache.buildKey('courses', 'byid', video.courseId, `u${req.user.id}`));
       const enrollment = await prisma.enrollment.findFirst({
         where: { userId: req.user.id, courseId: video.courseId },
       });
@@ -96,6 +102,27 @@ const checkVideoCompletion = async (req, res) => {
     const videoId = parseBunnyVideoId(req.params.videoId);
     if (!videoId) return res.status(400).json({ error: 'Invalid video ID format' });
 
+    // Enrollment gate — mirrors markVideoCompleted/evaluateGate so progress
+    // cannot be probed for videos in courses the user isn't enrolled in.
+    const video = await prisma.bunnyVideo.findUnique({
+      where: { id: videoId },
+      select: { courseId: true },
+    });
+    if (!video) return res.status(404).json({ error: 'Video not found' });
+
+    if (!(await isAdmin(req))) {
+      const enrollment = await prisma.enrollment.findFirst({
+        where: { userId: req.user.id, courseId: video.courseId },
+        select: { id: true },
+      });
+      if (!enrollment) {
+        return res.status(403).json({
+          error: 'You must be enrolled in this course to access this video',
+          code: 'NOT_ENROLLED',
+        });
+      }
+    }
+
     const videoProgress = await prisma.bunnyVideoProgress.findUnique({
       where: { userId_bunnyVideoId: { userId: req.user.id, bunnyVideoId: videoId } },
     });
@@ -129,6 +156,20 @@ const getCourseVideoProgress = async (req, res) => {
 
     if (!course) {
       return res.status(404).json({ error: 'Course not found' });
+    }
+
+    // Enrollment gate — mirrors markVideoCompleted/evaluateGate.
+    if (!(await isAdmin(req))) {
+      const enrollment = await prisma.enrollment.findFirst({
+        where: { userId: req.user.id, courseId },
+        select: { id: true },
+      });
+      if (!enrollment) {
+        return res.status(403).json({
+          error: 'You must be enrolled in this course to view progress',
+          code: 'NOT_ENROLLED',
+        });
+      }
     }
 
     const videoIds = course.bunnyVideos.map(video => video.id);

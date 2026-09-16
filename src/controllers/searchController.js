@@ -23,6 +23,34 @@ const searchContent = async (req, res) => {
       return res.status(400).json({ error: 'Either search query, category, or grade filter must be provided' });
     }
 
+    // Whitelist the type filter (only 'courses' | 'videos' are valid) and the
+    // grade enum — anything else is a client error, not a silent empty result.
+    const VALID_GRADES = ['FIRST_SECONDARY', 'SECOND_SECONDARY', 'THIRD_SECONDARY'];
+    if (type && type !== 'courses' && type !== 'videos') {
+      return res.status(400).json({ error: 'Invalid type filter' });
+    }
+    if (grade && !VALID_GRADES.includes(grade)) {
+      return res.status(400).json({ error: 'Invalid grade value' });
+    }
+
+    // Guard against NaN prices ("abc" or "1.5x" parse to NaN) — a Prisma range
+    // filter on NaN rejects and would surface as a 500.
+    const priceFilters = [];
+    if (minPrice !== undefined) {
+      const p = Number(minPrice);
+      if (!Number.isFinite(p) || p < 0) {
+        return res.status(400).json({ error: 'Invalid minPrice value' });
+      }
+      priceFilters.push({ price: { gte: p } });
+    }
+    if (maxPrice !== undefined) {
+      const p = Number(maxPrice);
+      if (!Number.isFinite(p) || p < 0) {
+        return res.status(400).json({ error: 'Invalid maxPrice value' });
+      }
+      priceFilters.push({ price: { lte: p } });
+    }
+
     // Clamp take 1..100 (house pattern): NaN/negative/huge limits either 500
     // in Prisma or become heavy scans.
     const parsedLimit = parseInt(limit);
@@ -65,16 +93,8 @@ const searchContent = async (req, res) => {
     }
     
     // Add price range filters if provided
-    if (minPrice !== undefined) {
-      courseWhereClause.AND.push({
-        price: { gte: parseFloat(minPrice) }
-      });
-    }
-    
-    if (maxPrice !== undefined) {
-      courseWhereClause.AND.push({
-        price: { lte: parseFloat(maxPrice) }
-      });
+    if (priceFilters.length > 0) {
+      courseWhereClause.AND.push(...priceFilters);
     }
     
     // If no filters were added, reset the where clause
@@ -106,94 +126,114 @@ const searchContent = async (req, res) => {
         orderBy = { createdAt: 'desc' };
     }
     
-    // Search courses if type is not specified or type is 'courses'
-    if (!type || type === 'courses') {
-      courses = await prisma.course.findMany({
-        where: courseWhereClause,
-        include: {
-          teacher: {
-            select: {
-              id: true,
-              name: true,
-              email: true
-            }
-          },
-          _count: {
-            select: { 
-              videos: true,
-              enrollments: true
-            }
-          }
-        },
-        orderBy,
-        take: take
-      });
-      
-      // Add full URLs for thumbnails
-      courses = courses.map(course => ({
-        ...course,
-        videoCount: course._count.videos,
-        enrollmentCount: course._count.enrollments,
-        thumbnail: course.thumbnail && !course.thumbnail.startsWith('http') 
-          ? `${baseUrl}/${course.thumbnail}` 
-          : course.thumbnail
-      }));
-      
-      // Remove _count field from response
-      courses = courses.map(course => {
-        const { _count, ...rest } = course;
-        return rest;
-      });
-    }
-    
-    // Search videos if type is not specified or type is 'videos'
-    if (!type || type === 'videos') {
-      // BunnyVideo is the only video system — only READY videos are searchable.
-      const hasCourseFilters = category || grade || minPrice !== undefined || maxPrice !== undefined;
+    // Cache-aside 60s (P1). Key = shortHash of the full filter vector so keys
+    // stay bounded regardless of input length. RAW rows are cached (host-
+    // independent — mirroring getAllCourses); thumbnail absolutization happens
+    // after retrieval, per request. Staleness window: a new course/video shows
+    // up within ~60s and a price/status edit within the same TTL.
+    const { courses: rawCourses, videos: rawVideos } = await cache.withCache(
+      cache.buildKey('search', 'content', cache.shortHash(
+        JSON.stringify({ query, type, category, grade, minPrice, maxPrice, sortBy, take })
+      )),
+      60,
+      async () => {
+        let foundCourses = [];
+        let foundVideos = [];
 
-      videos = await prisma.bunnyVideo.findMany({
-        where: {
-          AND: [
-            { status: 'READY' },
-            // BunnyVideo has no `description` — titles only.
-            query
-              ? {
-                  OR: [
-                    { title: { contains: query, mode: 'insensitive' } }
-                  ]
+        // Search courses if type is not specified or type is 'courses'
+        if (!type || type === 'courses') {
+          foundCourses = await prisma.course.findMany({
+            where: courseWhereClause,
+            include: {
+              teacher: {
+                select: {
+                  id: true,
+                  name: true,
+                  email: true
                 }
-              : {},
-            hasCourseFilters ? { course: { is: courseWhereClause } } : {}
-          ]
-        },
-        include: {
-          course: {
-            select: {
-              id: true,
-              title: true,
-              thumbnail: true,
-              category: true,
-              grade: true,
-              price: true
-            }
-          }
-        },
-        take: take
-      });
-
-      // Add full URLs for thumbnails. No `url` is exposed here — playable links
-      // are only issued per-request via the signed playback endpoint.
-      videos = videos.map(video => ({
-        ...video,
-        thumbnail: video.thumbnailUrl && !video.thumbnailUrl.startsWith('http') ? `${baseUrl}/${video.thumbnailUrl}` : video.thumbnailUrl,
-        course: {
-          ...video.course,
-          thumbnail: video.course.thumbnail && !video.course.thumbnail.startsWith('http')
-            ? `${baseUrl}/${video.course.thumbnail}`
-            : video.course.thumbnail
+              },
+              _count: {
+                select: {
+                  videos: true,
+                  enrollments: true
+                }
+              }
+            },
+            orderBy,
+            take: take
+          });
         }
-      }));
-    }
+
+        // Search videos if type is not specified or type is 'videos'
+        if (!type || type === 'videos') {
+          // BunnyVideo is the only video system — only READY videos are searchable.
+          const hasCourseFilters = category || grade || minPrice !== undefined || maxPrice !== undefined;
+
+          foundVideos = await prisma.bunnyVideo.findMany({
+            where: {
+              AND: [
+                { status: 'READY' },
+                // BunnyVideo has no `description` — titles only.
+                query
+                  ? {
+                      OR: [
+                        { title: { contains: query, mode: 'insensitive' } }
+                      ]
+                    }
+                  : {},
+                hasCourseFilters ? { course: { is: courseWhereClause } } : {}
+              ]
+            },
+            include: {
+              course: {
+                select: {
+                  id: true,
+                  title: true,
+                  thumbnail: true,
+                  category: true,
+                  grade: true,
+                  price: true
+                }
+              }
+            },
+            take: take
+          });
+        }
+
+        return { courses: foundCourses, videos: foundVideos };
+      }
+    );
+
+    // ── Per-request shaping (host-dependent — never cached) ───────────────────
+
+    // Add full URLs for thumbnails + flatten _count, then strip _count out
+    courses = rawCourses.map(course => ({
+      ...course,
+      videoCount: course._count.videos,
+      enrollmentCount: course._count.enrollments,
+      thumbnail: course.thumbnail && !course.thumbnail.startsWith('http')
+        ? `${baseUrl}/${course.thumbnail}`
+        : course.thumbnail
+    }));
+
+    // Remove _count field from response
+    courses = courses.map(course => {
+      const { _count, ...rest } = course;
+      return rest;
+    });
+
+    // Add full URLs for thumbnails. No `url` is exposed here — playable links
+    // are only issued per-request via the signed playback endpoint.
+    videos = rawVideos.map(video => ({
+      ...video,
+      thumbnail: video.thumbnailUrl && !video.thumbnailUrl.startsWith('http') ? `${baseUrl}/${video.thumbnailUrl}` : video.thumbnailUrl,
+      course: {
+        ...video.course,
+        thumbnail: video.course.thumbnail && !video.course.thumbnail.startsWith('http')
+          ? `${baseUrl}/${video.course.thumbnail}`
+          : video.course.thumbnail
+      }
+    }));
     
     // Get categories for filtering
     const categories = await getCategoriesList();

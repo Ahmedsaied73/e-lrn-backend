@@ -96,24 +96,32 @@ const uploadBunnyVideo = async (req, res, next) => {
     return next(new AppError('Invalid video ID', 400, ErrorCodes.VIDEO_NOT_FOUND));
   }
 
-  // Load video and verify it exists
-  const video = await bunnyVideoService.findById(videoId);
-  if (!video) {
-    return next(new AppError('Video not found', 404, ErrorCodes.VIDEO_NOT_FOUND));
-  }
+  let video;
+  try {
+    // Load video and verify it exists
+    video = await bunnyVideoService.findById(videoId);
+    if (!video) {
+      return next(new AppError('Video not found', 404, ErrorCodes.VIDEO_NOT_FOUND));
+    }
 
-  // Ownership is already verified by authorizeAdmin (admin owns all videos).
-  // State machine check: only PENDING or FAILED videos can be (re-)uploaded.
-  if (!['PENDING', 'FAILED'].includes(video.status)) {
-    return next(new AppError(
-      `Cannot upload to a video in state: ${video.status}`,
-      422,
-      ErrorCodes.INVALID_VIDEO_STATE
-    ));
-  }
+    // Ownership is already verified by authorizeAdmin (admin owns all videos).
+    // State machine check: only PENDING or FAILED videos can be (re-)uploaded.
+    if (!['PENDING', 'FAILED'].includes(video.status)) {
+      return next(new AppError(
+        `Cannot upload to a video in state: ${video.status}`,
+        422,
+        ErrorCodes.INVALID_VIDEO_STATE
+      ));
+    }
 
-  // Transition to UPLOADING before we touch any streams
-  await bunnyVideoService.transitionStatus(videoId, 'UPLOADING');
+    // Transition to UPLOADING before we touch any streams
+    await bunnyVideoService.transitionStatus(videoId, 'UPLOADING');
+  } catch (err) {
+    // A rejected await here (DB/Bunny down) must never escape as an unhandled
+    // rejection — that path hits the process.exit(1) handler. Forward to the
+    // global error middleware so callers get a structured 5xx instead.
+    return next(err);
+  }
   log.info('video.upload.started', {
     videoId,
     courseId: video.courseId,
