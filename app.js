@@ -29,8 +29,6 @@ const { setupDefaultAdmin } = require('./src/config/setupAdmin');
 const path = require('path');
 const app = express();
 const port = process.env.PORT || 3005;
-const events = require('events');
-events.EventEmitter.defaultMaxListeners = 15;
 
 // Trust the first proxy hop (Railway's TLS-terminating router). Without this,
 // `req.ip` is the proxy's address and the IP-keyed rate limiters + request

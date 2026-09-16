@@ -220,12 +220,20 @@ const createCourse = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid grade value' });
     }
 
-    const admin = await prisma.user.findFirst({
-      where: { role: 'ADMIN' }
-    });
+    // Teacher attribution: use the authenticated ADMIN caller (authorizeAdmin
+    // DB-verifies the role before this handler runs). Fall back to the first
+    // ADMIN only when no user context is present (direct script invocation).
+    let teacherId = req.user ? req.user.id : null;
 
-    if (!admin) {
-      return res.status(500).json({ success: false, error: 'Administrator account not found' });
+    if (!teacherId) {
+      const admin = await prisma.user.findFirst({
+        where: { role: 'ADMIN' }
+      });
+
+      if (!admin) {
+        return res.status(500).json({ success: false, error: 'Administrator account not found' });
+      }
+      teacherId = admin.id;
     }
 
     const course = await prisma.course.create({
@@ -236,7 +244,7 @@ const createCourse = async (req, res) => {
         grade,
         category: category || undefined,
         thumbnail: thumbnail || 'https://via.placeholder.com/640x360?text=No+Thumbnail',
-        teacherId: admin.id
+        teacherId
       }
     });
 
@@ -328,6 +336,16 @@ const deleteCourse = async (req, res) => {
       select: { bunnyVideoId: true },
     });
 
+    // Quiz rows cascade-delete when BunnyVideos go; snapshot their surveyJsons
+    // first so the referenced Storage images can be cleaned up afterwards.
+    const quizSurveyJsons = await prisma.quiz
+      .findMany({
+        where: { bunnyVideo: { courseId } },
+        select: { surveyJson: true },
+      });
+
+    const quizSurveyJsonList = quizSurveyJsons.map((q) => q.surveyJson);
+
     await prisma.$transaction(async (prisma) => {
       if (existingCourse._count.videos > 0) {
         await prisma.video.deleteMany({ where: { courseId } });
@@ -372,6 +390,18 @@ const deleteCourse = async (req, res) => {
       } catch (cleanupErr) {
         console.error(`[deleteCourse] Failed to delete Bunny video ${video.bunnyVideoId}:`, cleanupErr.message);
       }
+    }
+
+    // ── Storage cleanup (after DB success) ───────────────────────────────────
+    // The cascade already deleted the Quiz rows, so their SurveyJS images are
+    // unreferenced. Remove them from the bucket best-effort.
+    try {
+      const { removeQuizImagesBestEffort } = require('../integrations/supabase/supabaseClient');
+      for (const surveyJson of quizSurveyJsonList) {
+        await removeQuizImagesBestEffort(surveyJson);
+      }
+    } catch (cleanupErr) {
+      console.error('[deleteCourse] Storage cleanup error:', cleanupErr.message);
     }
 
     await cache.delPrefix('v1:courses:');

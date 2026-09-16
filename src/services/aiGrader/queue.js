@@ -68,8 +68,15 @@ function isAiQueueAvailable() {
  * Enqueue AI grading for every AI-enabled, answered, ungraded essay question
  * on a GRADING attempt. Safe to call repeatedly (unique jobId + DB upsert).
  * Returns the number of jobs enqueued. Never throws.
+ *
+ * `options.freshJobIds == true` (manual admin retry only) appends a nonce to
+ * each BullMQ jobId so a replay is genuinely re-scheduled even while the
+ * previous failed job still sits in BullMQ's failed set (removeOnFail: 5000
+ * would otherwise dedupe the re-add for ~5s). The DB row upsert still guards
+ * idempotency (FAILED→PENDING once), and processGradingJob re-validates every
+ * guard before writing, so double-processing is impossible either way.
  */
-async function enqueueAiGrading(attemptId) {
+async function enqueueAiGrading(attemptId, options = {}) {
   try {
     if (!isAiQueueAvailable()) return 0;
     const attempt = await prisma.quizAttempt.findUnique({
@@ -83,6 +90,11 @@ async function enqueueAiGrading(attemptId) {
     const responses = attempt.responses || {};
     let enqueued = 0;
     const { shortHash } = require('../../integrations/redis/cache');
+    // Nonce for fresh re-schedule: a single timestamp-suffix per invocation so
+    // a manual retry never collides with the original (or a recent) failed job
+    // still in BullMQ's removeOnFail window (5s). On normal submit-path calls
+    // (freshJobIds unset) this stays empty — jobId replay-protection intact.
+    const retryNonce = options.freshJobIds ? `-${Date.now().toString(36)}` : '';
     for (const [qName, entry] of Object.entries(answerKey)) {
       if (!entry || entry.type !== 'comment') continue;
       if (!entry.ai || entry.ai.enabled !== true) continue;
@@ -105,7 +117,7 @@ async function enqueueAiGrading(attemptId) {
           // A shortHash suffix keeps distinct question names that sanitize to
           // the same string from colliding on the same BullMQ jobId (BullMQ
           // dedupes by jobId, so a collision would silently drop a job).
-          jobId: `ai-${attemptId}-${qName.replace(/[^a-zA-Z0-9_-]/g, '_')}-${shortHash(qName)}`,
+          jobId: `ai-${attemptId}-${qName.replace(/[^a-zA-Z0-9_-]/g, '_')}-${shortHash(qName)}${retryNonce}`,
           attempts: 3,
           backoff: { type: 'exponential', delay: 30000 },
           removeOnComplete: 1000,

@@ -530,6 +530,11 @@ const hasPassingScore = passingScore !== undefined && passingScore !== null && p
       return res.status(400).json({ success: false, error: 'maxAttempts must be an integer from 1 to 10' });
     }
 
+    const existingQuiz = await prisma.quiz.findUnique({
+      where: { bunnyVideoId: videoId },
+      select: { surveyJson: true },
+    });
+
     const quiz = await prisma.quiz.upsert({
       where: { bunnyVideoId: videoId },
       create: {
@@ -550,6 +555,23 @@ const hasPassingScore = passingScore !== undefined && passingScore !== null && p
         answerKey: keyValidation.answerKey,
       },
     });
+
+    // Replaced images orphan in the bucket — diff old vs new surveyJson object
+    // lists and remove the drop-outs (best-effort, never fails the save).
+    try {
+      const { extractBucketObjectNames, getSupabaseAdmin, getSupabaseBucket } = require('../integrations/supabase/supabaseClient');
+      const oldNames = existingQuiz ? extractBucketObjectNames(existingQuiz.surveyJson) : [];
+      const newNames = new Set(extractBucketObjectNames(surveyJson));
+      const onlyOld = oldNames.filter((name) => !newNames.has(name));
+      if (onlyOld.length > 0) {
+        const { error } = await getSupabaseAdmin()
+          .storage.from(getSupabaseBucket())
+          .remove(onlyOld);
+        if (error) console.error('[QuizController] upsert image cleanup error:', error.message);
+      }
+    } catch (cleanupErr) {
+      console.error('[QuizController] upsert image cleanup failed:', cleanupErr.message);
+    }
 
     // Quiz presence is cached on the videos list — invalidate it (best-effort).
     try {
@@ -595,6 +617,16 @@ async function deleteQuiz(req, res) {
     }
 
     await prisma.quiz.delete({ where: { id: quizId } });
+
+    // Quiz rows cascade-delete — remove this quiz's SurveyJS images from
+    // Supabase Storage so the bucket doesn't accumulate orphans (best-effort:
+    // a storage failure must never fail an already-succeeded DB delete).
+    try {
+      const { removeQuizImagesBestEffort } = require('../integrations/supabase/supabaseClient');
+      await removeQuizImagesBestEffort(quiz.surveyJson);
+    } catch (cleanupErr) {
+      console.error('[QuizController] deleteQuiz storage cleanup error:', cleanupErr.message);
+    }
 
     // Quiz presence is cached on the videos list — invalidate it (best-effort).
     try {

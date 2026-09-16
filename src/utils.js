@@ -3,7 +3,10 @@ const { createHash, randomUUID } = require('crypto');
 
 // JWT 'type' claim distinguishes access vs refresh tokens so a stolen refresh
 // token can never authenticate API routes (middleware rejects type !== 'access').
-function createToken(payload, secret, expiresIn = '1h') {
+// Expiry is 15m — must match the accessToken cookie maxAge (src/config/cookie.js)
+// exactly; a token that outlives its cookie is dead weight and a token that dies
+// before its cookie silently breaks every request in the last 45 minutes.
+function createToken(payload, secret, expiresIn = '15m') {
     return jwt.sign({ ...payload, type: 'access' }, secret, { expiresIn });
 }
 // Refresh token with a 7-day expiration and an explicit 'refresh' type claim.
