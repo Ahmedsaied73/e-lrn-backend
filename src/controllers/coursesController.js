@@ -348,6 +348,16 @@ const deleteCourse = async (req, res) => {
 
     const quizSurveyJsonList = quizSurveyJsons.map((q) => q.surveyJson);
 
+    // Snapshot enrolled students BEFORE the transaction deletes enrollments —
+    // their cached gate verdicts (v1:gate:{userId}:*) would otherwise stay
+    // `allowed:true` up to the 5-min TTL even though they're no longer in the
+    // course. Invalidate after the commit below.
+    const enrolledStudentIds = await prisma.enrollment.findMany({
+      where: { courseId },
+      select: { userId: true },
+    });
+    const enrolledUserIds = enrolledStudentIds.map((e) => e.userId);
+
     await prisma.$transaction(async (prisma) => {
       if (existingCourse._count.videos > 0) {
         await prisma.video.deleteMany({ where: { courseId } });
@@ -409,6 +419,18 @@ const deleteCourse = async (req, res) => {
     await cache.delPrefix('v1:courses:');
     await cache.delPrefix(`v1:videos:course:${courseId}:`);
     await cache.del(cache.buildKey('search', 'cats'));
+
+    // Enrolled students are no longer in this course — their cached gate
+    // verdicts (v1:gate:{userId}:*) may still answer `allowed:true`. Drop them
+    // so the next gate evaluation re-checks enrollment from the DB.
+    // never-throw by contract (invalidateGateForUser swallows cache errors).
+    try {
+      const quizService = require('../services/quizService');
+      await Promise.all(enrolledUserIds.map((userId) => quizService.invalidateGateForUser(userId)));
+    } catch (err) {
+      console.error('[deleteCourse] gate invalidation failed:', err.message);
+    }
+
     res.json({ success: true, message: 'Course deleted successfully' });
   } catch (error) {
     console.error('Error deleting course:', error);

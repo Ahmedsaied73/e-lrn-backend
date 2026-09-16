@@ -1,6 +1,7 @@
 const prisma = require('../config/db');
 const bcrypt = require('bcrypt');
 const config = require('../config/env');
+const quizService = require('../services/quizService');
 
 const selectWithoutPassword = {
   id: true,
@@ -83,6 +84,13 @@ const deleteUser = async (req, res) => {
       prisma.certificate.deleteMany({ where: { userId: userIdNum } }),
       prisma.user.delete({ where: { id: userIdNum } })
     ]);
+
+    // The user's access token stays valid up to its ~15-min expiry, but their
+    // enrollment/exemption rows are gone — cached gate verdicts
+    // (v1:gate:{userIdNum}:*) would answer `allowed:true` in the meantime.
+    // Drop the namespace so the next gate evaluation fails closed from the DB.
+    // never-throw by contract (invalidateGateForUser swallows cache errors).
+    await quizService.invalidateGateForUser(userIdNum);
 
     res.json({ success: true, message: 'User deleted successfully.' });
   } catch (error) {

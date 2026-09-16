@@ -42,45 +42,58 @@ const markVideoCompleted = async (req, res) => {
     });
 
     // Sync enrollment progress/percentage (admins have no enrollment row).
+    // The gate result already carries courseId (`gate._video`) — no extra
+    // video.findUnique here. enrollment + both counts are independent once the
+    // upsert above committed (the counts must observe the just-written row,
+    // so they batch AFTER the upsert, not alongside it).
     if (!(await isAdmin(req))) {
-      const video = await prisma.bunnyVideo.findUnique({
-        where: { id: videoId },
-        select: { courseId: true },
-      });
-      // Per-user course page cache (courses/controllers getCourseById) — a
-      // completion flips `progress` in that payload; drop the key now so the
-      // student's next course-page load reflects it (not up to 60s stale).
-      await cache.del(cache.buildKey('courses', 'byid', video.courseId, `u${req.user.id}`));
-      const enrollment = await prisma.enrollment.findFirst({
-        where: { userId: req.user.id, courseId: video.courseId },
-      });
-
-      if (enrollment) {
-        const [totalVideos, completedVideos] = await Promise.all([
-          prisma.bunnyVideo.count({ where: { courseId: video.courseId, status: 'READY' } }),
+      const courseId = gate._video && gate._video.courseId;
+      // Defensive: the gate always returns `_video` for non-admin allowed
+      // results (student paths return { allowed, _video } — see quizService
+      // evaluateGate). If a future gate change drops it, skip the enrollment
+      // sync rather than emit an 'undefined' cache key / silently match-less
+      // findFirst. The progress row above is still written — grading and the
+      // sequential gate for video N+1 do not depend on Enrollment.progress.
+      if (courseId) {
+        // Per-user course page cache (courses/controllers getCourseById) — a
+        // completion flips `progress` in that payload; drop the key now so the
+        // student's next course-page load reflects it (not up to 60s stale).
+        const courseCacheKey = cache.buildKey('courses', 'byid', courseId, `u${req.user.id}`);
+        await cache.del(courseCacheKey);
+        const [enrollment, totalVideos, completedVideos] = await Promise.all([
+          prisma.enrollment.findFirst({
+            where: { userId: req.user.id, courseId },
+          }),
+          prisma.bunnyVideo.count({ where: { courseId, status: 'READY' } }),
           prisma.bunnyVideoProgress.count({
-            where: { userId: req.user.id, completed: true, bunnyVideo: { courseId: video.courseId, status: 'READY' } },
+            where: { userId: req.user.id, completed: true, bunnyVideo: { courseId, status: 'READY' } },
           }),
         ]);
-        const completed = totalVideos > 0 && completedVideos === totalVideos;
-        await prisma.enrollment.update({
-          where: { id: enrollment.id },
-          data: {
-            progress: totalVideos ? (completedVideos / totalVideos) * 100 : 0,
-            lastAccess: new Date(),
-            isCompleted: completed,
-            completedAt: completed ? new Date() : null,
-          },
-        });
+
+        if (enrollment) {
+          const completed = totalVideos > 0 && completedVideos === totalVideos;
+          await prisma.enrollment.update({
+            where: { id: enrollment.id },
+            data: {
+              progress: totalVideos ? (completedVideos / totalVideos) * 100 : 0,
+              lastAccess: new Date(),
+              isCompleted: completed,
+              completedAt: completed ? new Date() : null,
+            },
+          });
+        }
       }
     }
 
     // Completion flips the quiz meta `unlocked` flag — drop its cache.
-    // (invalidateQuizMeta never throws by contract.)
-    await invalidateQuizMeta(req.user.id, videoId);
-    // Completing video N unlocks video N+1's gate — invalidate all gate
-    // results for this user so downstream gates reflect the new progress.
-    await invalidateGateForUser(req.user.id);
+    // (invalidateQuizMeta never throws by contract.) Completing video N unlocks
+    // video N+1's gate — invalidate all gate results for this user so
+    // downstream gates reflect the new progress. Both are independent Redis
+    // ops; batch them.
+    await Promise.all([
+      invalidateQuizMeta(req.user.id, videoId),
+      invalidateGateForUser(req.user.id),
+    ]);
 
     return res.json({
       message: 'Video marked as completed',

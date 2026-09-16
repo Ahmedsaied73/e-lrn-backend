@@ -300,11 +300,17 @@ const server = app.listen(port, () => {
     // Start AI essay-grading worker (in-process BullMQ). No-ops with a warning
     // when GEMINI_API_KEY is missing or Redis is disabled — human grading path
     // is unaffected.
-    try {
-      const { startAiGradingWorker } = require('./src/services/aiGrader/worker');
-      startAiGradingWorker();
-    } catch (err) {
-      console.warn('[WARN] AI grading worker failed to start:', err.message);
+    // Multi-instance: set AI_WORKER_PROCESS=true (and run scripts/ai-grader-worker.js
+    // on a dedicated instance) to keep grading off the API processes.
+    if (String(process.env.AI_WORKER_PROCESS || '').toLowerCase() !== 'true') {
+      try {
+        const { startAiGradingWorker } = require('./src/services/aiGrader/worker');
+        startAiGradingWorker();
+      } catch (err) {
+        console.warn('[WARN] AI grading worker failed to start:', err.message);
+      }
+    } else {
+      console.log('[INFO] AI_WORKER_PROCESS=true — AI grading worker running standalone; API will not start an in-process worker.');
     }
 });
 

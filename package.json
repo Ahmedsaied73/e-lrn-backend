@@ -12,6 +12,7 @@
     "lint:fix": "eslint src app.js --fix",
     "format": "prettier --write \"src/**/*.js\" \"app.js\"",
     "format:check": "prettier --check \"src/**/*.js\" \"app.js\"",
+    "worker:ai": "node scripts/ai-grader-worker.js",
     "db:setup": "prisma migrate deploy && prisma generate",
     "upload:course": "node scripts/uploadCourseFolder.js"
   },
