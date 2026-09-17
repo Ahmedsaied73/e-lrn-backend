@@ -15,3 +15,6 @@ graphify-out/
 
 # agent/boot logs (PowerShell hidden window redirects)
 be-*.log
+
+# uploads-to-Supabase migration manifest (never commit; host-local)
+uploads-migration-manifest.json
