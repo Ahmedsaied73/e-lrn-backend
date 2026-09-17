@@ -1,6 +1,7 @@
 const prisma = require('../config/db');
 const bunnyClient = require('../integrations/bunny/bunnyStreamClient');
 const cache = require('../integrations/redis/cache');
+const audit = require('../services/auditLog');
 
 /**
  * Parse a positive-signed 32-bit integer from a route/query param.
@@ -252,6 +253,12 @@ const createCourse = async (req, res) => {
 
     await cache.delPrefix('v1:courses:');
     await cache.del(cache.buildKey('search', 'cats'));
+    await audit.record(req, {
+      action: 'COURSE_CREATE',
+      targetType: 'course',
+      targetId: course.id,
+      metadata: { title, grade },
+    });
     res.status(201).json({ success: true, message: 'Course created successfully', data: course });
   } catch (error) {
     console.error('Error creating course:', error);
@@ -305,6 +312,12 @@ const updateCourse = async (req, res) => {
 
     await cache.delPrefix('v1:courses:');
     await cache.del(cache.buildKey('search', 'cats'));
+    await audit.record(req, {
+      action: 'COURSE_UPDATE',
+      targetType: 'course',
+      targetId: courseId,
+      metadata: { fields: Object.keys(updateData), title: updatedCourse.title },
+    });
     res.json({ success: true, message: 'Course updated successfully', data: updatedCourse });
   } catch (error) {
     console.error('Error updating course:', error);
@@ -324,6 +337,7 @@ const deleteCourse = async (req, res) => {
       where: { id: courseId },
       select: {
         id: true,
+        title: true,
         _count: { select: { videos: true, enrollments: true, certificates: true } }
       }
     });
@@ -430,6 +444,13 @@ const deleteCourse = async (req, res) => {
     } catch (err) {
       console.error('[deleteCourse] gate invalidation failed:', err.message);
     }
+
+    await audit.record(req, {
+      action: 'COURSE_DELETE',
+      targetType: 'course',
+      targetId: courseId,
+      metadata: { title: existingCourse.title, students: enrolledUserIds.length },
+    });
 
     res.json({ success: true, message: 'Course deleted successfully' });
   } catch (error) {

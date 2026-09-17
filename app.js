@@ -48,37 +48,23 @@ app.set('trust proxy', process.env.TRUST_PROXY || 1);
 // Initialize default admin on startup
 setupDefaultAdmin().catch(console.error);
 
-// Define allowed frontend origins
-const allowedOrigins = [
-  'http://localhost:3000',
-  'http://127.0.0.1:3000',
-    'http://127.0.0.1:3002',
-
-  // FRONTEND_URL may be comma-separated: prod Vercel domain plus any PR/preview
-  // deployments share the same cookie + JWT machinery without code changes.
-  ...(process.env.FRONTEND_URL || '').split(',').map(s => s.trim()).filter(Boolean),
-].filter(Boolean);
-
-// Vercel deploys a fresh random subdomain per git push (https://<hash>.vercel.app)
-// plus stable aliases (prod, preview) — allow every *.vercel.app deployment so
-// any branch/PR/preview origin works out-of-the-box after the next deploy.
-const vercelOriginPattern = /^https:\/\/[a-z0-9-]+\.vercel\.app$/i;
-
-function isAllowedOrigin(origin) {
-  return allowedOrigins.includes(origin) || vercelOriginPattern.test(origin);
-}
+// Define allowed frontend origins (single source of truth: src/config/cors.js).
+// FRONTEND_URL may be comma-separated: prod Vercel domain plus any PR/preview
+// deployments share the same cookie + JWT machinery without code changes.
+// Vercel preview deploys get a fresh random subdomain per git push — the
+// *.vercel.app wildcard (cors.js) keeps any branch/PR/preview origin working
+// after the next deploy.
+const { isAllowedOrigin } = require('./src/config/cors');
+const csrfProtection = require('./src/middlewares/csrfProtection');
 
 // Configure CORS for HttpOnly cookie credential support
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl)
+    // Allow requests with no origin (mobile apps, curl, server-to-server).
     if (!origin) return callback(null, true);
-    
-    if (isAllowedOrigin(origin)) {
-      return callback(null, true);
-    } else {
-      return callback(new Error(`CORS policy does not allow access from ${origin}`));
-    }
+    return isAllowedOrigin(origin)
+      ? callback(null, true)
+      : callback(null, false);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
@@ -86,6 +72,27 @@ app.use(cors({
   exposedHeaders: ['Set-Cookie'],
   maxAge: 86400
 }));
+
+// Reject browser requests from origins we don't know. The `cors` middleware
+// above can only omit CORS headers (the browser then blocks); serving an
+// explicit 403 with a machine-readable code gives API clients a clear signal
+// (and keeps these out of the global error handler's 500 bucket).
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && !isAllowedOrigin(origin)) {
+    return res.status(403).json({
+      success: false,
+      error: 'Forbidden.',
+      code: 'ORIGIN_NOT_ALLOWED',
+    });
+  }
+  return next();
+});
+
+// CSRF defence on state-changing requests (cookie sessions). Verifies the
+// request's Origin (or Referer) is a known origin — no FE changes required.
+// See src/middlewares/csrfProtection.js.
+app.use(csrfProtection);
 
 // S-5: security headers. CSP was previously OFF ("needs FE coordination") —
 // now locked to our real asset origins. The backend is a JSON API, so the
@@ -199,8 +206,8 @@ app.get('/health', async (req, res) => {
 app.use(limiter);
 
 // Apply strict per-endpoint limiters to auth routes (login, register, and
-// refresh — refresh accepts body tokens, so it gets the same replay probing
-// protection; 60/15min comfortably covers multi-tab 15-min rotation cycles).
+// refresh — refresh is now strictly cookie-only, but keeps its own bucket so
+// routine multi-tab rotation traffic never eats the login budget).
 app.use('/auth/login', loginLimiter);
 app.use('/auth/register', registerLimiter);
 app.use('/auth/refresh-token', refreshLimiter);

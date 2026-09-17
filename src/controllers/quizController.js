@@ -12,6 +12,7 @@ const { STATUS } = require('../config/quizConfig');
 const cache = require('../integrations/redis/cache');
 const busboy = require('busboy');
 const crypto = require('crypto');
+const audit = require('../services/auditLog');
 
 function parseInteger(value) {
   const parsed = typeof value === 'number' ? value : Number(value);
@@ -589,6 +590,13 @@ const hasPassingScore = passingScore !== undefined && passingScore !== null && p
     // for every user) — drop the namespace (rare admin op, bounded scan).
     await cache.delPrefix('v1:quiz:meta:');
 
+    await audit.record(req, {
+      action: existingQuiz ? 'QUIZ_UPDATE' : 'QUIZ_CREATE',
+      targetType: 'quiz',
+      targetId: quiz.id,
+      metadata: { videoId, title: title.trim() },
+    });
+
     return res.status(200).json({
       success: true,
       message: 'Quiz saved successfully',
@@ -640,6 +648,13 @@ async function deleteQuiz(req, res) {
     } catch {
       // Stale cache self-heals in 60s; never fail the delete for it.
     }
+
+    await audit.record(req, {
+      action: 'QUIZ_DELETE',
+      targetType: 'quiz',
+      targetId: quizId,
+      metadata: { videoId: quiz.bunnyVideoId, title: quiz.title },
+    });
 
     return res.status(200).json({ success: true, message: 'Quiz deleted successfully' });
   } catch (error) {
@@ -1004,6 +1019,13 @@ async function grantExemption(req, res) {
     // is reflected immediately in the sequential gate.
     await quizService.invalidateGateForUser(parsedUserId);
 
+    await audit.record(req, {
+      action: 'GATE_EXEMPTION_GRANT',
+      targetType: 'gateExemption',
+      targetId: exemption.id,
+      metadata: { userId: parsedUserId, videoId, reason: reason || null },
+    });
+
     return res.status(200).json({
       success: true,
       message: 'Gate exemption granted successfully',
@@ -1040,6 +1062,12 @@ async function revokeExemption(req, res) {
       }
       throw error;
     }
+
+    await audit.record(req, {
+      action: 'GATE_EXEMPTION_REVOKE',
+      targetType: 'gateExemption',
+      targetId: exemptionId,
+    });
 
     return res.status(200).json({ success: true, message: 'Exemption revoked successfully' });
   } catch (error) {

@@ -1,5 +1,6 @@
 const prisma = require('../config/db');
 const cache = require('../integrations/redis/cache');
+const audit = require('../services/auditLog');
 
 /**
  * Enroll the authenticated user in a course.
@@ -260,6 +261,13 @@ const adminEnroll = async (req, res) => {
     await quizService.invalidateGateForUser(parsedUserId);
     await cache.del(cache.buildKey('courses', 'byid', parsedCourseId, `u${parsedUserId}`));
 
+    await audit.record(req, {
+      action: 'ENROLL_CREATE',
+      targetType: 'enrollment',
+      targetId: enrollment.id,
+      metadata: { userId: parsedUserId, courseId: parsedCourseId },
+    });
+
     return res.status(201).json({
       success: true,
       message: 'Student enrolled successfully.',
@@ -302,6 +310,13 @@ const unenroll = async (req, res) => {
     // Per-user course page cache — drop it so the course page stops showing the
     // removed enrollment immediately.
     await cache.del(cache.buildKey('courses', 'byid', enrollment.courseId, `u${enrollment.userId}`));
+
+    await audit.record(req, {
+      action: 'ENROLL_DELETE',
+      targetType: 'enrollment',
+      targetId: enrollment.id,
+      metadata: { userId: enrollment.userId, courseId: enrollment.courseId },
+    });
 
     return res.status(200).json({ success: true, message: 'Enrollment removed successfully.' });
   } catch (error) {

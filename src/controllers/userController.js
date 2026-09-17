@@ -2,6 +2,7 @@ const prisma = require('../config/db');
 const bcrypt = require('bcrypt');
 const config = require('../config/env');
 const quizService = require('../services/quizService');
+const audit = require('../services/auditLog');
 
 const selectWithoutPassword = {
   id: true,
@@ -92,6 +93,13 @@ const deleteUser = async (req, res) => {
     // never-throw by contract (invalidateGateForUser swallows cache errors).
     await quizService.invalidateGateForUser(userIdNum);
 
+    await audit.record(req, {
+      action: 'USER_DELETE',
+      targetType: 'user',
+      targetId: userIdNum,
+      metadata: { email: user.email, role: user.role },
+    });
+
     res.json({ success: true, message: 'User deleted successfully.' });
   } catch (error) {
     handleError(res, error, 'Error deleting user:');
@@ -168,6 +176,13 @@ const updateUser = async (req, res) => {
       where: { id: parsedUserId },
       data: updateData,
       select: selectWithoutPassword
+    });
+
+    await audit.record(req, {
+      action: 'USER_UPDATE',
+      targetType: 'user',
+      targetId: parsedUserId,
+      metadata: { fields: Object.keys(updateData), byAdmin: isAdmin },
     });
 
     res.json({ success: true, message: "User data updated successfully", data: updatedUser });

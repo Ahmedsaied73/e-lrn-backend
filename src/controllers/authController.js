@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken');
 const { jwt: jwtConfig } = require('../config/env');
 const { createToken, createRefreshToken, hashRefreshToken, createRefreshTokenFamily } = require('../utils');
 const { accessTokenCookieOptions, refreshTokenCookieOptions } = require('../config/cookie');
+const { getLockState, recordFailure, clearFailures } = require('../integrations/redis/accountLockout');
 
 async function login(req, res) {
   try {
@@ -13,19 +14,37 @@ async function login(req, res) {
       return res.status(400).json({ success: false, error: 'Email and password are required.' });
     }
 
+    // Consecutive-failure lockout (Redis-backed, fail-open when Redis is off).
+    // Checked BEFORE any credential work so a brute-forcer spends nothing per
+    // attempt while locked. Responds 423 with Retry-After when locked.
+    const lockState = await getLockState(email);
+    if (lockState.locked) {
+      res.set('Retry-After', String(Math.max(1, Math.ceil(lockState.retryAfterMs / 1000))));
+      return res.status(423).json({
+        success: false,
+        error: 'Too many failed attempts. Try again later.',
+        code: 'ACCOUNT_LOCKED',
+      });
+    }
+
     const user = await prisma.user.findUnique({
       where: { email: email.trim().toLowerCase() }
     });
 
     if (!user) {
+      await recordFailure(email);
       return res.status(401).json({ success: false, error: 'Invalid credentials.' });
     }
 
     const passwordMatch = await bcrypt.compare(password, user.password);
 
     if (!passwordMatch) {
+      await recordFailure(email);
       return res.status(401).json({ success: false, error: 'Invalid credentials.' });
     }
+
+    // Success clears the failure counter.
+    await clearFailures(email);
 
     const payload = { id: user.id, email: user.email, name: user.name, role: user.role };
     const token = createToken(payload, jwtConfig.secret);
@@ -139,7 +158,11 @@ async function logout(req, res) {
 }
 
 async function refreshToken(req, res) {
-  const token = (req.cookies && req.cookies.refreshToken) || req.body.refreshToken;
+  // Cookie-only: refresh tokens are NEVER accepted from the request body. The
+  // FE keeps them HttpOnly (authService reads nothing from the body), and
+  // accepting body tokens would let a leaked access token in a CSRF-style
+  // submission mint fresh cookies. The refresh cookie is path-scoped to /auth.
+  const token = req.cookies && req.cookies.refreshToken;
   if (!token) return res.status(401).json({ success: false, error: 'Refresh token not provided.' });
 
   try {

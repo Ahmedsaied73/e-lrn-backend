@@ -26,6 +26,7 @@ certificates      Certificate[]
   assignmentAnswers AssignmentAnswer[] // Answers to MCQ assignment questions
   submissions       Submission[] // Assignment submissions by the user
   notifications     Notification[] // In-app inbox rows (optional module)
+  auditLogs         AuditLog[] // Append-only admin-action audit trail
   refreshToken      String?            @db.Text
   refreshTokenFamily String?           @db.VarChar(36) // groups rotated refresh tokens; null = quarantined/logged out everywhere
   createdAt         DateTime           @default(now())
@@ -424,4 +425,26 @@ model Notification {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, read, createdAt])
+}
+
+// ─── Admin audit trail ──────────────────────────────────────────────────────
+// Append-only log of privileged actions (auth round T4.4). One row per action;
+// `metadata` carries typed context (before/after diffs, target names, reason).
+// Never read as a "source of truth" for domain state — it is evidence. Writes
+// are best-effort (see src/services/auditLog.js): an audit failure must never
+// fail the action being audited.
+model AuditLog {
+  id         Int      @id @default(autoincrement())
+  actorId    Int? // null for system/script actions with no admin session
+  action     String // e.g. USER_DELETE, QUIZ_GRADE, COURSE_REORDER
+  targetType String? // e.g. user, course, quiz, enrollment, bunnyvideo
+  targetId   Int?
+  metadata   Json? // { before?, after?, detail? } — sanitized key/value extras
+  createdAt  DateTime @default(now())
+
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([actorId])
+  @@index([action, createdAt])
+  @@index([targetType, targetId])
 }
