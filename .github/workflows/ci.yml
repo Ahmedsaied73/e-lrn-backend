@@ -59,6 +59,9 @@ jobs:
       - name: Generate Prisma client
         run: npx prisma generate
 
+      - name: Lint
+        run: npm run lint
+
       # npm test self-hosts the server on PORT (env above) and tears it down.
       # The suite is net-zero against the shared DB (scratch users deleted,
       # quiz keys restored, exemptions revoked) — safe to run on the staging

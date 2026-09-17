@@ -28,7 +28,7 @@ const authenticateToken = (req, res, next) => {
     }
     req.user = decoded;
     next();
-  } catch (error) {
+  } catch {
     return res.status(401).json({ success: false, error: 'Invalid or expired token.' });
   }
 };
@@ -49,7 +49,7 @@ const optionalAuth = (req, res, next) => {
   try {
     const decoded = jwt.verify(token, jwtConfig.secret);
     if (decoded.type === 'access') req.user = decoded;
-  } catch (error) {
+  } catch {
     // Invalid/expired token — ignore; the request proceeds unauthenticated.
   }
   return next();
@@ -78,7 +78,7 @@ const authorizeAdmin = (arg1, arg2, arg3) => {
         return res.status(403).json({ success: false, error: 'Access denied. Insufficient privileges.' });
       }
       next();
-    } catch (error) {
+    } catch {
       return res.status(500).json({ success: false, error: 'Failed to verify authorization.' });
     }
   };

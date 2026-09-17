@@ -1,7 +1,6 @@
 const express = require('express');
 const cors = require('cors'); // Import CORS package
 const cookieParser = require('cookie-parser'); // Import cookie-parser package
-const { performance } = require('perf_hooks');
 const Authrouter = require('./src/routes/auth');
 const Userrouter = require('./src/routes/users');
 const Courserouter = require('./src/routes/courses');
@@ -26,7 +25,6 @@ const { startReconciliationJob } = require('./src/jobs/reconcileStaleVideos');
 const { AppError } = require('./src/utils/AppError');
 
 const { setupDefaultAdmin } = require('./src/config/setupAdmin');
-const path = require('path');
 const app = express();
 const port = process.env.PORT || 3005;
 
@@ -180,7 +178,7 @@ app.get('/health', async (req, res) => {
       new Promise((_, reject) => setTimeout(() => reject(new Error('db ping timeout')), 3000)),
     ]);
     res.status(200).json({ status: 'ok', db: 'up', uptime: Math.round(process.uptime()), ms: Date.now() - started });
-  } catch (err) {
+  } catch {
     res.status(503).json({ status: 'error', db: 'down', ms: Date.now() - started });
   }
 });

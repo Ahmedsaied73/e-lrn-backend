@@ -701,7 +701,7 @@ async function submitAttempt(userId, attemptId, responses, autoSubmitted = false
 
   // Q-5: grade against the frozen start-time key, never the live quiz row.
   const answerKey = resolveAttemptKey(attempt);
-  const { mcqEarned, totalMcqPoints, perQuestion } = gradeMcq(answerKey, responses);
+  const { mcqEarned, perQuestion } = gradeMcq(answerKey, responses);
   const { totalPoints, totalEssayPoints } = computeTotalPoints(answerKey);
 
   const hasEssays = totalEssayPoints > 0;

@@ -16,7 +16,6 @@ const processCoursePayment = async (req, res) => {
 
   try {
     const { courseId } = req.params;
-    const { paymentMethod } = req.body;
     const userId = req.user.id;
 
     const parsedCourseId = parseInt(courseId, 10);

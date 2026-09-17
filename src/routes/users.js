@@ -3,7 +3,6 @@ const Userrouter = express.Router();
 const { authenticateToken, authorizeAdmin } = require('../middlewares/index');
 const { deleteUser , updateUser , getUser , getUserById , getAllUsers } = require('../controllers/userController');
 const { getAchievements } = require('../controllers/achievementsController');
-const prisma = require('../config/db');
 
 // Get authenticated user data
 Userrouter.get('/me', authenticateToken, getUser);

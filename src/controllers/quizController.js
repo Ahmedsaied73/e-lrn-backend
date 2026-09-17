@@ -1073,7 +1073,7 @@ async function uploadQuizImage(req, res) {
   let bb;
   try {
     bb = busboy({ headers: req.headers, limits: { fileSize: QUIZ_IMAGE_MAX_BYTES, files: 1 } });
-  } catch (error) {
+  } catch {
     return res.status(400).json({ success: false, error: 'Invalid multipart request' });
   }
 

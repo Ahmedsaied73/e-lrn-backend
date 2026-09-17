@@ -181,6 +181,7 @@ const getCourseById = async (req, res) => {
     // The per-user `progress` array is dropped per row — it's already surfaced
     // separately in the top-level `progress` list.
     // Thumbnail absolutization is host-dependent → done per request, post-cache.
+    // eslint-disable-next-line no-unused-vars -- progress is intentionally excluded from the video list
     const videos = course.bunnyVideos.map(({ progress, thumbnailUrl, ...video }) => ({
       ...video,
       thumbnail: thumbnailUrl && !thumbnailUrl.startsWith('http') ? `${baseUrl}/${thumbnailUrl}` : thumbnailUrl

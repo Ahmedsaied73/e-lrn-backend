@@ -8,6 +8,10 @@
     "test": "node scripts/run-tests.js",
     "test:direct": "node --test \"tests/**/*.test.js\"",
     "dev": "nodemon app.js",
+    "lint": "eslint src app.js",
+    "lint:fix": "eslint src app.js --fix",
+    "format": "prettier --write \"src/**/*.js\" \"app.js\"",
+    "format:check": "prettier --check \"src/**/*.js\" \"app.js\"",
     "db:setup": "prisma migrate deploy && prisma generate",
     "upload:course": "node scripts/uploadCourseFolder.js"
   },
@@ -38,6 +42,11 @@
     "zod": "4.6.0"
   },
   "devDependencies": {
-    "nodemon": "^3.1.9"
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^15.15.0",
+    "nodemon": "^3.1.9",
+    "prettier": "^3.9.7"
   }
 }

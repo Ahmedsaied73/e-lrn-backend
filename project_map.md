@@ -33,7 +33,7 @@ A full-stack e-learning platform for Egyptian secondary school students. Courses
 - `POST /courses/` — create (admin)
 - `PUT /courses/:id` — update (admin)
 - `DELETE /courses/:id` — delete with transaction (admin)
-- **Quirk**: `createCourse` assigns to first ADMIN user found, not the requesting user.
+- `POST /courses/` attributes to `req.user.id` (ADMIN caller); first-ADMIN fallback only for script invocation (T5.3 I3, fixed).
 
 ### Bunny Videos (`/courses/:id/bunny-videos`, `/videos/:id/*`)
 - `POST /courses/:courseId/videos` — create Bunny video record + Bunny object
@@ -178,7 +178,6 @@ See `AGENTS.md` → "Bug fixes applied" and `plans/bug-fix-plan.md` for details.
 ### Remaining / Deliberately Open
 - **`answerKey` stored raw in DB** — no encryption. Documented risk, left for now.
 - **Payment disabled** — free-for-all, auto-grants `isPaid`. Needs locking before launch.
-- `createCourse` assigns to first ADMIN, not requester.
 - Cookie/JWT expiry mismatch (15min cookie vs 1h token).
 - Two cookie config objects (`config/cookie.js` used, `utils.js` had `getCookieConfig()` — removed).
 - `accessControl.js` auto-grants `isPaid` on every request (double-duty workaround).

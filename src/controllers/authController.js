@@ -123,7 +123,7 @@ async function logout(req, res) {
           where: { id: decoded.id },
           data: { refreshToken: null }
         });
-      } catch (err) {
+      } catch {
         // Silently ignore if token is invalid or expired
       }
     }

@@ -14,7 +14,7 @@ Node.js/Express e-learning platform for Egyptian secondary school students. Cour
 - `npx prisma studio` — browse database
 - `npm test` — self-hosting `node:test` suite (spawns the app on `TEST_PORT`/3106, waits for `/health`, runs `tests/**/*.test.js`, tears down). Needs `.env` (staging Supabase + Redis) and the demo fixtures (course 1, quiz video 1/2, seqaccess/grader users). `test:direct` runs the suite against an already-running server (`TEST_BASE_URL`).
 
-Tests: `node:test` (no Jest). No linter or formatter configured. CI: `.github/workflows/ci.yml` (uses `npm test`; repo secrets must supply all env.js fail-fast vars for `NODE_ENV=production`).
+Tests: `node:test` (no Jest). Lint/format: `npm run lint` (ESLint 9 flat config, `eslint.config.js`), `npm run format` / `format:check` (Prettier `.prettierrc`) — repo is not yet Prettier-formatted, so `format` diff is noisy; `lint` is clean. CI: `.github/workflows/ci.yml` (uses `npm test`; repo secrets must supply all env.js fail-fast vars for `NODE_ENV=production`).
 
 ## SWE Workflow
 

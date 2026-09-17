@@ -133,7 +133,7 @@ const uploadBunnyVideo = async (req, res, next) => {
   let bb;
   try {
     bb = busboy({ headers: req.headers, limits: { fileSize: maxBytes, files: 1 } });
-  } catch (err) {
+  } catch {
     // busboy throws synchronously if Content-Type is not multipart
     await bunnyVideoService.markFailed(videoId, 'Invalid Content-Type: expected multipart/form-data');
     return next(new AppError('Request must be multipart/form-data', 400, ErrorCodes.INVALID_VIDEO_FILE));

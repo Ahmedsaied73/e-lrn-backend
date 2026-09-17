@@ -208,6 +208,7 @@ const getAssignment = async (req, res) => {
     // who have NOT submitted yet — they could read the keys before attempting.
     if (!submission && !(await isAdmin(req))) {
       assignment.AssignmentQuestion = assignment.AssignmentQuestion.map((question) => {
+        // eslint-disable-next-line no-unused-vars -- destructuring to strip answer-key fields
         const { correctOption, explanation, ...safeQuestion } = question;
         return safeQuestion;
       });

@@ -8,7 +8,6 @@
  */
 
 const prisma = require('../config/db');
-const quizService = require('../services/quizService');
 
 /**
  * GET /user/me/achievements
