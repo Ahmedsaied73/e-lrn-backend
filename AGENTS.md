@@ -127,8 +127,7 @@ Students must complete prerequisites before accessing the next video:
 - `uploads/` directory is used for local file storage (e.g., assignment submissions).
 - Port 3005 is used everywhere (app.js, Dockerfile, docker-compose.yml).
 - **Payment is disabled**: All enrollments auto-mark as paid. Payment controller returns 403 in production. Access control middleware auto-grants `isPaid` on every request.
-- **`createCourse` teacher attribution**: Always assigns to first ADMIN user found, not the requesting user.
-- **Cookie/JWT expiry mismatch**: Access cookie maxAge = 15min, but JWT expiry = 1h.
+- **`createCourse` teacher attribution**: Attributes to `req.user.id` (the authenticated ADMIN caller); falls back to first ADMIN only for script invocation with no user context (fixed in security round 2, T5.3 I3).
 
 ## Optional modules (Sept 2026)
 
@@ -221,7 +220,7 @@ Multi-axis review (both repos) of the P3 diff. Required findings fixed and verif
 | Duplicate email/phone on admin user-edit | P2002 → 409 `Email or phone number already in use.` (was generic 500). |
 | FE `applySearch` kept stale `page` | `setPage(1)` inside `applySearch` on grading/quizzes/enrollments/students/courses; refresh also clamps `page` to `totalPages`. |
 
-Deferred (Optional, low-risk, no UI impact): FE `loadCourseRows` staleness race, reset-button busy flag during in-flight grade, stale `result` on failed `openAttempt`, dropdown `limit:100` cap, duplicated `GRADES` arrays, `parsePositiveInt('1abc')` leniency. Pre-existing unrelated: home-page images (`teacher.png`, `grade1–3.png`, `brain.png`) missing from `public/` → 400s on `/`.
+Deferred (Optional, low-risk, no UI impact): FE `loadCourseRows` staleness race, reset-button busy flag during in-flight grade, stale `result` on failed `openAttempt`, dropdown `limit:100` cap, duplicated `GRADES` arrays, `parsePositiveInt('1abc')` leniency.
 
 ## Round 2 hardening — Layers 3 + 4 (committed `ff7cced` on `TRAE-r2-hardening`)
 
@@ -229,8 +228,8 @@ Backend-only rounds on branch `TRAE-r2-hardening` (5 commits; **not pushed** —
 
 ### Layer 3 — rate-limit fallback gate + structured logging
 
-- `REQUIRE_REDIS_RATE_LIMIT` (default `false`): fail-open vs fail-closed (503 `RATE_LIMIT_STORE_UNAVAILABLE`) when the Redis rate-limit store is down. `true` + no Redis = fatal in prod. Wired via `rateLimit.requireRedis` in `env.js`, `passOnStoreError` on the 3 limiters, code→503 in the global error handler.
-- `src/integrations/redis/rateLimitStore.js` exports `RateLimitStoreUnavailableError` (thrown from `withTimeout`/`clientOrThrow`).
+- `REQUIRE_REDIS_RATE_LIMIT` (default `false`): fail-open-with-local-fallback vs fail-closed (503 `RATE_LIMIT_STORE_UNAVAILABLE`) when the Redis rate-limit store is down. When false (default), the store falls back to a per-instance in-memory counter so limiting still holds locally (NOT shared across instances — multi-hour outages degrade to "N per instance"). When true + no Redis = fatal in prod. Wired via `rateLimit.requireRedis` in `env.js`, `failClosed` option on all 4 limiters (global, login, register, refresh), code→503 in the global error handler.
+- `src/integrations/redis/rateLimitStore.js` — Redis-backed store with in-memory fallback (10k key cap, lazy expiry sweep). `RateLimitStoreUnavailableError` (thrown from `withTimeout`/`clientOrThrow`) only surfaces in `failClosed` mode; otherwise the store catches internally and counts locally.
 - `src/middlewares/logger.js`: structured JSON one-liner per request (`[RESPONSE]`/`[ERROR]`), timestamp/method/path/ip/userId/requestId/status/durationMs, sensitive-masked, `/health`+`/metrics` excluded.
 
 ### Layer 4 — origin allowlist + CSRF, login lockout, audit log, cookie-only refresh
@@ -245,4 +244,4 @@ Backend-only rounds on branch `TRAE-r2-hardening` (5 commits; **not pushed** —
 
 ### R2 test status
 
-`npm test` = 3/4 on staging; the sole failure is the pre-existing `auth limiter buckets` Redis-timing flake (`first 429 at index -1`, reproduces on a clean tree). Layer 4 smoke-verified: allowed/no-origin POST → 401, evil `Origin` → 403 `ORIGIN_NOT_ALLOWED` on GET/POST/preflight, in-process login → 401.
+`npm test` = 4/4 green (auth-limiter flake fixed: in-memory fallback counter ensures counting always holds regardless of Redis latency/quota). Layer 4 smoke-verified: allowed/no-origin POST → 401, evil `Origin` → 403 `ORIGIN_NOT_ALLOWED` on GET/POST/preflight, in-process login → 401.

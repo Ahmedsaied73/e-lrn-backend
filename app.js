@@ -134,7 +134,7 @@ const webhookLimiter = rateLimit({
   windowMs: 5 * 60 * 1000,
   max: 600,
   message: 'Too many webhook requests, please try again later.',
-  ...(redisStoreEnabled ? { store: createRateLimitStore('rl:webhook:'), passOnStoreError: !requireRedisRateLimit } : {}),
+  ...(redisStoreEnabled ? { store: createRateLimitStore('rl:webhook:', { failClosed: requireRedisRateLimit }) } : {}),
 });
 
 app.post(
@@ -155,13 +155,15 @@ app.use(requestLogger);
 // Raised from 100 (Sept 2026) — the default starved automated + real browsing
 // (each admin page load costs ~2-3 API calls). Login stays at 20/15min below.
 // Store: shared Redis when configured (correct across instances), otherwise the
-// built-in MemoryStore. passOnStoreError keeps fail-open if Redis dies UNLESS
-// REQUIRE_REDIS_RATE_LIMIT=true (then a dead store → 503 RATE_LIMIT_STORE_UNAVAILABLE).
+// built-in MemoryStore. When Redis is down the store falls back to a per-instance
+// in-memory counter (so limiting still holds locally) UNLESS REQUIRE_REDIS_RATE_LIMIT=true
+// (then a dead store throws → 503 RATE_LIMIT_STORE_UNAVAILABLE). failClosed mirrors
+// requireRedisRateLimit so both the throw and the 503 stay in lock-step.
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 1000, // limit each IP to 1000 requests per windowMs
   message: 'Too many requests from this IP, please try again later.',
-  ...(redisStoreEnabled ? { store: createRateLimitStore(), passOnStoreError: !requireRedisRateLimit } : {}),
+  ...(redisStoreEnabled ? { store: createRateLimitStore(undefined, { failClosed: requireRedisRateLimit }) } : {}),
 });
 
 // Strict limiters for auth routes. SEPARATE buckets per endpoint: login,
@@ -174,7 +176,7 @@ function makeAuthLimiter(prefix, max) {
     windowMs: 15 * 60 * 1000, // 15 minutes
     max,
     message: 'Too many login attempts from this IP, please try again later.',
-    ...(redisStoreEnabled ? { store: createRateLimitStore(prefix), passOnStoreError: !requireRedisRateLimit } : {}),
+    ...(redisStoreEnabled ? { store: createRateLimitStore(prefix, { failClosed: requireRedisRateLimit }) } : {}),
   });
 }
 const loginLimiter = makeAuthLimiter('rl:login:', 20);

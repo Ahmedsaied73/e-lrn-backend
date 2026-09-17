@@ -64,8 +64,11 @@ function resolveRefreshSecret() {
 // ── Rate-limit fallback gate ────────────────────────────────────────────────
 // REQUIRE_REDIS_RATE_LIMIT (default false) selects the behaviour when a
 // Redis-backed rate limiter's store is unavailable:
-//   false (default) — fail-open: requests pass unthrottled (app stays up; the
-//     cost is a temporarily unthrottled abuse surface while Redis is down).
+//   false (default) — fail-open with a per-instance in-memory fallback: the
+//     limiter keeps counting requests locally so limiting still holds per
+//     Node.js process (an unthrottled abuse surface is avoided during short
+//     Redis blips). NOTE: the local counter is NOT shared across deployed
+//     instances — multi-hour outages degrade to "N per instance", not global.
 //   true — fail-closed: requests get HTTP 503 until the store recovers
 //     (RATE_LIMIT_STORE_UNAVAILABLE). Set this on deployments where the API is
 //     internet-exposed (production) and an unthrottled window is worse than a
@@ -176,7 +179,7 @@ function resolveFlag(rawValue, defaultValue) {
 const config = {
   jwt: {
     secret: process.env.JWTSECRET,
-    expiry: process.env.JWT_EXPIRY || '1h',
+    expiry: process.env.JWT_EXPIRY || '15m',
     refreshSecret: resolveRefreshSecret(),
     refreshExpiry: process.env.REFRESH_TOKEN_EXPIRY || '7d'
   },
