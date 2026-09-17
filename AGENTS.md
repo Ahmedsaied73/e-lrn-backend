@@ -222,3 +222,27 @@ Multi-axis review (both repos) of the P3 diff. Required findings fixed and verif
 | FE `applySearch` kept stale `page` | `setPage(1)` inside `applySearch` on grading/quizzes/enrollments/students/courses; refresh also clamps `page` to `totalPages`. |
 
 Deferred (Optional, low-risk, no UI impact): FE `loadCourseRows` staleness race, reset-button busy flag during in-flight grade, stale `result` on failed `openAttempt`, dropdown `limit:100` cap, duplicated `GRADES` arrays, `parsePositiveInt('1abc')` leniency. Pre-existing unrelated: home-page images (`teacher.png`, `grade1–3.png`, `brain.png`) missing from `public/` → 400s on `/`.
+
+## Round 2 hardening — Layers 3 + 4 (committed `ff7cced` on `TRAE-r2-hardening`)
+
+Backend-only rounds on branch `TRAE-r2-hardening` (5 commits; **not pushed** — apply via patches then push). Layers 0–2 delivered earlier on the same branch.
+
+### Layer 3 — rate-limit fallback gate + structured logging
+
+- `REQUIRE_REDIS_RATE_LIMIT` (default `false`): fail-open vs fail-closed (503 `RATE_LIMIT_STORE_UNAVAILABLE`) when the Redis rate-limit store is down. `true` + no Redis = fatal in prod. Wired via `rateLimit.requireRedis` in `env.js`, `passOnStoreError` on the 3 limiters, code→503 in the global error handler.
+- `src/integrations/redis/rateLimitStore.js` exports `RateLimitStoreUnavailableError` (thrown from `withTimeout`/`clientOrThrow`).
+- `src/middlewares/logger.js`: structured JSON one-liner per request (`[RESPONSE]`/`[ERROR]`), timestamp/method/path/ip/userId/requestId/status/durationMs, sensitive-masked, `/health`+`/metrics` excluded.
+
+### Layer 4 — origin allowlist + CSRF, login lockout, audit log, cookie-only refresh
+
+- **`src/config/cors.js`** — single source of truth for allowed origins (static list + comma-split `FRONTEND_URL` + Vercel `*.vercel.app` wildcard). Shared by CORS + CSRF, keep in lock-step. Versions with `require()` so the middleware files match the FE/backend capabilities.
+- **app.js** — disallowed `Origin` now → 403 `ORIGIN_NOT_ALLOWED` (was `callback(new Error(...))` → 500). `csrfProtection` mounted after the CORS block, before routes. Bunny webhook (no Origin) unaffected.
+- **`src/middlewares/csrfProtection.js`** — checks Origin (then Referer fallback) on POST/PUT/PATCH/DELETE only; no Origin/Referer (curl, server-to-server, webhook) → allowed. No FE changes required.
+- **`src/integrations/redis/accountLockout.js`** — Redis `v1:authlock:{email}` counter (Lua INCR+PEXPIRE). `LOGIN_FAILURE_THRESHOLD` (default 5) consecutive failures → locked for `ACCOUNT_LOCKOUT_MS` (default 15min) → 423 `ACCOUNT_LOCKED` + `Retry-After`. Success clears. Fail-open when Redis down.
+- **`src/services/auditLog.js`** — `AuditLog` model (migration `20260917000000_audit_log`, applied + generated) + best-effort never-throw helper. Wired into: user delete/update, course create/update/delete, admin enroll/unenroll, quiz create/update/delete, exemption grant/revoke.
+- **Cookie-only refresh** — `POST /auth/refresh-token` no longer reads `req.body.refreshToken`, cookie only.
+- **Test** — `tests/auth-limiter.test.js` tolerates 423 `ACCOUNT_LOCKED` as a legit pre-trip code (lockout trips at 5 < limiter 20).
+
+### R2 test status
+
+`npm test` = 3/4 on staging; the sole failure is the pre-existing `auth limiter buckets` Redis-timing flake (`first 429 at index -1`, reproduces on a clean tree). Layer 4 smoke-verified: allowed/no-origin POST → 401, evil `Origin` → 403 `ORIGIN_NOT_ALLOWED` on GET/POST/preflight, in-process login → 401.
