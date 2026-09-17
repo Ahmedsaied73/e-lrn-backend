@@ -18,6 +18,8 @@ const { createRateLimitStore } = require('./src/integrations/redis/rateLimitStor
 const { isRedisEnabled } = require('./src/integrations/redis/redisClient');
 const redisStoreEnabled = isRedisEnabled();
 const helmet = require('helmet'); // S-5: security headers WITHOUT CSP (full CSP needs FE coordination)
+const config = require('./src/config/env');
+const requireRedisRateLimit = config.rateLimit.requireRedis;
 // Bunny Stream — new modules
 const bunnyVideoRoutes = require('./src/routes/bunnyVideoRoutes');
 const { handleBunnyWebhook } = require('./src/controllers/bunnyWebhookController');
@@ -125,7 +127,7 @@ const webhookLimiter = rateLimit({
   windowMs: 5 * 60 * 1000,
   max: 600,
   message: 'Too many webhook requests, please try again later.',
-  ...(redisStoreEnabled ? { store: createRateLimitStore('rl:webhook:'), passOnStoreError: true } : {}),
+  ...(redisStoreEnabled ? { store: createRateLimitStore('rl:webhook:'), passOnStoreError: !requireRedisRateLimit } : {}),
 });
 
 app.post(
@@ -146,12 +148,13 @@ app.use(requestLogger);
 // Raised from 100 (Sept 2026) — the default starved automated + real browsing
 // (each admin page load costs ~2-3 API calls). Login stays at 20/15min below.
 // Store: shared Redis when configured (correct across instances), otherwise the
-// built-in MemoryStore. passOnStoreError keeps fail-open if Redis dies.
+// built-in MemoryStore. passOnStoreError keeps fail-open if Redis dies UNLESS
+// REQUIRE_REDIS_RATE_LIMIT=true (then a dead store → 503 RATE_LIMIT_STORE_UNAVAILABLE).
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 1000, // limit each IP to 1000 requests per windowMs
   message: 'Too many requests from this IP, please try again later.',
-  ...(redisStoreEnabled ? { store: createRateLimitStore(), passOnStoreError: true } : {}),
+  ...(redisStoreEnabled ? { store: createRateLimitStore(), passOnStoreError: !requireRedisRateLimit } : {}),
 });
 
 // Strict limiters for auth routes. SEPARATE buckets per endpoint: login,
@@ -164,7 +167,7 @@ function makeAuthLimiter(prefix, max) {
     windowMs: 15 * 60 * 1000, // 15 minutes
     max,
     message: 'Too many login attempts from this IP, please try again later.',
-    ...(redisStoreEnabled ? { store: createRateLimitStore(prefix), passOnStoreError: true } : {}),
+    ...(redisStoreEnabled ? { store: createRateLimitStore(prefix), passOnStoreError: !requireRedisRateLimit } : {}),
   });
 }
 const loginLimiter = makeAuthLimiter('rl:login:', 20);
@@ -255,6 +258,18 @@ app.use((err, req, res, next) => {
     return res.status(err.statusCode).json({
       success: false,
       error: err.message,
+      code: err.code,
+    });
+  }
+
+  // Fail-closed rate limiting: REQUIRE_REDIS_RATE_LIMIT=true + a dead Redis
+  // store → the limiter rethrows RateLimitStoreUnavailableError. Serve 503 so
+  // clients retry instead of getting an unthrottled pass-through or a 500.
+  if (err && err.code === 'RATE_LIMIT_STORE_UNAVAILABLE') {
+    const statusCode = err.statusCode || 503;
+    return res.status(statusCode).json({
+      success: false,
+      error: 'Rate limiting is temporarily unavailable. Please try again shortly.',
       code: err.code,
     });
   }

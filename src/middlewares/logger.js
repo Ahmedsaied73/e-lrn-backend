@@ -1,103 +1,89 @@
 /**
- * Request Logger Middleware
- * 
- * This middleware logs detailed information about incoming HTTP requests
- * and their responses for debugging and monitoring purposes.
- * 
+ * Request Logger Middleware (structured)
+ *
+ * Emits one JSON object per request/response so logs are machine-parseable
+ * (matching the structured `[INFO] module.event {...}` convention used by the
+ * jobs and workers) instead of free-text lines.
+ *
  * Features:
- * - Logs request method, URL, and timestamp
- * - Logs request headers and body (configurable)
- * - Logs response status code and response time
- * - Supports different log levels based on environment
- * - Masks sensitive data in logs
+ * - Single `[RESPONSE] {...}` JSON line per completed request: method, path,
+ *   status, response time, client IP, userId, optional requestId.
+ * - Optional request-time headers/body capture (off by default; sensitive
+ *   fields are ALWAYS masked even when explicitly enabled).
+ * - Error responses emit a `[ERROR]` line with the same masked payload.
+ * - `/health` and `/metrics` are excluded so probes stay quiet.
  */
 
 const logger = (options = {}) => {
-  // Default configuration
   const config = {
     logHeaders: options.logHeaders || false,
     logBody: options.logBody || false,
-    logLevel: options.logLevel || 'info',
     sensitiveFields: options.sensitiveFields || ['password', 'token', 'authorization', 'cookie'],
-    excludePaths: options.excludePaths || ['/health', '/metrics']
+    excludePaths: options.excludePaths || ['/health', '/metrics'],
   };
 
   /**
-   * Mask sensitive data in objects
-   * @param {Object} obj - Object to mask
-   * @returns {Object} - Masked object
+   * Deep-copy and mask sensitive keys. Never mutates the input object.
    */
   const maskSensitiveData = (obj) => {
     if (!obj || typeof obj !== 'object') return obj;
-    
-    const masked = { ...obj };
-    
-    for (const key in masked) {
+    if (Array.isArray(obj)) return obj.map(maskSensitiveData);
+
+    const masked = {};
+    for (const key of Object.keys(obj)) {
+      const value = obj[key];
       if (config.sensitiveFields.includes(key.toLowerCase())) {
         masked[key] = '[REDACTED]';
-      } else if (typeof masked[key] === 'object') {
-        masked[key] = maskSensitiveData(masked[key]);
+      } else if (value && typeof value === 'object') {
+        masked[key] = maskSensitiveData(value);
+      } else {
+        masked[key] = value;
       }
     }
-    
     return masked;
   };
 
   return (req, res, next) => {
-    // Skip logging for excluded paths
-    if (config.excludePaths.some(path => req.path.startsWith(path))) {
+    if (config.excludePaths.some((p) => req.path.startsWith(p))) {
       return next();
     }
 
-    // Capture request timestamp
     const startTime = Date.now();
-    const requestTime = new Date().toISOString();
-    
-    // Prepare request data for logging
-    const requestData = {
-      method: req.method,
-      url: req.originalUrl || req.url,
-      ip: req.ip || req.connection.remoteAddress,
-      timestamp: requestTime,
-      userId: req.user ? req.user.id : 'unauthenticated'
-    };
-    
-    // Add headers if configured
-    if (config.logHeaders) {
-      requestData.headers = maskSensitiveData(req.headers);
-    }
-    
-    // Add body if configured and exists
-    if (config.logBody && req.body && Object.keys(req.body).length > 0) {
-      requestData.body = maskSensitiveData(req.body);
-    }
-    
-    // Log request
-    console.log(`[REQUEST] ${requestData.method} ${requestData.url} - User: ${requestData.userId}`);
-    
+    const timestamp = new Date().toISOString();
 
-    // Log response when finished
+    const base = {
+      timestamp,
+      method: req.method,
+      path: req.originalUrl || req.url,
+      ip: req.ip || req.connection.remoteAddress,
+      userId: req.user ? req.user.id : null,
+      requestId: req.headers['x-request-id'] || null,
+    };
+
+    if (config.logHeaders) {
+      base.requestHeaders = maskSensitiveData(req.headers);
+    }
+    if (config.logBody && req.body && Object.keys(req.body).length > 0) {
+      base.requestBody = maskSensitiveData(req.body);
+    }
+
     res.on('finish', () => {
-      const responseTime = Date.now() - startTime;
-      
-      const responseData = {
-        statusCode: res.statusCode,
-        responseTime: `${responseTime}ms`,
-        timestamp: new Date().toISOString()
+      const entry = {
+        ...base,
+        status: res.statusCode,
+        durationMs: Date.now() - startTime,
       };
-      
-      // Log response
-      console.log(`[RESPONSE] ${requestData.method} ${requestData.url} - Status: ${responseData.statusCode} - Time: ${responseData.responseTime}`);
-      
-      // Log detailed info for errors
+
+      // The enriched object stays private to this handler; on error we log the
+      // same masked payload (never the raw request body/headers).
+      const logLine = JSON.stringify(entry);
       if (res.statusCode >= 400) {
-        console.error(`[ERROR] ${requestData.method} ${requestData.url} - Status: ${responseData.statusCode}`, {
-          request: requestData,
-          response: responseData
-        });
+        console.error(`[ERROR] ${logLine}`);
+      } else {
+        console.log(`[RESPONSE] ${logLine}`);
       }
     });
-    
+
     next();
   };
 };

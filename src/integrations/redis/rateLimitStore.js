@@ -19,10 +19,22 @@ const PREFIX = 'rl:';
 const COMMAND_TIMEOUT_MS = 500;
 const CONNECT_TIMEOUT_MS = 250;
 
+// Typed error so a limiter configured with passOnStoreError:false can fail
+// CLOSED with a specific HTTP code (503 RATE_LIMIT_STORE_UNAVAILABLE) instead
+// of a generic 500 — the global error handler in app.js keys on this code.
+class RateLimitStoreUnavailableError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'RateLimitStoreUnavailableError';
+    this.code = 'RATE_LIMIT_STORE_UNAVAILABLE';
+    this.statusCode = 503;
+  }
+}
+
 function withTimeout(promise, ms = COMMAND_TIMEOUT_MS) {
   let timer;
   const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error('redis store timeout')), ms);
+    timer = setTimeout(() => reject(new RateLimitStoreUnavailableError('redis store timeout')), ms);
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
@@ -30,7 +42,7 @@ function withTimeout(promise, ms = COMMAND_TIMEOUT_MS) {
 function clientOrThrow() {
   const client = getRedis();
   if (!client || client.status !== 'ready') {
-    throw new Error('redis unavailable for rate limiting');
+    throw new RateLimitStoreUnavailableError('redis unavailable for rate limiting');
   }
   return client;
 }
@@ -92,4 +104,4 @@ function createRateLimitStore(keyPrefix = PREFIX) {
   };
 }
 
-module.exports = { createRateLimitStore };
+module.exports = { createRateLimitStore, RateLimitStoreUnavailableError };

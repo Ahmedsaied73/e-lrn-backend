@@ -61,6 +61,35 @@ function resolveRefreshSecret() {
   return candidate || process.env.JWTSECRET;
 }
 
+// ── Rate-limit fallback gate ────────────────────────────────────────────────
+// REQUIRE_REDIS_RATE_LIMIT (default false) selects the behaviour when a
+// Redis-backed rate limiter's store is unavailable:
+//   false (default) — fail-open: requests pass unthrottled (app stays up; the
+//     cost is a temporarily unthrottled abuse surface while Redis is down).
+//   true — fail-closed: requests get HTTP 503 until the store recovers
+//     (RATE_LIMIT_STORE_UNAVAILABLE). Set this on deployments where the API is
+//     internet-exposed (production) and an unthrottled window is worse than a
+//     short outage.
+// When set true but Redis is disabled/unconfigured, the app cannot enforce it:
+// fatal in production (refuse to boot silently unthrottled), warn in dev.
+function resolveRateLimitRequireRedis() {
+  const rawValue = String(process.env.REQUIRE_REDIS_RATE_LIMIT || '').trim().toLowerCase();
+  const requireRedis = ['true', '1', 'yes', 'on'].includes(rawValue);
+  if (!requireRedis) return false;
+
+  const redisEnabled = String(process.env.REDIS_ENABLED || '').toLowerCase() === 'true';
+  const url = process.env.REDIS_URL;
+  const looksPlaceholder = Boolean(url) && REDIS_PLACEHOLDER_RE.test(url);
+  if (!redisEnabled || !url || looksPlaceholder) {
+    if (process.env.NODE_ENV === 'production') {
+      console.error('[FATAL] REQUIRE_REDIS_RATE_LIMIT=true but Redis is not enabled/configured. Set REDIS_ENABLED=true + a real REDIS_URL, or unset REQUIRE_REDIS_RATE_LIMIT.');
+      process.exit(1);
+    }
+    console.warn('[WARN] REQUIRE_REDIS_RATE_LIMIT=true but Redis is not enabled/configured — rate limiting will fail OPEN.');
+  }
+  return true;
+}
+
 // ── Supabase Storage config (quiz question images) ──────────────────────────
 // Uploads are proxied through POST /quizzes/images (ADMIN-only); the service
 // key never leaves the server. Missing keys → dev warns + endpoint 501s;
@@ -153,6 +182,9 @@ const config = {
   },
   supabase: resolveSupabase(),
   redis: resolveRedis(),
+  rateLimit: {
+    requireRedis: resolveRateLimitRequireRedis(),
+  },
   aiGrader: resolveAiGrader(),
   features: {
     notifications: resolveFlag(process.env.NOTIFICATIONS_ENABLED, true),
