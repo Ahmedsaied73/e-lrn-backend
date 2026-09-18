@@ -6,18 +6,11 @@
  * Route → Middleware (auth/authz) → Controller → Service → DB/Bunny
  *
  * Mounted in app.js as:
- *   app.use('/courses', bunnyVideoRoutes)  → POST /courses/:courseId/videos
- *   app.use('/videos', bunnyVideoRoutes)   → POST /videos/:videoId/upload
- *                                          → GET  /videos/:videoId/playback
+ *   app.use('/courses', bunnyVideoRoutes)  → POST /courses/:courseSlug/videos
+ *   app.use('/videos', bunnyVideoRoutes)   → POST /videos/:videoSlug/upload
+ *                                          → GET  /videos/:videoSlug/playback
  *
- * Conflict analysis vs existing routes:
- *   Existing /courses routes: GET /, GET /:id, POST /, PUT /:id, DELETE /:id (no /courses/:id/videos)
- *   Existing /videos routes: GET /course/:courseId, GET /:id, POST /course/:courseId, PUT /:id, DELETE /:id
- *   New routes below do NOT conflict with any of the above paths.
- *
- * Rate limiting note: the global limiter in app.js (100 req/15min) applies.
- * Upload endpoint has a longer effective timeout due to streaming — ensure
- * your Nginx/proxy upstream read timeout is set high enough for large files.
+ * All resource identifiers are public slugs. Numeric ids stay internal-only.
  */
 
 const express = require('express');
@@ -37,54 +30,53 @@ const {
 // ─── Course-scoped video management ───────────────────────────────────────────
 
 /**
- * POST /courses/:courseId/videos
+ * POST /courses/:courseSlug/videos
  * Create a Bunny video record and Bunny video object.
  * Body: { "title": "Lecture 1 - Introduction" }
  * Auth: ADMIN only
  */
-router.post('/:courseId/videos', authenticateToken, authorizeAdmin(), createBunnyVideo);
+router.post('/:courseSlug/videos', authenticateToken, authorizeAdmin(), createBunnyVideo);
 
 /**
- * GET /courses/:courseId/bunny-videos
+ * GET /courses/:courseSlug/bunny-videos
  * List all Bunny videos for a course.
  * Auth: authenticateToken (Admin sees all; students see READY metadata)
- * Playback access remains protected by GET /videos/:videoId/playback.
+ * Playback access remains protected by GET /videos/:videoSlug/playback.
  */
-router.get('/:courseId/bunny-videos', authenticateToken, listCourseBunnyVideos);
+router.get('/:courseSlug/bunny-videos', authenticateToken, listCourseBunnyVideos);
 
 /**
- * PUT /courses/:courseId/reorder
+ * PUT /courses/:courseSlug/reorder
  * Reorder Bunny videos within a course.
- * Body: { "videoIds": [3, 1, 2] } — BunnyVideo IDs in desired order
+ * Body: { "videoSlugs": ["video-1", "video-2"] } — BunnyVideo slugs in desired order
  * Auth: ADMIN only
  */
-router.put('/:courseId/reorder', authenticateToken, authorizeAdmin(), reorderCourseVideos);
+router.put('/:courseSlug/reorder', authenticateToken, authorizeAdmin(), reorderCourseVideos);
 
 // ─── Video-level operations ────────────────────────────────────────────────────
 
 /**
- * POST /videos/:videoId/upload
+ * POST /videos/:videoSlug/upload
  * Stream a video binary to Bunny (multipart/form-data, field name: "video").
  * Auth: ADMIN only
  * Note: busboy streaming is handled inside the controller — no body-parser middleware here.
  *       Do NOT add express.json() or multer to this route.
  */
-router.post('/:videoId/upload', authenticateToken, authorizeAdmin(), uploadBunnyVideo);
+router.post('/:videoSlug/upload', authenticateToken, authorizeAdmin(), uploadBunnyVideo);
 
 /**
- * GET /videos/:videoId/playback
+ * GET /videos/:videoSlug/playback
  * Get a signed Bunny embed URL for a READY video.
  * Auth: authenticateToken (ADMIN + enrolled STUDENT)
  * Note: Admin bypasses enrollment check in the controller.
  */
-router.get('/:videoId/playback', authenticateToken, ensureBunnySequentialAccess, getBunnyVideoPlayback);
+router.get('/:videoSlug/playback', authenticateToken, ensureBunnySequentialAccess, getBunnyVideoPlayback);
 
 /**
- * DELETE /videos/bunny/:videoId
+ * DELETE /videos/bunny/:videoSlug
  * Delete a Bunny video from Bunny Stream and local DB.
  * Auth: ADMIN only
  */
-router.delete('/bunny/:videoId', authenticateToken, authorizeAdmin(), deleteBunnyVideo);
+router.delete('/bunny/:videoSlug', authenticateToken, authorizeAdmin(), deleteBunnyVideo);
 
 module.exports = router;
-

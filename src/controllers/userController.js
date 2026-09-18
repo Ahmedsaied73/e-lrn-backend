@@ -3,9 +3,11 @@ const bcrypt = require('bcrypt');
 const config = require('../config/env');
 const quizService = require('../services/quizService');
 const audit = require('../services/auditLog');
+const { isValidUserSlug } = require('../utils/slugs');
 
 const selectWithoutPassword = {
   id: true,
+  slug: true,
   name: true,
   email: true,
   phoneNumber: true,
@@ -14,6 +16,16 @@ const selectWithoutPassword = {
   lastLoginAt: true,
   createdAt: true
 };
+
+// Resolve a userSlug param to a numeric user id, or null. Never throws.
+async function resolveUserIdBySlug(slug) {
+  if (!isValidUserSlug(slug)) return null;
+  const user = await prisma.user.findUnique({
+    where: { slug },
+    select: { id: true },
+  });
+  return user ? user.id : null;
+}
 
 // Helper function to handle errors
 const handleError = (res, error, message) => {
@@ -41,12 +53,15 @@ const getUser = async (req, res) => {
 
 // delete user
 const deleteUser = async (req, res) => {
-  const { userId } = req.params;
-  const userIdNum = parseInt(userId, 10);
+  const { userSlug } = req.params;
 
   try {
-    if (!Number.isSafeInteger(userIdNum) || userIdNum <= 0) {
-      return res.status(400).json({ success: false, error: 'Invalid user ID.' });
+    if (!isValidUserSlug(userSlug)) {
+      return res.status(400).json({ success: false, error: 'Invalid user slug.' });
+    }
+    const userIdNum = await resolveUserIdBySlug(userSlug);
+    if (!userIdNum) {
+      return res.status(404).json({ success: false, error: 'User not found.' });
     }
 
     const user = await prisma.user.findUnique({
@@ -108,15 +123,18 @@ const deleteUser = async (req, res) => {
 
 // update user
 const updateUser = async (req, res) => {
-  const { userId } = req.params;
+  const { userSlug } = req.params;
   const { name, email, password, grade, phoneNumber } = req.body;
   const requesterId = req.user.id;
   const requesterRole = req.user.role;
-  const parsedUserId = parseInt(userId, 10);
 
   try {
-    if (!Number.isSafeInteger(parsedUserId) || parsedUserId <= 0) {
-      return res.status(400).json({ success: false, error: 'Invalid user ID.' });
+    if (!isValidUserSlug(userSlug)) {
+      return res.status(400).json({ success: false, error: 'Invalid user slug.' });
+    }
+    const parsedUserId = await resolveUserIdBySlug(userSlug);
+    if (!parsedUserId) {
+      return res.status(404).json({ success: false, error: 'User not found.' });
     }
 
     // Check if the requester is the user themselves or an admin
@@ -194,14 +212,17 @@ const updateUser = async (req, res) => {
   }
 };
 
-// Get user by ID (admin only)
+// Get user by slug (admin only)
 const getUserById = async (req, res) => {
-  const { userId } = req.params;
+  const { userSlug } = req.params;
 
   try {
-    const userIdNum = parseInt(userId, 10);
-    if (!Number.isSafeInteger(userIdNum) || userIdNum <= 0) {
-      return res.status(400).json({ success: false, error: 'Invalid user ID.' });
+    if (!isValidUserSlug(userSlug)) {
+      return res.status(400).json({ success: false, error: 'Invalid user slug.' });
+    }
+    const userIdNum = await resolveUserIdBySlug(userSlug);
+    if (!userIdNum) {
+      return res.status(404).json({ success: false, error: 'User not found.' });
     }
 
     // Get user data

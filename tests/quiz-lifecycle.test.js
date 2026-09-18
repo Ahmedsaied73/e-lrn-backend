@@ -11,6 +11,7 @@ const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { createToken } = require('../src/utils.js');
 const config = require('../src/config/env.js');
+const { opaqueUserSlug } = require('../src/utils/slugs.js');
 const { PrismaClient } = require('@prisma/client');
 
 const API = process.env.TEST_BASE_URL || 'http://localhost:3005';
@@ -53,14 +54,14 @@ function pickMcq(live) {
 
 async function makeStudent(tag) {
   const email = `seed-${tag}-${Date.now()}@localhost.test`;
-  const stu = await prisma.user.create({ data: { name: 'Seed', email, password: 'x', grade: 'FIRST_SECONDARY' } });
+  const stu = await prisma.user.create({ data: { slug: opaqueUserSlug(), name: 'Seed', email, password: 'x', grade: 'FIRST_SECONDARY' } });
   const cookie = `accessToken=${createToken({ id: stu.id, email, name: 'S', role: 'STUDENT' }, config.jwt.secret)}`;
   const admin = adminCookie();
-  const enr = await req('POST', '/admin/enrollments', admin, { userId: stu.id, courseId: 1 });
+  const enr = await req('POST', '/admin/enrollments', admin, { userSlug: stu.slug, courseSlug: 'course-1' });
   assert.equal(enr.status, 201, 'enroll fixture');
-  const grant = await req('POST', '/quizzes/videos/1/exemptions', admin, { userId: stu.id, reason: 'seed' });
+  const grant = await req('POST', '/quizzes/videos/video-1/exemptions', admin, { userSlug: stu.slug, reason: 'seed' });
   assert.equal(grant.status, 200, 'exemption fixture');
-  await req('POST', '/progress/complete', cookie, { videoId: 2 });
+  await req('POST', '/progress/complete', cookie, { videoSlug: 'video-2' });
   return {
     stu, cookie,
     exId: grant.json.data.id,
@@ -91,7 +92,7 @@ describe('quiz lifecycle', () => {
     const target = pickMcq(live);
     const fx = await makeStudent('hide');
     try {
-      const start = await req('POST', '/quizzes/videos/2/start', fx.cookie, {});
+      const start = await req('POST', '/quizzes/videos/video-2/start', fx.cookie, {});
       assert.equal(start.status, 200);
       const attId = start.json.data.attemptId;
       const sub = await req('POST', `/quizzes/attempts/${attId}/submit`, fx.cookie, { answers: { [target.q]: target.wrong } });
@@ -111,7 +112,7 @@ describe('quiz lifecycle', () => {
       assert.equal(q.isCorrect, false);
       assert.ok(!JSON.stringify(res.json).includes('answerKey'), 'result leaks answerKey');
       assert.ok(!JSON.stringify(res.json).includes('correctValue'), 'result leaks correctValue');
-      const retry = await req('POST', '/quizzes/videos/2/start', fx.cookie, {});
+      const retry = await req('POST', '/quizzes/videos/video-2/start', fx.cookie, {});
       assert.equal(retry.status, 200, 'retake allowed after fail');
       const retryId = retry.json.data.attemptId;
       await req('POST', `/quizzes/attempts/${retryId}/reset`, adminCookie(), {});
@@ -127,11 +128,11 @@ describe('quiz lifecycle', () => {
     const target = pickMcq(live0);
     const fx = await makeStudent('snap');
     try {
-      const start = await req('POST', '/quizzes/videos/2/start', fx.cookie, {});
+      const start = await req('POST', '/quizzes/videos/video-2/start', fx.cookie, {});
       const attId = start.json.data.attemptId;
       const Kflip = JSON.parse(JSON.stringify(live0.answerKey));
       Kflip[target.q].correctValue = target.wrong;
-      const flip = await req('POST', '/quizzes/videos/2', adminCookie(),
+      const flip = await req('POST', '/quizzes/videos/video-2', adminCookie(),
         { title: live0.title, surveyJson: live0.surveyJson, answerKey: Kflip });
       assert.equal(flip.status, 200);
       try {
@@ -146,7 +147,7 @@ describe('quiz lifecycle', () => {
         assert.equal(q.correctAnswer, showAnswers ? target.correct : null, 'review honors frozen key + hide-until-pass');
         assert.equal(q.isCorrect, true);
       } finally {
-        const restore = await req('POST', '/quizzes/videos/2', adminCookie(),
+        const restore = await req('POST', '/quizzes/videos/video-2', adminCookie(),
           { title: live0.title, surveyJson: live0.surveyJson, answerKey: live0.answerKey });
         assert.equal(restore.status, 200);
         const back = await prisma.quiz.findUnique({ where: { bunnyVideoId: 2 } });
@@ -159,11 +160,11 @@ describe('quiz lifecycle', () => {
 
   it('gates: passed quiz blocks retake, locked video denies playback', async () => {
     const seqCookie = `accessToken=${createToken({ id: 2, email: 'seqaccess@localhost.test', name: 'S', role: 'STUDENT' }, config.jwt.secret)}`;
-    const start = await req('POST', '/quizzes/videos/1/start', seqCookie, {});
+    const start = await req('POST', '/quizzes/videos/video-1/start', seqCookie, {});
     assert.equal(start.status, 409);
     assert.equal(start.json.code, 'ALREADY_PASSED');
     const graderCookie = `accessToken=${createToken({ id: 3, email: 'grader-demo@localhost.test', name: 'G', role: 'STUDENT' }, config.jwt.secret)}`;
-    const gate = await req('GET', '/videos/2/playback', graderCookie);
+    const gate = await req('GET', '/videos/video-2/playback', graderCookie);
     assert.equal(gate.status, 403);
     assert.equal(gate.json.code, 'SEQUENTIAL_GATE');
   });

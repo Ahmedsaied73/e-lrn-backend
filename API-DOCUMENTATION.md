@@ -49,6 +49,22 @@ Single reference for every HTTP endpoint of the e-learning platform backend. Cov
 - **Legacy endpoints** (payments, search, assignments, video progress *success bodies*) return raw objects and do **not** wrap successes in `success`. Their errors still carry structured `code` values.
 - Errors thrown through the global handler (`app.js`) always produce `{ success: false, error: <string>, code: <string> }`.
 
+### Resource identifiers (slug scheme)
+
+Users, courses, Bunny videos and quizzes carry a unique, externally visible `slug`:
+
+| Resource | Slug pattern | Exposed in public payloads | Numeric id |
+|---|---|---|---|
+| `User` | `u_` + random hex (opaque, non-enumerable) | `{ id, slug, name, ... }` — **both** kept (id needed by deferred admin surfaces) | kept |
+| `Course` | readable slug (`course-1`, `course-...`) | `{ slug, ... }` — `id`/`teacherId` **removed** | internal only |
+| `BunnyVideo` | readable slug (`video-1`, `video-...`) | `{ slug, courseSlug, quizSlug | null, ... }` — `id`, `courseId`, `bunnyVideoId` **removed** | internal only |
+| `Quiz` | readable slug (`quiz-1`, `quiz-...`) | `{ slug, videoSlug, ... }` — `id`, `bunnyVideoId` **removed** | internal only |
+
+- `User` slugs are **opaque** (`u_...`) and can NOT be enumerated/guessed; course/video/quiz slugs are readable and used in browser URLs.
+- Route params are slugs everywhere for these resources, e.g. `GET /courses/:slug`, `POST /progress/complete { videoSlug }`. **No redirect shim** — old numeric URLs now `404`.
+- Deferred surfaces still numeric by design: quiz **attempt** params (`/quizzes/attempts/:id/*`, result/grade/save/submit/reset), exemption params (`/quizzes/exemptions/:exemptionId`), `QuizAttempt`/`Enrollment`/`Submission`/`GateExemption` row ids in admin lists, and legacy `Video` rows.
+- Databases, caches (`Redis`), BullMQ, audit `targetId` and notification `metadata` keep numeric ids internally.
+
 ### Request size
 
 - Body limit: `express.json({ limit: '512kb' })` → **413** for larger JSON bodies.
@@ -99,13 +115,13 @@ Token-based auth with **HttpOnly cookies only**. Tokens never appear in request/
 ### `POST /auth/login`
 Public. Rate limit 20/15min.
 - **Body**: `email` (string), `password` (string)
-- **200** `{ success, data: { user: { id, email, name, role } } }` + sets `accessToken` + `refreshToken` cookies
+- **200** `{ success, data: { user: { id, slug, email, name, role } } }` + sets `accessToken` + `refreshToken` cookies
 - **400** missing fields · **401** `Invalid credentials.` · **423** `{ success:false, error, code:'ACCOUNT_LOCKED' }` + `Retry-After` (5 consecutive failures within 15 min, Redis `v1:authlock:{email}`; success clears; fail-open when Redis is down)
 
 ### `POST /auth/register`
 Public (session-preserving, see §2). Rate limit 20/15min.
 - **Body**: `email`, `password` (≥8), `name`, `phoneNumber`, `grade` (`FIRST_SECONDARY` | `SECOND_SECONDARY` | `THIRD_SECONDARY`)
-- **201** `{ success, message, data: { user: { id, email, name, phoneNumber, grade, role } } }` + login cookies only for unauthenticated callers
+- **201** `{ success, message, data: { user: { id, slug, email, name, phoneNumber, grade, role } } }` + login cookies only for unauthenticated callers
 - **400** per-field validation · **409** `An account with these details already exists.` (duplicate email **or** phone)
 
 ### `POST /auth/logout`
@@ -123,7 +139,7 @@ Public. Rate limit 60/15min. **Cookie-only** — `req.body.refreshToken` is neve
 
 ### `GET /user/me`
 Any authenticated user.
-- **200** `{ success, data: { id, name, email, phoneNumber, grade, role, lastLoginAt, createdAt, features: { notifications, aiGrader } } }`
+- **200** `{ success, data: { id, slug, name, email, phoneNumber, grade, role, lastLoginAt, createdAt, features: { notifications, aiGrader } } }`
 - **404** `User not found.`
 
 ### `GET /user/me/achievements`
@@ -132,21 +148,21 @@ Any authenticated user.
 
 ### `GET /user/` (list) — ADMIN
 - **Query**: `page` (≥1), `limit` (1..100, default 20), `role` (`STUDENT`|`ADMIN`), `grade`, `search` (name/email, case-insensitive), `sort` (`name`|`createdAt`, optional leading `-`)
-- **200** `{ success, data: [user...], meta: { total, page, limit, totalPages } }`
+- **200** `{ success, data: [{ id, slug, name, email, phoneNumber, grade, role, lastLoginAt, createdAt }], meta: { total, page, limit, totalPages } }`
 
-### `GET /user/:userId` — ADMIN
-- **200** `{ success, data: { id, name, email, phoneNumber, grade, role, lastLoginAt, createdAt } }`
-- **400** `Invalid user ID.` (non-safe-int ≤ 0) · **404** `User not found.`
+### `GET /user/:userSlug` — ADMIN
+- **200** `{ success, data: { id, slug, name, email, phoneNumber, grade, role, lastLoginAt, createdAt } }`
+- **400** `Invalid user slug.` (malformed `u_...`) · **404** `User not found.`
 
-### `PUT /user/:userId`
+### `PUT /user/:userSlug`
 Authenticated (self **or** ADMIN).
 - **Body** (all optional): `name`, `email`, `password` (≥8), `currentPassword` (required for self password/email change), `grade` (**admin-only**), `phoneNumber` (**admin-only**)
-- **200** `{ success, message, data: { id, name, email, phoneNumber, grade, role, lastLoginAt, createdAt } }`
+- **200** `{ success, message, data: { id, slug, name, email, phoneNumber, grade, role, lastLoginAt, createdAt } }`
 - **401** `Current password is required to change password or email.` / `Current password is incorrect.` · **403** `You do not have permission to update this user's data.` · **404** · **409** `Email or phone number already in use.`
 
-### `DELETE /user/:userId` — ADMIN
+### `DELETE /user/:userSlug` — ADMIN
 - **200** `{ success, message: 'User deleted successfully.' }`
-- **400** `Invalid user ID.` / `Cannot delete your own admin account.` · **404** `User not found.` · **409** `User owns courses. Move or delete their courses before deleting the user.`
+- **400** `Invalid user slug.` / `Cannot delete your own admin account.` · **404** `User not found.` · **409** `User owns courses. Move or delete their courses before deleting the user.`
 
 ---
 
@@ -154,29 +170,29 @@ Authenticated (self **or** ADMIN).
 
 ### `GET /courses/` — authenticated
 - **Query**: `page`, `limit` (1..100, default 20), `search` (title)
-- **200** `{ success, data: [{ id, title, description, price, grade, category, thumbnail, teacherId, teacher: { id, name, email }, videos: [{ id, title, duration }], _count: { videos, enrollments } }], meta: { total, page, limit, totalPages } }` (90s cache)
+- **200** `{ success, data: [{ slug, title, description, price, grade, category, thumbnail, teacher: { id, name, email }, videos: [{ id, title, duration }], _count: { videos, enrollments } }], meta: { total, page, limit, totalPages } }` (90s cache) — `id`/`teacherId` not exposed.
 
 ### `GET /courses/enrolled` — authenticated
-- **200** `{ success, data: [{ id, createdAt, course: <full course row, absolute thumbnail> }] }`
+- **200** `{ success, data: [{ id, createdAt, course: <full course row shaped like `GET /courses/:slug` course, absolute thumbnail> }] }`
 
-### `GET /courses/:id` — authenticated
-- **200** `{ success, data: { course: { id, title, description, price, grade, category, thumbnail, teacher, teacherId, createdAt, updatedAt }, videos: [{ id, title, thumbnail, duration, position }], enrollment: <Enrollment row or null>, progress: [{ videoId, completed, watchedAt }] } }` (60s per-user cache)
-- **400** `Invalid course ID` · **404** `Course not found`
+### `GET /courses/:slug` — authenticated
+- **200** `{ success, data: { course: { slug, title, description, price, grade, category, thumbnail, teacher: { id, name, email }, createdAt, updatedAt }, videos: [{ slug, courseSlug, title, thumbnail, duration, position }], enrollment: <Enrollment row sans `userId`/`courseId`, or null>, progress: [{ videoSlug, completed, watchedAt }] } }` (60s per-user cache)
+- **400** `Invalid course slug` · **404** `Course not found`
 
 ### `POST /courses/` — ADMIN
 - **Body**: `title`*, `description`*, `price`*, `grade`* (enum), `category?`, `thumbnail?`
-- **201** `{ success, message: 'Course created successfully', data: course }` (attributes to `req.user.id`; falls back to first ADMIN for script invocation)
+- **201** `{ success, message: 'Course created successfully', data: course }` (public shape — slug assigned automatically; attributes to `req.user.id`; falls back to first ADMIN for script invocation)
 - **400** `Title, description, price, and grade are required` / `Invalid price value` / `Invalid grade value`
 
-### `PUT /courses/:id` — ADMIN
+### `PUT /courses/:slug` — ADMIN
 - **Body**: any subset of `title`, `description`, `price`, `grade`, `category`, `thumbnail`
-- **200** `{ success, message: 'Course updated successfully', data: course }`
+- **200** `{ success, message: 'Course updated successfully', data: course }` (public shape)
 - **400** / **404** `Course not found`
 
-### `DELETE /courses/:id` — ADMIN
+### `DELETE /courses/:slug` — ADMIN
 - Cascades videos/enrollments/certificates, disconnects learning paths, best-effort **remote Bunny video + Supabase image cleanup**, invalidates gate caches.
-- **200** `{ success, message: 'Course deleted successfully' }` · **400** invalid ID · **404**
-### `PUT /courses/:courseId/reorder` — ADMIN
+- **200** `{ success, message: 'Course deleted successfully' }` · **400** invalid slug · **404**
+### `PUT /courses/:courseSlug/reorder` — ADMIN
 
 Reorder Bunny videos in the course. See §11.
 
@@ -187,25 +203,25 @@ Reorder Bunny videos in the course. See §11.
 Payment is disabled — every enrollment is auto-paid (`isPaid: true`).
 
 ### `POST /enroll/` — authenticated
-- **Body**: `courseId` (int; string form accepted)
-- **201** `{ success, message: 'Enrollment successful!', data: { enrollment: { id, userId, courseId, isPaid: true, paymentDate, startedAt, lastAccess, createdAt } } }`
+- **Body**: `courseSlug` (string)
+- **201** `{ success, message: 'Enrollment successful!', data: { enrollment: { id, isPaid: true, paymentDate, startedAt, lastAccess, createdAt } } }` (`userId`/`courseId` not exposed)
 - **200** existing unpaid row upgraded to active · **409** `Already enrolled in this course.` (pre-check + P2002 race backstop) · **404** `Course not found.`
 
 ### `POST /enroll/status` — authenticated
-- **Body**: `courseId`
+- **Body**: `courseSlug`
 - **200** `{ success, data: { enrolled: boolean, enrollment: <row or null> } }`
 
 ### `POST /admin/enrollments` — ADMIN
-- **Body**: `userId`, `courseId`
+- **Body**: `userSlug`, `courseSlug`
 - **201** `{ success, message: 'Student enrolled successfully.', data: { enrollment } }` (auto-paid)
-- **400** `userId and courseId are required.` · **404** `User not found.` / `Course not found.` · **409** `Student is already enrolled in this course.`
+- **400** `userSlug and courseSlug are required.` · **404** `User not found.` / `Course not found.` · **409** `Student is already enrolled in this course.`
 
 ### `DELETE /admin/enrollments/:id` — ADMIN
 - **200** `{ success, message: 'Enrollment removed successfully.' }` (FK-safe; invalidates gate + course caches) · **400** · **404**
 
 ### `GET /admin/enrollments` — ADMIN
-- **Query**: `page`, `limit` (1..100, default 20), `userId`, `courseId`, `isPaid`, `isCompleted`, `search` (student name/email or course title)
-- **200** `{ success, data: [{ id, student: { id, name, email, grade }, course: { id, title, grade }, isPaid, paymentDate, progress, isCompleted, completedAt, startedAt, lastAccess, createdAt }], meta: { total, page, limit, totalPages } }`
+- **Query**: `page`, `limit` (1..100, default 20), `userSlug`, `courseSlug`, `isPaid`, `isCompleted`, `search` (student name/email or course title)
+- **200** `{ success, data: [{ id, student: { id, slug, name, email, grade }, course: { slug, title, grade }, isPaid, paymentDate, progress, isCompleted, completedAt, startedAt, lastAccess, createdAt }], meta: { total, page, limit, totalPages } }`
 
 ---
 
@@ -225,20 +241,20 @@ Legacy raw envelope. **Disabled in production.**
 
 ## 8. Video Progress (`/progress`)
 
-Operates on **`BunnyVideo`** IDs (the modern video system). Success bodies use the legacy raw shape; errors carry structured codes.
+Operates on **`BunnyVideo`** slugs (the modern video system). Success bodies use the legacy raw shape; errors carry structured codes.
 
 ### `POST /progress/complete` — authenticated
-- **Body**: `videoId` (BunnyVideo id)
-- **200** raw `{ message: 'Video marked as completed', videoProgress: { userId, bunnyVideoId, completed: true, watchedAt } }` — upserts progress, syncs `Enrollment.progress` %/`isCompleted`, invalidates course/gate/meta caches
+- **Body**: `videoSlug` (BunnyVideo slug)
+- **200** raw `{ message: 'Video marked as completed', videoSlug, videoProgress: { completed: true, watchedAt } }` (numeric `userId`/`bunnyVideoId` not exposed) — upserts progress, syncs `Enrollment.progress` %/`isCompleted`, invalidates course/gate/meta caches
 - **Gate**: video must be the current unlocked index (first in course, or previous completed + quiz passed + assignment submitted). See §17.
-- **400** `Invalid video ID format` · **403** `{ error, code: 'NOT_ENROLLED' }` / `{ error, code: 'VIDEO_NOT_UNLOCKED', previousVideoId }` · **404** `{ error, code: 'VIDEO_NOT_FOUND' }`
+- **400** `Invalid video slug` · **403** `{ error, code: 'NOT_ENROLLED' }` / `{ error, code: 'VIDEO_NOT_UNLOCKED', previousVideoSlug }` / `{ error, code: 'SEQUENTIAL_GATE', ... }` · **404** `{ error, code: 'VIDEO_NOT_FOUND' }`
 
-### `GET /progress/course/:courseId` — authenticated
-- **200** raw `{ courseId, totalVideos, completedVideos, videos: [{ id, title, duration, completed, watchedAt }] }` (enrollment-gated for students)
+### `GET /progress/course/:courseSlug` — authenticated
+- **200** raw `{ courseSlug, totalVideos, completedVideos, videos: [{ videoSlug, title, duration, completed, watchedAt }] }` (enrollment-gated for students)
 - **403** `{ error, code: 'NOT_ENROLLED' }` for non-enrolled students
 
-### `GET /progress/:videoId` — authenticated
-- **200** raw `{ videoId, completed: boolean, watchedAt: <date|null> }`
+### `GET /progress/:videoSlug` — authenticated
+- **200** raw `{ videoSlug, completed: boolean, watchedAt: <date|null> }`
 - **403** `{ error, code: 'NOT_ENROLLED' }` when not enrolled
 
 ---
@@ -286,13 +302,13 @@ Legacy raw envelope on successes. Assignment gate fields are stripped for studen
 
 SurveyJS lifecycle, modern `{ success, data }` envelope. `maxAttempts` default **3** (validated 1–10). Attempt statuses: `IN_PROGRESS | SUBMITTED | GRADING | GRADED | EXPIRED`. **EXPIRED attempts never consume a retake.**
 
-### `GET /quizzes/videos/:videoId/meta` — authenticated
-- **200 (no quiz)** `{ success, data: { exists: false, videoId, videoTitle } }`
-- **200 (quiz)** `{ success, data: { exists: true, quizId, videoId, videoTitle, title, timeLimitSec, passingScore, maxAttempts, attemptsUsed, atMaxAttempts, unlocked, attempted, totalAttempts, passed, bestScore, totalQuestions, totalPoints, inProgressAttempt: { id, attemptNumber, deadlineAt } | null } }` (30s per-user cache)
+### `GET /quizzes/videos/:videoSlug/meta` — authenticated
+- **200 (no quiz)** `{ success, data: { exists: false, videoSlug, videoTitle } }`
+- **200 (quiz)** `{ success, data: { exists: true, quizSlug, videoSlug, videoTitle, title, timeLimitSec, passingScore, maxAttempts, attemptsUsed, atMaxAttempts, unlocked, attempted, totalAttempts, passed, bestScore, totalQuestions, totalPoints, inProgressAttempt: { id, attemptNumber, deadlineAt } | null } }` (30s per-user cache; numeric `quizId`/`videoId` not exposed)
 - **403** `You are not enrolled in this course` · **404** `Video not found`
 
-### `POST /quizzes/videos/:videoId/start` — authenticated
-- **200** `{ success, data: { attemptId, attemptNumber, status: 'IN_PROGRESS', startedAt, deadlineAt, resumed: boolean, responses: <saved or null>, quiz: { id, videoId, title, timeLimitSec, passingScore, maxAttempts, surveyJson } } }` — `answerKey` stripped. Resumes `IN_PROGRESS`, expires past-deadline attempts (+10s grace), auto-submits stale untimed attempts (>30 min).
+### `POST /quizzes/videos/:videoSlug/start` — authenticated
+- **200** `{ success, data: { attemptId, attemptNumber, status: 'IN_PROGRESS', startedAt, deadlineAt, resumed: boolean, responses: <saved or null>, quiz: { slug, videoSlug, title, timeLimitSec, passingScore, maxAttempts, surveyJson } } }` — `answerKey` stripped. Resumes `IN_PROGRESS`, expires past-deadline attempts (+10s grace), auto-submits stale untimed attempts (>30 min).
 - **409** `{ ..., code: 'ALREADY_PASSED' }` / `{ ..., code: 'MAX_ATTEMPTS_REACHED' }` · **403** not enrolled / `You must complete the video before taking the quiz` · **404** `No quiz found for this video`
 
 ### `PATCH /quizzes/attempts/:id/save` — authenticated
@@ -309,12 +325,12 @@ SurveyJS lifecycle, modern `{ success, data }` envelope. `maxAttempts` default *
 - **200** `{ success, data: { attemptId, attemptNumber, status, startedAt, submittedAt, autoSubmitted, earnedPoints, totalPoints, scorePercent, passed, passingScore, questions: [{ name, type: 'radiogroup'|'comment', studentAnswer, correctAnswer | null, isCorrect, earnedPoints, maxPoints, feedback, status: 'GRADED'|'PENDING_REVIEW', gradedBy, confidence, gradedModel }] } }` — **model answers hidden until the attempt is GRADED and passed** (ADMIN always sees them).
 - **400** `Quiz attempt is still in progress` · **403** `Forbidden`
 
-### `GET /quizzes/videos/:videoId/attempts` — authenticated
-- **200** `{ success, data: { quizId, title, passingScore, attempts: [{ id, attemptNumber, status, startedAt, submittedAt, scorePercent, earnedPoints, totalPoints, autoSubmitted }] } }`
+### `GET /quizzes/videos/:videoSlug/attempts` — authenticated
+- **200** `{ success, data: { quizSlug, videoSlug, title, passingScore, attempts: [{ id, attemptNumber, status, startedAt, submittedAt, scorePercent, earnedPoints, totalPoints, autoSubmitted }] } }`
 
-### `POST /quizzes/videos/:videoId` — ADMIN (upsert by `bunnyVideoId`)
+### `POST /quizzes/videos/:videoSlug` — ADMIN (upsert by `bunnyVideo` slug)
 - **Body**: `title`*, `surveyJson`* (≤256KB; `pages[].elements`, types `radiogroup|comment|html|image`, unique names), `answerKey`* (`{ qName: { type, correctValue?, modelAnswer?, points, rubric?, ai: { enabled? } } }`), `timeLimitSec?`, `passingScore?` (0–100, default 50), `maxAttempts?` (1–10, default 3)
-- **200** `{ success, message: 'Quiz saved successfully', data: quiz }` (sanitized — no `answerKey`)
+- **200** `{ success, message: 'Quiz saved successfully', data: quiz }` (sanitized — no `answerKey`, no numeric ids)
 - **400** `Invalid surveyJson definition` / `Invalid answerKey` etc. · **404** `Video not found`
 
 ### `POST /quizzes/images` — ADMIN
@@ -322,10 +338,10 @@ SurveyJS lifecycle, modern `{ success, data }` envelope. `maxAttempts` default *
 - **201** `{ success, data: { url: <public storage URL> } }`
 - **413** `Image too large (max 5MB)` · **415** unsupported type · **501** `Image upload is not configured` (missing Supabase, dev only) · **502** `Image upload failed`
 
-### `DELETE /quizzes/:quizId` — ADMIN
-- Cascades attempts, best-effort storage cleanup. **200** `{ success, message: 'Quiz deleted successfully' }`.
+### `DELETE /quizzes/:quizSlug` — ADMIN
+- Cascades attempts, best-effort storage cleanup. **200** `{ success, message: 'Quiz deleted successfully' }` · **400** invalid slug · **404**
 
-### `GET /quizzes/:quizId/attempts` — ADMIN
+### `GET /quizzes/:quizSlug/attempts` — ADMIN
 - **Query**: `status?` (`IN_PROGRESS|SUBMITTED|GRADING|GRADED|EXPIRED`)
 - **200** `{ success, data: [{ id, quizId, userId, attemptNumber, status, startedAt, deadlineAt, submittedAt, autoSubmitted, mcqEarned, essayEarned, earnedPoints, totalPoints, scorePercent, essayFeedback, essayGradedBy, essayGradedAt, user: { id, name, email } }] }` — no per-question responses leaked.
 
@@ -337,9 +353,9 @@ SurveyJS lifecycle, modern `{ success, data }` envelope. `maxAttempts` default *
 ### `POST /quizzes/attempts/:id/reset` — ADMIN
 - Deletes the attempt row, invalidates meta + gate caches. **200** `{ success, message: 'Attempt reset successfully' }`.
 
-### `POST /quizzes/videos/:videoId/exemptions` — ADMIN
-- **Body**: `userId`*, `reason?`
-- **200** `{ success, message: 'Gate exemption granted successfully', data: gateExemption }` (upsert by `userId` + `bunnyVideoId`) · **404** video/user not found
+### `POST /quizzes/videos/:videoSlug/exemptions` — ADMIN
+- **Body**: `userSlug`*, `reason?`
+- **200** `{ success, message: 'Gate exemption granted successfully', data: gateExemption }` (upsert by `userSlug` + `bunnyVideo` slug) · **404** video/user not found
 
 ### `DELETE /quizzes/exemptions/:exemptionId` — ADMIN
 - **200** `{ success, message: 'Exemption revoked successfully' }` · **404** `Exemption not found`
@@ -350,32 +366,32 @@ SurveyJS lifecycle, modern `{ success, data }` envelope. `maxAttempts` default *
 
 Modern video system on Bunny.net Stream, `{ success, data }` envelope with AppError codes. **State machine**: `PENDING → UPLOADING → PROCESSING → READY | FAILED`. Re-upload only from `PENDING|FAILED`.
 
-### `POST /courses/:courseId/videos` — ADMIN
+### `POST /courses/:courseSlug/videos` — ADMIN
 - **Body**: `title`*
-- **201** `{ success, data: { id, courseId, title, bunnyVideoId, status: 'PENDING', createdAt } }`
+- **201** `{ success, data: { slug, courseSlug, title, status: 'PENDING', quizSlug: null, createdAt } }`
 - **400** `{ error, code: 'COURSE_NOT_FOUND' }` / `{ error, code: 'VALIDATION_ERROR' }` · **502** `{ error, code: 'BUNNY_API_ERROR' }`
 
-### `GET /courses/:courseId/bunny-videos` — authenticated
+### `GET /courses/:courseSlug/bunny-videos` — authenticated
 - **ADMIN** sees all statuses + `failureReason` + `processingProgress`; **students see only `READY`** videos.
-- **200** `{ success, data: [{ id, courseId, title, position, bunnyVideoId, status, duration, width, height, thumbnailUrl, createdAt, quiz: { id } | null, failureReason?, processingProgress? }] }` (60s cache)
+- **200** `{ success, data: [{ slug, courseSlug, title, position, status, duration, width, height, thumbnailUrl, createdAt, quizSlug | null, failureReason?, processingProgress? }] }` (60s cache) — numeric `id`/`courseId`/`bunnyVideoId` not exposed.
 
-### `PUT /courses/:courseId/reorder` — ADMIN
-- **Body**: `videoIds` (number array — exactly the course's BunnyVideo ids, each once)
-- **200** `{ success, data: [{ id, title, position }] }` (1-based positions; enrolled students' gate caches invalidated)
+### `PUT /courses/:courseSlug/reorder` — ADMIN
+- **Body**: `videoSlugs` (string array — exactly the course's Bunny video slugs, each once)
+- **200** `{ success, data: [{ slug, title, position }] }` (1-based positions; enrolled students' gate caches invalidated)
 - **400** `{ error, code: 'INVALID_VIDEO_IDS' }` / `{ error, code: 'COURSE_NOT_FOUND' }`
 
-### `POST /videos/:videoId/upload` — ADMIN
+### `POST /videos/:videoSlug/upload` — ADMIN
 - **Body**: `multipart/form-data` field `video` (mp4/mov/mkv/avi/webm, default max 5GB via `BUNNY_VIDEO_MAX_BYTES`) via busboy, streamed straight to Bunny (no temp files).
-- **200** `{ success, data: { videoId, status: 'PROCESSING', message } }`
+- **200** `{ success, data: { videoSlug, status: 'PROCESSING', message } }`
 - **400** `{ code: 'VIDEO_NOT_FOUND' }` / `{ code: 'INVALID_VIDEO_FILE' }` · **413** `{ code: 'VIDEO_TOO_LARGE' }` · **415** `{ code: 'INVALID_VIDEO_FILE' }` · **422** `{ code: 'INVALID_VIDEO_STATE' }` (must be PENDING/FAILED) · **502** `{ code: 'VIDEO_UPLOAD_FAILED' }`
 
-### `GET /videos/:videoId/playback` — authenticated (+ sequential gate; ADMIN bypasses)
-- **200** `{ success, data: { videoId, playbackUrl: <HMAC-signed iframe.mediadelivery.net embed>, expiresAt } }` (6h TTL)
-- **403** `{ message, code: 'NOT_ENROLLED' }` / `{ message, code: 'SEQUENTIAL_GATE', previousVideoId, quizId?, yourScore?, requiredScore? }` · **404** `{ code: 'VIDEO_NOT_FOUND' }` · **422** `{ code: 'VIDEO_NOT_READY' }`
+### `GET /videos/:videoSlug/playback` — authenticated (+ sequential gate; ADMIN bypasses)
+- **200** `{ success, data: { videoSlug, playbackUrl: <HMAC-signed iframe.mediadelivery.net embed>, expiresAt } }` (6h TTL)
+- **403** `{ message, code: 'NOT_ENROLLED' }` / `{ message, code: 'SEQUENTIAL_GATE', previousVideoSlug, quizSlug?, yourScore?, requiredScore? }` · **404** `{ code: 'VIDEO_NOT_FOUND' }` · **422** `{ code: 'VIDEO_NOT_READY' }`
 
-### `DELETE /videos/bunny/:videoId` — ADMIN
+### `DELETE /videos/bunny/:videoSlug` — ADMIN
 - Deletes remote Bunny video first (404 remote tolerated), then DB row.
-- **200** `{ success, data: { id, bunnyVideoId, message: 'Video successfully deleted from Bunny Stream and database.' } }` · **404** `{ code: 'VIDEO_NOT_FOUND' }` · **502** `{ code: 'BUNNY_API_ERROR' }`
+- **200** `{ success, data: { slug, bunnyVideoId, message: 'Video successfully deleted from Bunny Stream and database.' } }` · **404** `{ code: 'VIDEO_NOT_FOUND' }` · **502** `{ code: 'BUNNY_API_ERROR' }`
 
 ---
 
@@ -409,7 +425,7 @@ Optional module — mounted only when `NOTIFICATIONS_ENABLED !== false`. Modern 
 - Scoped to the caller's own rows. **200** `{ success, data: { updated: 0|1 } }`
 
 ### `POST /notifications/broadcast` — ADMIN
-- **Body**: `title`* (≤200), `body?` (≤5000), `linkUrl?` (internal path starting with `/`, ≤500), `metadata?` (object), `audience`* — `{ kind: 'all' }`, `{ kind: 'course', courseId }`, or `{ kind: 'grade', grade }`
+- **Body**: `title`* (≤200), `body?` (≤5000), `linkUrl?` (internal path starting with `/`, ≤500), `metadata?` (object), `audience`* — `{ kind: 'all' }`, `{ kind: 'course', courseSlug }`, or `{ kind: 'grade', grade }`
 - **201** `{ success, data: { count, batchId } }` (one row per student; chunked fan-out)
 - **400** validation (title required/too long, bad linkUrl, invalid audience/course/grade) · **404** `Course not found`
 
@@ -426,10 +442,10 @@ Legacy raw envelope on successes.
 
 ### `GET /search/trending` — authenticated
 - **Query**: `limit?` (1..100, default 10), `category?`, `grade?`
-- **200** raw `{ trending: [{ id, title, description, price, category, grade, thumbnail, teacherId, teacher, enrollmentCount, videoCount }] }` (10min cache, by enrollment desc)
+- **200** raw `{ trending: [{ slug, title, description, price, category, grade, thumbnail, teacher, enrollmentCount, videoCount }] }` (10min cache, by enrollment desc) — `id`/`teacherId` not exposed.
 
 ### `GET /search/recommended` — authenticated
-- **200** raw `{ recommendations: [{ id, title, description, price, category, grade, thumbnail, teacherId, teacher, videoCount }] }` (top 10 by user's enrolled categories/grades, excluding enrolled)
+- **200** raw `{ recommendations: [{ slug, title, description, price, category, grade, thumbnail, teacher, videoCount }] }` (top 10 by user's enrolled categories/grades, excluding enrolled)
 
 ---
 
@@ -442,7 +458,7 @@ Every route behind `authenticateToken` + `authorizeAdmin()` at the router level.
 
 ### `GET /admin/quizzes` — ADMIN
 - **Query**: `page`, `limit` (1..100, default 20), `search?` (quiz/video/course title)
-- **200** `{ success, data: [{ id, title, videoId, videoTitle, courseId, courseTitle, timeLimitSec, passingScore, maxAttempts, totalAttempts, pendingGrading, updatedAt }], meta: { total, page, limit, totalPages } }`
+- **200** `{ success, data: [{ slug, title, videoSlug, videoTitle, courseSlug, courseTitle, timeLimitSec, passingScore, maxAttempts, totalAttempts, pendingGrading, updatedAt }], meta: { total, page, limit, totalPages } }`
 
 ### `GET /admin/attempts` — ADMIN
 - **Query**: `status?`, `page`, `limit`, `search?` (student name/email or quiz title)
@@ -483,13 +499,13 @@ For a student to access a **non-first** Bunny video in a course, **all** of the 
 
 1. **Enrollment**: the student is enrolled in the course → else `NOT_ENROLLED`.
 2. **Previous video**: the immediately preceding video (by `position`, or in-app ordering) is:
-   - A `BunnyVideoProgress` row with `completed: true` → else `SEQUENTIAL_GATE` + `previousVideoId`; or
+   - A `BunnyVideoProgress` row with `completed: true` → else `SEQUENTIAL_GATE` + `previousVideoSlug`; or
    - Covered by a `GateExemption` (admin-granted).
-3. **Previous quiz**: if the previous video has a quiz, at least one attempt is `GRADED` with `scorePercent >= passingScore` (best score counts) → else `SEQUENTIAL_GATE` + `quizId`, `bestScore`, `required`.
+3. **Previous quiz**: if the previous video has a quiz, at least one attempt is `GRADED` with `scorePercent >= passingScore` (best score counts) → else `SEQUENTIAL_GATE` + `quizSlug`, `bestScore`, `required`.
 
-Gate codes surfaced to clients: `NOT_ENROLLED`, `SEQUENTIAL_GATE`, `VIDEO_NOT_UNLOCKED` (on progress-complete), `VIDEO_NOT_FOUND`. `POST /progress/complete` and `GET /videos/:videoId/playback` both enforce it.
+Gate codes surfaced to clients: `NOT_ENROLLED`, `SEQUENTIAL_GATE`, `VIDEO_NOT_UNLOCKED` (on progress-complete), `VIDEO_NOT_FOUND`. `POST /progress/complete` and `GET /videos/:videoSlug/playback` both enforce it.
 
-**Gate exemptions**: granted per `(userId, bunnyVideoId)` via `POST /quizzes/videos/:videoId/exemptions` (ADMIN); removed via `DELETE /quizzes/exemptions/:exemptionId`.
+**Gate exemptions**: granted per `(userSlug, videoSlug)` via `POST /quizzes/videos/:videoSlug/exemptions` (ADMIN); removed via `DELETE /quizzes/exemptions/:exemptionId`.
 
 ---
 
@@ -510,7 +526,7 @@ Structured `code` values returned by the global handler (in addition to the HTTP
 | `COURSE_NOT_FOUND` | 400/404 | Course lookup failed |
 | `VIDEO_NOT_READY` | 422 | Video not yet `READY` for playback |
 | `INVALID_VIDEO_STATE` | 422 | Upload on a video not `PENDING`/`FAILED`, etc. |
-| `INVALID_VIDEO_IDS` | 400 | Reorder payload not the exact video id set |
+| `INVALID_VIDEO_IDS` | 400 | Reorder payload not the exact video slug set |
 | `INVALID_VIDEO_FILE` | 400/415 | Missing/malformed/mis-typed upload field |
 | `VIDEO_TOO_LARGE` | 413 | Upload exceeds `BUNNY_VIDEO_MAX_BYTES` |
 | `VIDEO_UPLOAD_FAILED` | 502 | Bunny upload failed |

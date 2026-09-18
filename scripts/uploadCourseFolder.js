@@ -28,6 +28,7 @@ const path = require('path');
 const prisma = require('../src/config/db');
 const bunnyVideoService = require('../src/services/bunnyVideoService');
 const bunnyClient = require('../src/integrations/bunny/bunnyStreamClient');
+const { slugifyTitle, uniqueSlug } = require('../src/utils/slugs');
 
 const FOLDER = process.argv[2] || 'I:\\vids\\TypeScript';
 const COURSE_TITLE = process.argv[3] || 'Learn TypeScript in Arabic 2022';
@@ -112,6 +113,7 @@ async function getOrCreateCourse(adminId) {
     data: {
       ...COURSE_DEFAULTS,
       title: COURSE_TITLE,
+      slug: await uniqueSlug('Course', COURSE_TITLE, 'course'),
       teacherId: adminId,
     },
   });
@@ -139,7 +141,7 @@ async function ensureAdminEnrollment(adminId, courseId) {
   console.log(`Enrolled admin in course #${courseId} for playback testing.`);
 }
 
-async function uploadOneFile({ courseId, adminId, filePath, index, total }) {
+async function uploadOneFile({ courseSlug, adminId, filePath, index, total }) {
   const filename = path.basename(filePath);
   const title = titleFromFilename(filename);
   const size = fs.statSync(filePath).size;
@@ -148,7 +150,7 @@ async function uploadOneFile({ courseId, adminId, filePath, index, total }) {
   console.log(`  File: ${filename} (${formatBytes(size)})`);
 
   const video = await bunnyVideoService.createVideo({
-    courseId,
+    courseSlug,
     title,
     requestedByUserId: adminId,
   });
@@ -221,7 +223,7 @@ async function main() {
 
     try {
       const result = await uploadOneFile({
-        courseId: course.id,
+        courseSlug: course.slug,
         adminId: admin.id,
         filePath: files[i],
         index: lessonNum,
@@ -234,7 +236,7 @@ async function main() {
     }
   }
 
-  const summary = await bunnyVideoService.listCourseVideos(course.id, admin.id, 'ADMIN');
+  const summary = await bunnyVideoService.listCourseVideos(course.slug, admin.id, 'ADMIN');
 
   console.log('\n========================================');
   console.log(' UPLOAD SUMMARY');
@@ -245,8 +247,8 @@ async function main() {
   console.log(` Bunny videos:  ${summary.length} total in DB`);
   console.log('========================================');
   console.log('\nFrontend endpoints:');
-  console.log(`  GET /courses/${course.id}/bunny-videos`);
-  console.log(`  GET /videos/:videoId/playback`);
+  console.log(`  GET /courses/${course.slug}/bunny-videos`);
+  console.log(`  GET /videos/:videoSlug/playback`);
   console.log('\nVideos will become READY after Bunny encoding (webhook or reconciliation job).');
 
   if (failures.length > 0) {

@@ -25,6 +25,7 @@ const prisma = require('../config/db');
 const bunnyClient = require('../integrations/bunny/bunnyStreamClient');
 const { AppError, ErrorCodes } = require('../utils/AppError');
 const cache = require('../integrations/redis/cache');
+const { isValidSlug, slugifyTitle, uniqueSlug } = require('../utils/slugs');
 
 /**
  * Invalidate cached video lists + catalog after any video mutation.
@@ -120,21 +121,27 @@ const log = {
  *  4. On DB failure: compensate by deleting the orphaned Bunny video, then rethrow
  *
  * @param {object} params
- * @param {number} params.courseId
+ * @param {string} params.courseSlug
  * @param {string} params.title
  * @param {number} params.requestedByUserId - ID from req.user.id (token only, never body)
  * @returns {Promise<object>} Created BunnyVideo record
  */
-async function createVideo({ courseId, title, requestedByUserId }) {
+async function createVideo({ courseSlug, title, requestedByUserId }) {
+  if (!isValidSlug(courseSlug)) {
+    throw new AppError('Invalid course slug', 400, ErrorCodes.COURSE_NOT_FOUND);
+  }
+
   // Verify course exists — ownership is implicit for ADMIN (verified by authorizeAdmin middleware)
   const course = await prisma.course.findUnique({
-    where: { id: courseId },
-    select: { id: true, title: true },
+    where: { slug: courseSlug },
+    select: { id: true, slug: true, title: true },
   });
 
   if (!course) {
     throw new AppError('Course not found', 404, ErrorCodes.COURSE_NOT_FOUND);
   }
+
+  const courseId = course.id;
 
   // Create Bunny video object first — we need the GUID before we can insert locally
   let bunnyVideo;
@@ -170,6 +177,7 @@ async function createVideo({ courseId, title, requestedByUserId }) {
       return {
         courseId,
         title,
+        slug: await uniqueSlug('BunnyVideo', slugifyTitle(title), 'video'),
         bunnyVideoId: bunnyVideo.guid,
         bunnyLibraryId: process.env.BUNNY_STREAM_LIBRARY_ID,
         status: 'PENDING',
@@ -368,7 +376,7 @@ async function applyBunnyStatus(bunnyVideoId, bunnyStatusCode) {
  *
  * @param {number} videoId - Local BunnyVideo.id
  * @param {number} userId - Authenticated user ID from JWT (never from request body)
- * @returns {Promise<{videoId, playbackUrl, expiresAt}>}
+ * @returns {Promise<{videoSlug, playbackUrl, expiresAt}>}
  */
 async function getPlaybackAccess(videoId, userId) {
   // Load video — this is the authoritative courseId; we never trust client-supplied courseId
@@ -376,6 +384,7 @@ async function getPlaybackAccess(videoId, userId) {
     where: { id: videoId },
     select: {
       id: true,
+      slug: true,
       courseId: true,
       bunnyVideoId: true,
       bunnyLibraryId: true,
@@ -429,7 +438,7 @@ async function getPlaybackAccess(videoId, userId) {
   });
 
   return {
-    videoId: video.id,
+    videoSlug: video.slug,
     playbackUrl,
     expiresAt,
   };
@@ -443,6 +452,17 @@ async function getPlaybackAccess(videoId, userId) {
  */
 async function findById(videoId) {
   return prisma.bunnyVideo.findUnique({ where: { id: videoId } });
+}
+
+/**
+ * Get a BunnyVideo by public slug.
+ *
+ * @param {string} slug
+ * @returns {Promise<object|null>}
+ */
+async function findBySlug(slug) {
+  if (!isValidSlug(slug)) return null;
+  return prisma.bunnyVideo.findUnique({ where: { slug } });
 }
 
 /**
@@ -535,21 +555,26 @@ async function deleteVideo(videoId) {
  * Students may view READY video metadata before enrollment; playback access is
  * still enforced separately by getPlaybackAccess().
  *
- * @param {number} courseId
+ * @param {string} courseSlug
  * @param {number} userId
  * @param {string} role - 'ADMIN' | 'STUDENT'
  * @returns {Promise<object[]>}
  */
-async function listCourseVideos(courseId, userId, role) {
+async function listCourseVideos(courseSlug, userId, role) {
+  if (!isValidSlug(courseSlug)) {
+    throw new AppError('Invalid course slug', 400, ErrorCodes.COURSE_NOT_FOUND);
+  }
+
   const course = await prisma.course.findUnique({
-    where: { id: courseId },
-    select: { id: true },
+    where: { slug: courseSlug },
+    select: { id: true, slug: true },
   });
 
   if (!course) {
     throw new AppError('Course not found', 404, ErrorCodes.COURSE_NOT_FOUND);
   }
 
+  const courseId = course.id;
   const whereClause = { courseId };
   if (role !== 'ADMIN') {
     whereClause.status = 'READY';
@@ -558,73 +583,86 @@ async function listCourseVideos(courseId, userId, role) {
   // Role is part of the key: admins receive failureReason/processingProgress.
   // Cache-aside, 60s TTL; invalidated by every mutation above.
   const cacheKey = cache.buildKey('videos', 'course', courseId, role === 'ADMIN' ? 'admin' : 'student');
-  return cache.withCache(cacheKey, 60, () => prisma.bunnyVideo.findMany({
-    where: whereClause,
-    orderBy: [{ position: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
-    select: {
-      id: true,
-      courseId: true,
-      title: true,
-      position: true,
-      bunnyVideoId: true,
-      status: true,
-      duration: true,
-      width: true,
-      height: true,
-      thumbnailUrl: true,
-      createdAt: true,
-      // Quiz existence only (no content/answers) — drives the admin
-      // "no quiz" guardrail; students already learn this via quiz meta.
-      quiz: { select: { id: true } },
-      // failureReason only exposed to ADMIN
-      ...(role === 'ADMIN' ? { failureReason: true, processingProgress: true } : {}),
-    },
-  }));
+  return cache.withCache(cacheKey, 60, async () => {
+    const rows = await prisma.bunnyVideo.findMany({
+      where: whereClause,
+      orderBy: [{ position: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
+      select: {
+        slug: true,
+        title: true,
+        position: true,
+        status: true,
+        duration: true,
+        width: true,
+        height: true,
+        thumbnailUrl: true,
+        createdAt: true,
+        // Quiz existence only (no content/answers) — drives the admin
+        // "no quiz" guardrail; students already learn this via quiz meta.
+        quiz: { select: { slug: true } },
+        // failureReason only exposed to ADMIN
+        ...(role === 'ADMIN' ? { failureReason: true, processingProgress: true } : {}),
+      },
+    });
+
+    // Public shape: numeric id/courseId and the Bunny GUID are internal —
+    // expose slug + courseSlug (+ quizSlug) instead.
+    return rows.map(({ quiz, ...video }) => ({
+      ...video,
+      courseSlug: course.slug,
+      quizSlug: quiz ? quiz.slug : null,
+    }));
+  });
 }
 
 /**
  * Reorder the videos in a course by assigning `position` sequentially.
- * Accepts the video IDs in the desired order. Idempotent and atomic.
+ * Accepts the video slugs in the desired order. Idempotent and atomic.
  *
- * @param {number} courseId
- * @param {number[]} videoIds - BunnyVideo IDs in desired order
+ * @param {string} courseSlug
+ * @param {string[]} videoSlugs - BunnyVideo slugs in desired order
  * @param {number} requestedByUserId - ADMIN user id (for the audit log)
- * @returns {Promise<object[]>} Reordered videos (position + id)
+ * @returns {Promise<object[]>} Reordered videos (position + slug)
  */
-async function reorderVideos(courseId, videoIds, requestedByUserId) {
-  if (!Array.isArray(videoIds) || videoIds.some(id => !Number.isInteger(id))) {
-    throw new AppError('videoIds must be a non-empty array of integers', 400, ErrorCodes.INVALID_VIDEO_IDS);
+async function reorderVideos(courseSlug, videoSlugs, requestedByUserId) {
+  if (!Array.isArray(videoSlugs) || videoSlugs.some(s => !isValidSlug(s))) {
+    throw new AppError('videoSlugs must be a non-empty array of slugs', 400, ErrorCodes.INVALID_VIDEO_IDS);
+  }
+
+  if (!isValidSlug(courseSlug)) {
+    throw new AppError('Invalid course slug', 400, ErrorCodes.COURSE_NOT_FOUND);
   }
 
   const course = await prisma.course.findUnique({
-    where: { id: courseId },
-    select: { id: true },
+    where: { slug: courseSlug },
+    select: { id: true, slug: true },
   });
   if (!course) {
     throw new AppError('Course not found', 404, ErrorCodes.COURSE_NOT_FOUND);
   }
 
+  const courseId = course.id;
   const existing = await prisma.bunnyVideo.findMany({
     where: { courseId },
-    select: { id: true },
+    select: { id: true, slug: true },
   });
-  const existingIds = new Set(existing.map(v => v.id));
+  const existingBySlug = new Map(existing.map(v => [v.slug, v.id]));
 
-  if (videoIds.length !== existingIds.size || videoIds.some(id => !existingIds.has(id))) {
+  if (videoSlugs.length !== existingBySlug.size || videoSlugs.some(s => !existingBySlug.has(s))) {
     throw new AppError(
-      "videoIds must contain exactly the course's videos, each exactly once",
+      "videoSlugs must contain exactly the course's videos, each exactly once",
       400,
       ErrorCodes.INVALID_VIDEO_IDS
     );
   }
 
-  log.info('video.reordered', { courseId, requestedByUserId, count: videoIds.length });
+  log.info('video.reordered', { courseId, requestedByUserId, count: videoSlugs.length });
 
   // Assign positions atomically: 1-based index in the submitted order
   await prisma.$transaction(
-    videoIds.map((videoId, index) =>
+    videoSlugs.map((videoSlug, index) =>
       prisma.bunnyVideo.update({
-        where: { id: videoId },
+        where: { id: existingBySlug.get(videoSlug) },
         data: { position: index + 1 },
       })
     )
@@ -632,11 +670,12 @@ async function reorderVideos(courseId, videoIds, requestedByUserId) {
 
   await invalidateVideoCaches(courseId);
 
-  return prisma.bunnyVideo.findMany({
+  const rows = await prisma.bunnyVideo.findMany({
     where: { courseId },
     orderBy: [{ position: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
-    select: { id: true, title: true, position: true },
+    select: { slug: true, title: true, position: true },
   });
+  return rows.map(v => ({ ...v, courseSlug: course.slug }));
 }
 
 module.exports = {
@@ -648,6 +687,7 @@ module.exports = {
   deleteVideo,
   listCourseVideos,
   findById,
+  findBySlug,
   findStaleProcessing,
   recoverInterruptedUploads,
   reorderVideos,

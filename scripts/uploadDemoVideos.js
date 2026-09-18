@@ -96,11 +96,11 @@ async function api(pathname, { cookie, method = 'GET', body, raw } = {}) {
   return { status: res.status, data: parsed };
 }
 
-async function uploadToBunny(cookie, videoId, filePath, label) {
+async function uploadToBunny(cookie, videoSlug, filePath, label) {
   const blob = new Blob([fs.readFileSync(filePath)], { type: 'video/mp4' });
   const form = new FormData();
   form.append('video', blob, path.basename(filePath));
-  const res = await fetch(`${BASE_URL}/videos/${videoId}/upload`, {
+  const res = await fetch(`${BASE_URL}/videos/${videoSlug}/upload`, {
     method: 'POST',
     headers: { Cookie: cookie },
     body: form,
@@ -199,42 +199,42 @@ async function main() {
     });
     if (!created.data?.success) throw new Error(`Course creation failed: ${JSON.stringify(created.data)}`);
     course = created.data.data;
-    console.log(`✓ Created course #${course.id} "${COURSE_TITLE}"`);
+    console.log(`✓ Created course #${course.slug} "${COURSE_TITLE}"`);
   } else {
-    console.log(`✓ Reusing existing course #${course.id} "${COURSE_TITLE}"`);
+    console.log(`✓ Reusing existing course #${course.slug} "${COURSE_TITLE}"`);
   }
 
   // ── Videos (fill missing slots only) ─────────────────────────────────────
-  const existingList = await api(`/courses/${course.id}/bunny-videos`, { cookie: adminCookie });
+  const existingList = await api(`/courses/${course.slug}/bunny-videos`, { cookie: adminCookie });
   const byPosition = new Map((existingList.data?.data || []).map((v) => [v.position, v]));
 
-  const videoIds = {};
+  const videoSlugs = {};
   for (let n = 1; n <= VIDEO_COUNT; n++) {
     let video = byPosition.get(n);
     if (video && video.status === 'READY') {
-      console.log(`[Lesson ${n}] already READY (BunnyVideo #${video.id}) — skipping upload`);
-      videoIds[n] = video.id;
+      console.log(`[Lesson ${n}] already READY (BunnyVideo #${video.slug}) — skipping upload`);
+      videoSlugs[n] = video.slug;
       continue;
     }
     if (!video) {
-      const created = await api(`/courses/${course.id}/videos`, {
+      const created = await api(`/courses/${course.slug}/videos`, {
         method: 'POST',
         cookie: adminCookie,
         body: { title: `Lesson ${n} - ${path.basename(sourceFile)}` },
       });
       if (!created.data?.success) throw new Error(`Video ${n} creation failed: ${JSON.stringify(created.data)}`);
       video = created.data.data;
-      videoIds[n] = video.id;
-      console.log(`[Lesson ${n}] registered BunnyVideo #${video.id} (GUID ${video.bunnyVideoId})`);
+      videoSlugs[n] = video.slug;
+      console.log(`[Lesson ${n}] registered BunnyVideo #${video.slug} (GUID ${video.bunnyVideoId})`);
     } else if (video.status === 'FAILED') {
       console.log(`[Lesson ${n}] re-uploading after FAILED state`);
-      videoIds[n] = video.id;
+      videoSlugs[n] = video.slug;
     } else {
-      videoIds[n] = video.id;
+      videoSlugs[n] = video.slug;
       console.log(`[Lesson ${n}] exists as ${video.status} — upload skipped, will wait`);
       continue;
     }
-    const uploaded = await uploadToBunny(adminCookie, video.id, sourceFile, `lesson ${n}`);
+    const uploaded = await uploadToBunny(adminCookie, video.slug, sourceFile, `lesson ${n}`);
     console.log(`[Lesson ${n}] uploaded → ${uploaded.status}`);
   }
 
@@ -242,13 +242,14 @@ async function main() {
   const student = await ensureStudent();
   const studentCookie = student.cookie;
   const studentUser = await prisma.user.findUnique({ where: { email: TEST_STUDENT.email }, select: { id: true } });
-  await enrollStudent(studentUser.id, course.id);
+  const courseRow = await prisma.course.findUnique({ where: { slug: course.slug }, select: { id: true } });
+  await enrollStudent(studentUser.id, courseRow.id);
 
   // ── Wait until all videos are READY ──────────────────────────────────────
   console.log('\nWaiting for Bunny encoding (webhook or reconciliation)...');
   const deadline = Date.now() + WAIT_MS;
   while (Date.now() < deadline) {
-    const list = await api(`/courses/${course.id}/bunny-videos`, { cookie: adminCookie });
+    const list = await api(`/courses/${course.slug}/bunny-videos`, { cookie: adminCookie });
     const videos = list.data?.data || [];
     const ready = videos.filter((v) => v.status === 'READY');
     const states = videos.map((v) => `${v.position}:${v.status}`).join('  ');
@@ -257,20 +258,20 @@ async function main() {
     await sleep(10000);
   }
 
-  const finalList = await api(`/courses/${course.id}/bunny-videos`, { cookie: adminCookie });
+  const finalList = await api(`/courses/${course.slug}/bunny-videos`, { cookie: adminCookie });
   const readyVideos = (finalList.data?.data || []).sort((a, b) => a.position - b.position);
-  videoIds[1] = readyVideos[0]?.id;
-  videoIds[2] = readyVideos[1]?.id;
-  videoIds[3] = readyVideos[2]?.id;
+  videoSlugs[1] = readyVideos[0]?.slug;
+  videoSlugs[2] = readyVideos[1]?.slug;
+  videoSlugs[3] = readyVideos[2]?.slug;
 
   const notReady = readyVideos.filter((v) => v.status !== 'READY');
-  if (notReady.length === VIDEO_COUNT || !videoIds[1]) {
+  if (notReady.length === VIDEO_COUNT || !videoSlugs[1]) {
     console.error(`\n✗ Videos not READY after ${WAIT_MS / 60000} min. Re-run the script later — it will resume.`);
     process.exit(2);
   }
 
   console.log('\n=== Courses order check ===');
-  readyVideos.forEach((v) => console.log(`  position=${v.position}  id=${v.id}  status=${v.status}  title="${v.title}"`));
+  readyVideos.forEach((v) => console.log(`  position=${v.position}  slug=${v.slug}  status=${v.status}  title="${v.title}"`));
 
   // ── Sequential-access assertion suite ────────────────────────────────────
   console.log('\n=== Sequential-access assertions (student) ===');
@@ -280,49 +281,49 @@ async function main() {
     console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? `  — ${detail}` : ''}`);
   };
 
-  const playback = (id) => api(`/videos/${id}/playback`, { cookie: studentCookie });
-  const complete = (id) => api('/progress/complete', { method: 'POST', cookie: studentCookie, body: { videoId: id } });
+  const playback = (slug) => api(`/videos/${slug}/playback`, { cookie: studentCookie });
+  const complete = (slug) => api('/progress/complete', { method: 'POST', cookie: studentCookie, body: { videoSlug: slug } });
 
   // A1: video 1 (first) → playable
-  let r = await playback(videoIds[1]);
+  let r = await playback(videoSlugs[1]);
   check('A1 video 1 playback → 200', r.status === 200, `status=${r.status}${r.data?.data?.playbackUrl ? ' (playbackUrl present)' : ''}`);
 
   // A2/A3: videos 2 & 3 blocked before 1 is completed
-  r = await playback(videoIds[2]);
+  r = await playback(videoSlugs[2]);
   check('A2 video 2 playback → 403 SEQUENTIAL_GATE', r.status === 403 && r.data?.code === 'SEQUENTIAL_GATE',
-    `status=${r.status} code=${r.data?.code} previousVideoId=${r.data?.previousVideoId} quizId=${r.data?.quizId}`);
+    `status=${r.status} code=${r.data?.code} previousVideoSlug=${r.data?.previousVideoSlug} quizSlug=${r.data?.quizSlug}`);
 
-  r = await playback(videoIds[3]);
+  r = await playback(videoSlugs[3]);
   check('A3 video 3 playback → 403 SEQUENTIAL_GATE', r.status === 403 && r.data?.code === 'SEQUENTIAL_GATE',
-    `status=${r.status} code=${r.data?.code} previousVideoId=${r.data?.previousVideoId}`);
+    `status=${r.status} code=${r.data?.code} previousVideoSlug=${r.data?.previousVideoSlug}`);
 
   // A4: unlock precondition — can't complete video 2 out of order
-  r = await complete(videoIds[2]);
+  r = await complete(videoSlugs[2]);
   check('A4 complete video 2 → 403 VIDEO_NOT_UNLOCKED', r.status === 403 && r.data?.code === 'VIDEO_NOT_UNLOCKED',
-    `status=${r.status} code=${r.data?.code} previousVideoId=${r.data?.previousVideoId}`);
+    `status=${r.status} code=${r.data?.code} previousVideoSlug=${r.data?.previousVideoSlug}`);
 
   // A5: complete the first video
-  r = await complete(videoIds[1]);
+  r = await complete(videoSlugs[1]);
   check('A5 complete video 1 → 200', r.status === 200 && r.data?.message === 'Video marked as completed', `status=${r.status}`);
 
   // A6: video 2 now unlocked
-  r = await playback(videoIds[2]);
+  r = await playback(videoSlugs[2]);
   check('A6 video 2 playback → 200 (after video 1 done)', r.status === 200, `status=${r.status}`);
 
   // A7: complete video 2
-  r = await complete(videoIds[2]);
+  r = await complete(videoSlugs[2]);
   check('A7 complete video 2 → 200', r.status === 200, `status=${r.status}`);
 
   // A8: video 3 now unlocked
-  r = await playback(videoIds[3]);
+  r = await playback(videoSlugs[3]);
   check('A8 video 3 playback → 200 (after video 2 done)', r.status === 200, `status=${r.status}`);
 
   // A9: complete video 3
-  r = await complete(videoIds[3]);
+  r = await complete(videoSlugs[3]);
   check('A9 complete video 3 → 200', r.status === 200, `status=${r.status}`);
 
   // A10: course progress is fully complete
-  r = await api(`/progress/course/${course.id}`, { cookie: studentCookie });
+  r = await api(`/progress/course/${course.slug}`, { cookie: studentCookie });
   const prog = r.data;
   check('A10 course progress completedVideos === 3',
     prog && prog.completedVideos === 3 && prog.totalVideos === 3,
@@ -337,8 +338,8 @@ async function main() {
   }
   console.log(` SEQ-ACCESS TEST RESULT: ALL ${results.length} PASSED ✓`);
   console.log('========================================');
-  console.log(` Course: ${BASE_URL}/courses/${course.id}`);
-  readyVideos.forEach((v) => console.log(`   position=${v.position} → /videos/${v.id}/playback`));
+  console.log(` Course: ${BASE_URL}/courses/${course.slug}`);
+  readyVideos.forEach((v) => console.log(`   position=${v.position} → /videos/${v.slug}/playback`));
 }
 
 main()

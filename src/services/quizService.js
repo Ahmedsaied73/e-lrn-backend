@@ -166,8 +166,8 @@ function countQuestions(surveyJson) {
  */
 function sanitizeForStudent(quiz) {
   return {
-    id: quiz.id,
-    videoId: quiz.bunnyVideoId,
+    slug: quiz.slug,
+    videoSlug: quiz.bunnyVideo && quiz.bunnyVideo.slug ? quiz.bunnyVideo.slug : undefined,
     title: quiz.title,
     timeLimitSec: quiz.timeLimitSec,
     passingScore: quiz.passingScore,
@@ -288,6 +288,7 @@ async function evaluateGate(userId, videoId, userRole) {
       where: { id: videoId },
       select: {
         id: true,
+        slug: true,
         courseId: true,
         bunnyVideoId: true,
         bunnyLibraryId: true,
@@ -309,7 +310,7 @@ async function evaluateGate(userId, videoId, userRole) {
       prisma.bunnyVideo.findMany({
         where: { courseId: video.courseId, status: 'READY' },
         orderBy: [{ position: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
-        select: { id: true, quiz: { select: { id: true, passingScore: true } } },
+        select: { id: true, slug: true, quiz: { select: { id: true, slug: true, passingScore: true } } },
       }),
     ]);
 
@@ -326,6 +327,7 @@ async function evaluateGate(userId, videoId, userRole) {
     if (currentIndex <= 0) return { allowed: true, _video: video }; // First video always accessible
 
     const previousVideoId = courseVideos[currentIndex - 1].id;
+    const previousVideoSlug = courseVideos[currentIndex - 1].slug;
     const prevQuiz = courseVideos[currentIndex - 1].quiz;
 
     // ── Phase 3: gate condition checks (parallel) ─────────────────────────────
@@ -357,6 +359,7 @@ async function evaluateGate(userId, videoId, userRole) {
         reason: 'You must complete the previous video before accessing this one',
         code: 'SEQUENTIAL_GATE',
         previousVideoId,
+        previousVideoSlug,
       };
     }
 
@@ -369,7 +372,9 @@ async function evaluateGate(userId, videoId, userRole) {
         reason: 'You must complete and pass the quiz for the previous video before proceeding',
         code: 'SEQUENTIAL_GATE',
         quizId: prevQuiz.id,
+        quizSlug: prevQuiz.slug,
         previousVideoId,
+        previousVideoSlug,
         bestScore: null,
         required: prevQuiz.passingScore,
       };
@@ -381,7 +386,9 @@ async function evaluateGate(userId, videoId, userRole) {
         reason: 'You must pass the quiz for the previous video before proceeding',
         code: 'SEQUENTIAL_GATE',
         quizId: prevQuiz.id,
+        quizSlug: prevQuiz.slug,
         previousVideoId,
+        previousVideoSlug,
         bestScore: bestAttempt.scorePercent,
         required: prevQuiz.passingScore,
       };

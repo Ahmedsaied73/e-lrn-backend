@@ -13,10 +13,17 @@ const cache = require('../integrations/redis/cache');
 const busboy = require('busboy');
 const crypto = require('crypto');
 const audit = require('../services/auditLog');
+const { isValidSlug, isValidUserSlug, slugifyTitle, uniqueSlug } = require('../utils/slugs');
 
 function parseInteger(value) {
   const parsed = typeof value === 'number' ? value : Number(value);
   return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+/** Resolve a BunnyVideo by public slug (returns null for bad slug / missing row). */
+async function resolveVideoBySlug(slug) {
+  if (!isValidSlug(slug)) return null;
+  return prisma.bunnyVideo.findUnique({ where: { slug } });
 }
 
 // ─── Student Endpoints ────────────────────────────────────────────────────────
@@ -28,13 +35,15 @@ function parseInteger(value) {
  */
 async function getQuizMeta(req, res) {
   try {
-    const videoId = parseInteger(req.params.videoId);
+    const { videoSlug } = req.params;
     const userId = req.user.id;
     const userRole = req.user.role;
 
-    if (videoId === null || videoId <= 0) {
-      return res.status(400).json({ success: false, error: 'Invalid video ID' });
+    const video = await resolveVideoBySlug(videoSlug);
+    if (!video) {
+      return res.status(404).json({ success: false, error: 'Video not found' });
     }
+    const videoId = video.id;
 
     // Per-user 30s cache (key includes userId — no cross-user leakage).
     // Invalidated on start/submit/grade/reset/complete/exemption change.
@@ -45,19 +54,15 @@ async function getQuizMeta(req, res) {
       return res.status(200).json({ success: true, data: cachedMeta });
     }
 
-    const video = await prisma.bunnyVideo.findUnique({
+    const videoRow = await prisma.bunnyVideo.findUnique({
       where: { id: videoId },
       include: {
         quiz: true,
-        course: { select: { id: true } },
+        course: { select: { slug: true } },
       },
     });
 
-    if (!video) {
-      return res.status(404).json({ success: false, error: 'Video not found' });
-    }
-
-    const quiz = video.quiz;
+    const quiz = videoRow.quiz;
 
     // Independent reads issued in parallel (was 3 serial round trips):
     // enrollment (non-admin), completion flag (non-admin), attempt history.
@@ -66,11 +71,11 @@ async function getQuizMeta(req, res) {
     const [enrollment, progress, attempts] = await Promise.all([
       userRole === 'ADMIN'
         ? null
-        : prisma.enrollment.findFirst({ where: { userId, courseId: video.courseId } }),
-      userRole === 'ADMIN' || !video.quiz
+        : prisma.enrollment.findFirst({ where: { userId, courseId: videoRow.courseId } }),
+      userRole === 'ADMIN' || !videoRow.quiz
         ? null
         : prisma.bunnyVideoProgress.findFirst({ where: { userId, bunnyVideoId: videoId, completed: true } }),
-      video.quiz
+      videoRow.quiz
         ? prisma.quizAttempt.findMany({
             where: { userId, quizId: quiz.id },
             orderBy: { attemptNumber: 'desc' },
@@ -94,8 +99,8 @@ async function getQuizMeta(req, res) {
       return res.status(403).json({ success: false, error: 'You are not enrolled in this course' });
     }
 
-    if (!video.quiz) {
-      const data = { exists: false, videoId, videoTitle: video.title };
+    if (!videoRow.quiz) {
+      const data = { exists: false, videoSlug: videoRow.slug, videoTitle: videoRow.title };
       await cache.set(metaKey, data, 30);
       return res.status(200).json({ success: true, data });
     }
@@ -121,9 +126,9 @@ async function getQuizMeta(req, res) {
 
     const metaData = {
       exists: true,
-      quizId: quiz.id,
-      videoId,
-      videoTitle: video.title,
+      quizSlug: quiz.slug,
+      videoSlug: videoRow.slug,
+      videoTitle: videoRow.title,
       title: quiz.title,
       timeLimitSec: quiz.timeLimitSec,
       passingScore: quiz.passingScore,
@@ -162,20 +167,22 @@ async function getQuizMeta(req, res) {
  */
 async function startQuiz(req, res) {
   try {
-    const videoId = parseInteger(req.params.videoId);
+    const { videoSlug } = req.params;
     const userId = req.user.id;
     const userRole = req.user.role;
 
-    if (videoId === null || videoId <= 0) {
-      return res.status(400).json({ success: false, error: 'Invalid video ID' });
+    const video = await resolveVideoBySlug(videoSlug);
+    if (!video) {
+      return res.status(404).json({ success: false, error: 'Video not found' });
     }
+    const videoId = video.id;
 
-    const video = await prisma.bunnyVideo.findUnique({
+    const videoRow = await prisma.bunnyVideo.findUnique({
       where: { id: videoId },
       include: { quiz: true },
     });
 
-    if (!video || !video.quiz) {
+    if (!videoRow || !videoRow.quiz) {
       return res.status(404).json({ success: false, error: 'No quiz found for this video' });
     }
 
@@ -184,7 +191,7 @@ async function startQuiz(req, res) {
     // (enrollment before completion) is preserved below.
     if (userRole !== 'ADMIN') {
       const [enrollment, progress] = await Promise.all([
-        prisma.enrollment.findFirst({ where: { userId, courseId: video.courseId } }),
+        prisma.enrollment.findFirst({ where: { userId, courseId: videoRow.courseId } }),
         prisma.bunnyVideoProgress.findFirst({ where: { userId, bunnyVideoId: videoId, completed: true } }),
       ]);
       if (!enrollment) {
@@ -196,10 +203,11 @@ async function startQuiz(req, res) {
       }
     }
 
-const { attempt, quiz, resumed } = await quizService.startAttempt(userId, video.quiz.id, {
+const { attempt, quiz, resumed } = await quizService.startAttempt(userId, videoRow.quiz.id, {
       bypassPassedCheck: userRole === 'ADMIN',
     });
     const safeQuiz = quizService.sanitizeForStudent(quiz);
+    safeQuiz.videoSlug = videoSlug;
 
     return res.status(200).json({
       success: true,
@@ -401,18 +409,21 @@ async function getQuizResult(req, res) {
  */
 async function getStudentAttempts(req, res) {
   try {
-    const videoId = parseInteger(req.params.videoId);
+    const { videoSlug } = req.params;
     const userId = req.user.id;
     const userRole = req.user.role;
 
-    if (videoId === null || videoId <= 0) {
-      return res.status(400).json({ success: false, error: 'Invalid video ID' });
+    const video = await resolveVideoBySlug(videoSlug);
+    if (!video) {
+      return res.status(404).json({ success: false, error: 'Video not found' });
     }
+    const videoId = video.id;
 
     const quiz = await prisma.quiz.findUnique({
       where: { bunnyVideoId: videoId },
       select: {
         id: true,
+        slug: true,
         title: true,
         passingScore: true,
         bunnyVideo: { select: { courseId: true } },
@@ -452,7 +463,8 @@ async function getStudentAttempts(req, res) {
     return res.status(200).json({
       success: true,
       data: {
-        quizId: quiz.id,
+        quizSlug: quiz.slug,
+        videoSlug,
         title: quiz.title,
         passingScore: quiz.passingScore,
         attempts,
@@ -473,20 +485,17 @@ async function getStudentAttempts(req, res) {
  */
 async function upsertQuiz(req, res) {
   try {
-    const videoId = parseInteger(req.params.videoId);
+    const { videoSlug } = req.params;
     const { title, timeLimitSec, passingScore, maxAttempts, surveyJson, answerKey: rawKey } = req.body || {};
 
-    if (videoId === null || videoId <= 0) {
-      return res.status(400).json({ success: false, error: 'Invalid video ID' });
+    const video = await resolveVideoBySlug(videoSlug);
+    if (!video) {
+      return res.status(404).json({ success: false, error: 'Video not found' });
     }
+    const videoId = video.id;
 
     if (!title || typeof title !== 'string' || !title.trim()) {
       return res.status(400).json({ success: false, error: 'Title is required' });
-    }
-
-    const video = await prisma.bunnyVideo.findUnique({ where: { id: videoId } });
-    if (!video) {
-      return res.status(404).json({ success: false, error: 'Video not found' });
     }
 
     // Validate SurveyJS JSON
@@ -541,6 +550,7 @@ const hasPassingScore = passingScore !== undefined && passingScore !== null && p
       create: {
         bunnyVideoId: videoId,
         title: title.trim(),
+        slug: await uniqueSlug('Quiz', slugifyTitle(title), 'quiz'),
         timeLimitSec: timeLimit,
         passingScore: passScore,
         maxAttempts: maxAttemptsValue,
@@ -594,7 +604,7 @@ const hasPassingScore = passingScore !== undefined && passingScore !== null && p
       action: existingQuiz ? 'QUIZ_UPDATE' : 'QUIZ_CREATE',
       targetType: 'quiz',
       targetId: quiz.id,
-      metadata: { videoId, title: title.trim() },
+      metadata: { videoSlug, title: title.trim() },
     });
 
     return res.status(200).json({
@@ -614,15 +624,16 @@ const hasPassingScore = passingScore !== undefined && passingScore !== null && p
  */
 async function deleteQuiz(req, res) {
   try {
-    const quizId = parseInteger(req.params.quizId);
-    if (quizId === null || quizId <= 0) {
-      return res.status(400).json({ success: false, error: 'Invalid quiz ID' });
+    const { quizSlug } = req.params;
+    if (!isValidSlug(quizSlug)) {
+      return res.status(400).json({ success: false, error: 'Invalid quiz slug' });
     }
 
-    const quiz = await prisma.quiz.findUnique({ where: { id: quizId } });
+    const quiz = await prisma.quiz.findUnique({ where: { slug: quizSlug } });
     if (!quiz) {
       return res.status(404).json({ success: false, error: 'Quiz not found' });
     }
+    const quizId = quiz.id;
 
     await prisma.quiz.delete({ where: { id: quizId } });
 
@@ -669,12 +680,21 @@ async function deleteQuiz(req, res) {
  */
 async function listQuizAttempts(req, res) {
   try {
-    const quizId = parseInteger(req.params.quizId);
+    const { quizSlug } = req.params;
     const { status } = req.query;
 
-    if (quizId === null || quizId <= 0) {
-      return res.status(400).json({ success: false, error: 'Invalid quiz ID' });
+    if (!isValidSlug(quizSlug)) {
+      return res.status(400).json({ success: false, error: 'Invalid quiz slug' });
     }
+
+    const quiz = await prisma.quiz.findUnique({
+      where: { slug: quizSlug },
+      select: { id: true },
+    });
+    if (!quiz) {
+      return res.status(404).json({ success: false, error: 'Quiz not found' });
+    }
+    const quizId = quiz.id;
 
     const where = { quizId };
     if (status) {
@@ -748,13 +768,13 @@ async function listAllQuizzes(req, res) {
         orderBy: { updatedAt: 'desc' },
         select: {
           id: true,
+          slug: true,
           title: true,
           timeLimitSec: true,
           passingScore: true,
           maxAttempts: true,
           updatedAt: true,
-          bunnyVideoId: true,
-          bunnyVideo: { select: { id: true, title: true, course: { select: { id: true, title: true } } } },
+          bunnyVideo: { select: { id: true, slug: true, title: true, course: { select: { id: true, slug: true, title: true } } } },
           _count: { select: { attempts: true } },
         },
       }),
@@ -769,11 +789,11 @@ async function listAllQuizzes(req, res) {
     const gradingMap = new Map(gradingCounts.map((g) => [g.quizId, g._count._all]));
 
     const data = quizzes.map((q) => ({
-      id: q.id,
+      slug: q.slug,
       title: q.title,
-      videoId: q.bunnyVideoId,
+      videoSlug: q.bunnyVideo.slug,
       videoTitle: q.bunnyVideo.title,
-      courseId: q.bunnyVideo.course.id,
+      courseSlug: q.bunnyVideo.course.slug,
       courseTitle: q.bunnyVideo.course.title,
       timeLimitSec: q.timeLimitSec,
       passingScore: q.passingScore,
@@ -966,20 +986,19 @@ async function resetAttempt(req, res) {
  */
 async function grantExemption(req, res) {
   try {
-    const videoId = parseInteger(req.params.videoId);
+    const { videoSlug } = req.params;
     const adminId = req.user.id;
-    const { userId, reason } = req.body;
+    const { userSlug, reason } = req.body;
 
-    const parsedUserId = parseInteger(userId);
-    if (videoId === null || videoId <= 0 || parsedUserId === null || parsedUserId <= 0) {
-      return res.status(400).json({ success: false, error: 'videoId and userId are required' });
+    if (!isValidSlug(videoSlug) || !isValidUserSlug(userSlug)) {
+      return res.status(400).json({ success: false, error: 'videoSlug and userSlug are required' });
     }
 
     // Validate FK targets up front: a missing user or video must be a 404,
     // never a P2003 foreign-key 500 from the upsert below.
     const [video, student] = await Promise.all([
-      prisma.bunnyVideo.findUnique({ where: { id: videoId }, select: { id: true } }),
-      prisma.user.findUnique({ where: { id: parsedUserId }, select: { id: true } }),
+      prisma.bunnyVideo.findUnique({ where: { slug: videoSlug }, select: { id: true } }),
+      prisma.user.findUnique({ where: { slug: userSlug }, select: { id: true } }),
     ]);
     if (!video) {
       return res.status(404).json({ success: false, error: 'Video not found' });
@@ -987,13 +1006,15 @@ async function grantExemption(req, res) {
     if (!student) {
       return res.status(404).json({ success: false, error: 'User not found' });
     }
+    const videoId = video.id;
+    const studentId = student.id;
 
     let exemption;
     try {
       exemption = await prisma.gateExemption.upsert({
-        where: { userId_bunnyVideoId: { userId: parsedUserId, bunnyVideoId: videoId } },
+        where: { userId_bunnyVideoId: { userId: studentId, bunnyVideoId: videoId } },
         create: {
-          userId: parsedUserId,
+          userId: studentId,
           bunnyVideoId: videoId,
           grantedBy: adminId,
           reason: reason || null,
@@ -1014,16 +1035,16 @@ async function grantExemption(req, res) {
     // Exemptions affect gates enforced at playback/complete time; meta itself
     // carries no gate verdict today — invalidate defensively so future
     // gate-derived fields can never go stale.
-    await quizService.invalidateQuizMetaForUser(parsedUserId);
+    await quizService.invalidateQuizMetaForUser(studentId);
     // Gate cache depends on exemptions — invalidate so the new exemption
     // is reflected immediately in the sequential gate.
-    await quizService.invalidateGateForUser(parsedUserId);
+    await quizService.invalidateGateForUser(studentId);
 
     await audit.record(req, {
       action: 'GATE_EXEMPTION_GRANT',
       targetType: 'gateExemption',
       targetId: exemption.id,
-      metadata: { userId: parsedUserId, videoId, reason: reason || null },
+      metadata: { userId: studentId, videoId, reason: reason || null },
     });
 
     return res.status(200).json({

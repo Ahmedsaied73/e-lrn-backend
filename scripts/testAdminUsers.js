@@ -5,6 +5,7 @@
 // gateExemption, bunnyVideoProgress) and proves deleteUser removes them all.
 const assert = require('assert');
 const prisma = require('../src/config/db');
+const { slugifyTitle, uniqueSlug, opaqueUserSlug } = require('../src/utils/slugs');
 const BASE = 'http://localhost:3005';
 
 function cookieString(res) {
@@ -34,7 +35,7 @@ function cookieString(res) {
     // Seed all child rows
     const tag = `p1_${Date.now()}`;
     const email = `${tag}@localhost.test`;
-    const student = await prisma.user.create({ data: { name: 'P1 Cascade Student', email, password: 'x', grade: 'FIRST_SECONDARY' } });
+    const student = await prisma.user.create({ data: { slug: opaqueUserSlug(), name: 'P1 Cascade Student', email, password: 'x', grade: 'FIRST_SECONDARY' } });
     studentId = student.id;
     const course = await prisma.course.findFirst();
     await prisma.enrollment.create({ data: { userId: studentId, courseId: course.id, isPaid: true } });
@@ -63,11 +64,11 @@ function cookieString(res) {
     check('no password/refreshToken in list payload', leaked.length === 0, leaked.join(',') || 'clean');
     check('lastLoginAt selected for admin list', 'lastLoginAt' in one);
 
-    const up = await (await fetch(`${BASE}/user/${studentId}`, { method: 'PUT', headers: { Cookie: adminCookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'P1 Updated Name' }) })).json();
-    check('PUT /user/:id persists name', up.success && up.data.name === 'P1 Updated Name');
+    const up = await (await fetch(`${BASE}/user/${student.slug}`, { method: 'PUT', headers: { Cookie: adminCookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'P1 Updated Name' }) })).json();
+    check('PUT /user/:slug persists name', up.success && up.data.name === 'P1 Updated Name');
 
     // Delete with 9 child-row types present (would previously throw P2003)
-    const del = await fetch(`${BASE}/user/${studentId}`, { method: 'DELETE', headers: { Cookie: adminCookie } });
+    const del = await fetch(`${BASE}/user/${student.slug}`, { method: 'DELETE', headers: { Cookie: adminCookie } });
     const delJson = await del.json();
     check('DELETE succeeds with all child rows (no P2003)', del.status === 200 && delJson.success, `status=${del.status}`);
     check('user row removed', (await prisma.user.findUnique({ where: { id: studentId } })) === null);
@@ -76,10 +77,10 @@ function cookieString(res) {
     check('all child rows cascade-removed', orphans === 0, orphanCounts.join(','));
 
     // Course-owner guard: deleting a user who owns courses → 409, user untouched
-    const owner = await prisma.user.create({ data: { name: 'P1 Course Owner', email: `owner_${tag}@localhost.test`, password: 'x', grade: 'FIRST_SECONDARY' } });
+    const owner = await prisma.user.create({ data: { slug: opaqueUserSlug(), name: 'P1 Course Owner', email: `owner_${tag}@localhost.test`, password: 'x', grade: 'FIRST_SECONDARY' } });
     ownerStudentId = owner.id;
-    ownedCourseId = (await prisma.course.create({ data: { title: `p1 owned ${tag}`, description: 'x', price: 0, thumbnail: 'x', grade: 'FIRST_SECONDARY', teacherId: ownerStudentId } })).id;
-    const blockDel = await fetch(`${BASE}/user/${ownerStudentId}`, { method: 'DELETE', headers: { Cookie: adminCookie } });
+    ownedCourseId = (await prisma.course.create({ data: { slug: await uniqueSlug('Course', `p1 owned ${tag}`, 'course'), title: `p1 owned ${tag}`, description: 'x', price: 0, thumbnail: 'x', grade: 'FIRST_SECONDARY', teacherId: ownerStudentId } })).id;
+    const blockDel = await fetch(`${BASE}/user/${owner.slug}`, { method: 'DELETE', headers: { Cookie: adminCookie } });
     check('course-owning user delete refused (409)', blockDel.status === 409, `status=${blockDel.status}`);
     check('course-owning user still exists after 409', (await prisma.user.findUnique({ where: { id: ownerStudentId } })) !== null);
   } catch (e) {

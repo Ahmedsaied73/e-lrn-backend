@@ -2,16 +2,27 @@ const prisma = require('../config/db');
 const bunnyClient = require('../integrations/bunny/bunnyStreamClient');
 const cache = require('../integrations/redis/cache');
 const audit = require('../services/auditLog');
+const { isValidSlug, slugifyTitle, uniqueSlug } = require('../utils/slugs');
 
 /**
- * Parse a positive-signed 32-bit integer from a route/query param.
- * Returns null when the input is missing, not a safe integer, or non-positive
- * (malformed IDs such as "abc", "1.5", "-1", or overflow otherwise turn into
- * Prisma's P2025/P2030 and a 500 — reject them as 400 here instead).
+ * Strip numeric identifiers from nested User rows (public resource shape uses slug).
  */
-function parseId(raw) {
-  const n = parseInt(raw, 10);
-  return Number.isSafeInteger(n) && n > 0 ? n : null;
+function toPublicTeacher(teacher) {
+  if (!teacher) return teacher;
+  const { id: _id, ...rest } = teacher;
+  return rest;
+}
+
+/**
+ * Public course shape: numeric `id`/`teacherId` are removed — `slug` is the
+ * externally visible identifier. Nested teacher rows are shaped too.
+ */
+function toPublicCourse(course) {
+  if (!course) return course;
+  const { id: _id, teacherId: _tid, ...rest } = course;
+  const out = { ...rest };
+  if (course.teacher) out.teacher = toPublicTeacher(course.teacher);
+  return out;
 }
 
 /** Validate a course price: finite, >= 0, and within a sane ceiling. */
@@ -66,7 +77,7 @@ const getAllCourses = async (req, res) => {
     // Ensure thumbnails have full URL if not already
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     const coursesWithUrls = courses.map(course => ({
-      ...course,
+      ...toPublicCourse(course),
       thumbnail: course.thumbnail && !course.thumbnail.startsWith('http') 
         ? `${baseUrl}/${course.thumbnail}` 
         : course.thumbnail
@@ -95,13 +106,19 @@ const getAllCourses = async (req, res) => {
 // /enroll/status and per-video progress endpoints for Course init.
 const getCourseById = async (req, res) => {
   try {
-    const { id } = req.params;
+    const { slug } = req.params;
     const userId = req.user.id;
 
-    const courseId = parseId(id);
-    if (courseId === null) {
-      return res.status(400).json({ success: false, error: 'Invalid course ID' });
+    if (!isValidSlug(slug)) {
+      return res.status(400).json({ success: false, error: 'Invalid course slug' });
     }
+
+    const courseRow = await prisma.course.findUnique({ where: { slug }, select: { id: true } });
+    if (!courseRow) return res.status(404).json({ success: false, error: 'Course not found' });
+
+    // Numeric id stays internal — cache keys, gate checks and progress lookups
+    // keep using it, but the API surface only ever exposes `slug`.
+    const courseId = courseRow.id;
 
     // Single Prisma call: videos + this user's progress per video + this user's
     // enrollment (if any) are all fetched via filtered relation includes, so no
@@ -127,7 +144,7 @@ const getCourseById = async (req, res) => {
             where: { status: 'READY' },
             orderBy: [{ position: 'asc' }, { createdAt: 'asc' }],
             select: {
-              id: true,
+              slug: true,
               title: true,
               thumbnailUrl: true,
               duration: true,
@@ -153,7 +170,7 @@ const getCourseById = async (req, res) => {
       // Existing "no progress record" representation (see videoProgressController):
       // completed: false, watchedAt: null
       const derivedProgress = row.bunnyVideos.map(video => ({
-        videoId: video.id,
+        videoSlug: video.slug,
         completed: video.progress[0] ? video.progress[0].completed : false,
         watchedAt: video.progress[0] ? video.progress[0].watchedAt : null
       }));
@@ -168,7 +185,7 @@ const getCourseById = async (req, res) => {
     if (!cachedResult) {
       return res.status(404).json({ success: false, error: 'Course not found' });
     }
-    const { course, progress, enrollment } = cachedResult;
+    const { course, progress } = cachedResult;
 
     const baseUrl = `${req.protocol}://${req.get('host')}`;
 
@@ -180,15 +197,23 @@ const getCourseById = async (req, res) => {
     // `thumbnailUrl` is mapped onto the legacy `thumbnail` key so the response
     // envelope keeps its shape; `url` is intentionally absent (see above).
     // The per-user `progress` array is dropped per row — it's already surfaced
-    // separately in the top-level `progress` list.
+    // separately in the top-level `progress` list. Numeric video `id` is removed
+    // — the public identifier is `slug` (courseSlug attached for navigation).
     // Thumbnail absolutization is host-dependent → done per request, post-cache.
     // eslint-disable-next-line no-unused-vars -- progress is intentionally excluded from the video list
     const videos = course.bunnyVideos.map(({ progress, thumbnailUrl, ...video }) => ({
       ...video,
+      courseSlug: course.slug,
       thumbnail: thumbnailUrl && !thumbnailUrl.startsWith('http') ? `${baseUrl}/${thumbnailUrl}` : thumbnailUrl
     }));
 
-    const { bunnyVideos: _rawVideos, enrollments: _rawEnrollments, ...courseData } = course;
+    // Public course shape: numeric id/teacherId are dropped (slug is the
+    // identifier); the raw bunnyVideos/enrollments relation arrays are stripped
+    // (their public forms are `videos` + `enrollment`/`progress` below).
+    const courseData = toPublicCourse((({ bunnyVideos: _bv, enrollments: _en, ...rest }) => rest)(course));
+    const enrollment = course.enrollments[0]
+      ? (({ userId: _u, courseId: _c, ...rest }) => rest)(course.enrollments[0])
+      : null;
 
     res.json({
       success: true,
@@ -242,6 +267,7 @@ const createCourse = async (req, res) => {
     const course = await prisma.course.create({
       data: {
         title,
+        slug: await uniqueSlug('Course', slugifyTitle(title), 'course'),
         description,
         price: Number(price),
         grade,
@@ -257,9 +283,9 @@ const createCourse = async (req, res) => {
       action: 'COURSE_CREATE',
       targetType: 'course',
       targetId: course.id,
-      metadata: { title, grade },
+      metadata: { title, grade, slug: course.slug },
     });
-    res.status(201).json({ success: true, message: 'Course created successfully', data: course });
+    res.status(201).json({ success: true, message: 'Course created successfully', data: toPublicCourse(course) });
   } catch (error) {
     console.error('Error creating course:', error);
     res.status(500).json({ success: false, error: 'Failed to create course' });
@@ -269,12 +295,11 @@ const createCourse = async (req, res) => {
 // Update an existing course
 const updateCourse = async (req, res) => {
   try {
-    const { id } = req.params;
+    const { slug } = req.params;
     const { title, description, price, grade, category, thumbnail } = req.body;
 
-    const courseId = parseId(id);
-    if (courseId === null) {
-      return res.status(400).json({ success: false, error: 'Invalid course ID' });
+    if (!isValidSlug(slug)) {
+      return res.status(400).json({ success: false, error: 'Invalid course slug' });
     }
 
     if (price !== undefined && isInvalidPrice(price)) {
@@ -282,7 +307,7 @@ const updateCourse = async (req, res) => {
     }
 
     const existingCourse = await prisma.course.findUnique({
-      where: { id: courseId }
+      where: { slug }
     });
 
     if (!existingCourse) {
@@ -306,7 +331,7 @@ const updateCourse = async (req, res) => {
     };
 
     const updatedCourse = await prisma.course.update({
-      where: { id: courseId },
+      where: { slug },
       data: updateData
     });
 
@@ -315,10 +340,10 @@ const updateCourse = async (req, res) => {
     await audit.record(req, {
       action: 'COURSE_UPDATE',
       targetType: 'course',
-      targetId: courseId,
-      metadata: { fields: Object.keys(updateData), title: updatedCourse.title },
+      targetId: existingCourse.id,
+      metadata: { fields: Object.keys(updateData), title: updatedCourse.title, slug },
     });
-    res.json({ success: true, message: 'Course updated successfully', data: updatedCourse });
+    res.json({ success: true, message: 'Course updated successfully', data: toPublicCourse(updatedCourse) });
   } catch (error) {
     console.error('Error updating course:', error);
     res.status(500).json({ success: false, error: 'Failed to update course' });
@@ -328,13 +353,14 @@ const updateCourse = async (req, res) => {
 // Delete a course
 const deleteCourse = async (req, res) => {
   try {
-    const courseId = parseId(req.params.id);
-    if (courseId === null) {
-      return res.status(400).json({ success: false, error: 'Invalid course ID' });
+    const { slug } = req.params;
+
+    if (!isValidSlug(slug)) {
+      return res.status(400).json({ success: false, error: 'Invalid course slug' });
     }
 
     const existingCourse = await prisma.course.findUnique({
-      where: { id: courseId },
+      where: { slug },
       select: {
         id: true,
         title: true,
@@ -345,6 +371,8 @@ const deleteCourse = async (req, res) => {
     if (!existingCourse) {
       return res.status(404).json({ success: false, error: 'Course not found' });
     }
+
+    const courseId = existingCourse.id;
 
     // Collect BunnyVideos for remote cleanup (before DB rows are deleted)
     const bunnyVideos = await prisma.bunnyVideo.findMany({
@@ -472,13 +500,15 @@ const getUserEnrolledCourses = async (req, res) => {
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     const enrolledCourses = enrollments.map(enrollment => {
       const course = enrollment.course;
-      if (course.thumbnail && !course.thumbnail.startsWith('http')) {
-        course.thumbnail = `${baseUrl}/${course.thumbnail}`;
+      // Public course shape (numeric id/teacherId hidden; slug is the identifier).
+      const publicCourse = toPublicCourse(course);
+      if (publicCourse.thumbnail && !publicCourse.thumbnail.startsWith('http')) {
+        publicCourse.thumbnail = `${baseUrl}/${publicCourse.thumbnail}`;
       }
       return {
         id: enrollment.id,
         createdAt: enrollment.createdAt,
-        course
+        course: publicCourse
       };
     });
 

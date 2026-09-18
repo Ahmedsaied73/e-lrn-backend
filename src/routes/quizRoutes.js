@@ -33,10 +33,10 @@ router.use(authenticateToken);
 // ─── Student Endpoints ────────────────────────────────────────────────────────
 
 // Drives "بدء الاختبار" button: check if quiz exists, unlock status, best score
-router.get('/videos/:videoId/meta', getQuizMeta);
+router.get('/videos/:videoSlug/meta', getQuizMeta);
 
 // Start or resume an attempt -> returns sanitized surveyJson & deadlineAt
-router.post('/videos/:videoId/start', startQuiz);
+router.post('/videos/:videoSlug/start', startQuiz);
 
 // Save in-progress responses without grading or changing attempt status
 router.patch('/attempts/:id/save', saveQuizAttempt);
@@ -48,12 +48,12 @@ router.post('/attempts/:id/submit', submitQuiz);
 router.get('/attempts/:id/result', getQuizResult);
 
 // List historical attempts for student
-router.get('/videos/:videoId/attempts', getStudentAttempts);
+router.get('/videos/:videoSlug/attempts', getStudentAttempts);
 
 // ─── Admin Endpoints ──────────────────────────────────────────────────────────
 
 // Create / update quiz definition for a video
-router.post('/videos/:videoId', authorizeAdmin(), upsertQuiz);
+router.post('/videos/:videoSlug', authorizeAdmin(), upsertQuiz);
 
 // Upload an image for a quiz question (multipart/form-data, field name: "image").
 // Proxied to Supabase Storage; returns the public URL for question `imageLink`.
@@ -62,10 +62,10 @@ router.post('/videos/:videoId', authorizeAdmin(), upsertQuiz);
 router.post('/images', authorizeAdmin(), uploadQuizImage);
 
 // Delete quiz and associated attempts
-router.delete('/:quizId', authorizeAdmin(), deleteQuiz);
+router.delete('/:quizSlug', authorizeAdmin(), deleteQuiz);
 
 // View attempt list / grading queue
-router.get('/:quizId/attempts', authorizeAdmin(), listQuizAttempts);
+router.get('/:quizSlug/attempts', authorizeAdmin(), listQuizAttempts);
 
 // Grade essay questions
 router.put('/attempts/:id/grade', authorizeAdmin(), gradeAttempt);
@@ -74,7 +74,7 @@ router.put('/attempts/:id/grade', authorizeAdmin(), gradeAttempt);
 router.post('/attempts/:id/reset', authorizeAdmin(), resetAttempt);
 
 // Grant sequential gate exemption
-router.post('/videos/:videoId/exemptions', authorizeAdmin(), grantExemption);
+router.post('/videos/:videoSlug/exemptions', authorizeAdmin(), grantExemption);
 
 // Revoke sequential gate exemption
 router.delete('/exemptions/:exemptionId', authorizeAdmin(), revokeExemption);

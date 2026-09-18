@@ -2,11 +2,9 @@ const prisma = require('../config/db');
 const cache = require('../integrations/redis/cache');
 const { isAdmin } = require('../middlewares');
 const { evaluateGate, invalidateQuizMeta, invalidateGateForUser } = require('../services/quizService');
+const { isValidSlug } = require('../utils/slugs');
 
-function parseBunnyVideoId(value) {
-  const videoId = Number(value);
-  return Number.isSafeInteger(videoId) && videoId > 0 ? videoId : null;
-}
+// ─── Public helper used by middleware/routes to point at progress rows ────────
 
 /**
  * Mark a video as completed for the current user
@@ -15,8 +13,15 @@ function parseBunnyVideoId(value) {
  */
 const markVideoCompleted = async (req, res) => {
   try {
-    const videoId = parseBunnyVideoId(req.body?.videoId);
-    if (!videoId) return res.status(400).json({ error: 'Invalid video ID format' });
+    const { videoSlug } = req.body || {};
+    if (!isValidSlug(videoSlug)) return res.status(400).json({ error: 'Invalid video slug' });
+
+    const video = await prisma.bunnyVideo.findUnique({
+      where: { slug: videoSlug },
+      select: { id: true, slug: true },
+    });
+    if (!video) return res.status(404).json({ error: 'Video not found', code: 'VIDEO_NOT_FOUND' });
+    const videoId = video.id;
 
     // The sequential gate is the single source of truth: it enforces
     // enrollment + previous-video-completion (and quiz pass). Admins bypass it.
@@ -31,7 +36,7 @@ const markVideoCompleted = async (req, res) => {
       return res.status(403).json({
         error: gate.reason,
         code: 'VIDEO_NOT_UNLOCKED',
-        previousVideoId: gate.previousVideoId,
+        previousVideoSlug: gate.previousVideoSlug,
       });
     }
 
@@ -97,7 +102,8 @@ const markVideoCompleted = async (req, res) => {
 
     return res.json({
       message: 'Video marked as completed',
-      videoProgress
+      videoSlug,
+      videoProgress: (({ userId: _u, bunnyVideoId: _b, ...rest }) => rest)(videoProgress)
     });
   } catch (error) {
     console.error('Error marking video as completed:', error);
@@ -112,16 +118,15 @@ const markVideoCompleted = async (req, res) => {
  */
 const checkVideoCompletion = async (req, res) => {
   try {
-    const videoId = parseBunnyVideoId(req.params.videoId);
-    if (!videoId) return res.status(400).json({ error: 'Invalid video ID format' });
+    const { videoSlug } = req.params;
+    if (!isValidSlug(videoSlug)) return res.status(400).json({ error: 'Invalid video slug' });
 
-    // Enrollment gate — mirrors markVideoCompleted/evaluateGate so progress
-    // cannot be probed for videos in courses the user isn't enrolled in.
     const video = await prisma.bunnyVideo.findUnique({
-      where: { id: videoId },
-      select: { courseId: true },
+      where: { slug: videoSlug },
+      select: { id: true, slug: true, courseId: true },
     });
     if (!video) return res.status(404).json({ error: 'Video not found' });
+    const videoId = video.id;
 
     if (!(await isAdmin(req))) {
       const enrollment = await prisma.enrollment.findFirst({
@@ -142,7 +147,7 @@ const checkVideoCompletion = async (req, res) => {
 
     // Return completion status
     res.json({
-      videoId,
+      videoSlug,
       completed: videoProgress ? videoProgress.completed : false,
       watchedAt: videoProgress ? videoProgress.watchedAt : null
     });
@@ -159,17 +164,19 @@ const checkVideoCompletion = async (req, res) => {
  */
 const getCourseVideoProgress = async (req, res) => {
   try {
-    const courseId = parseBunnyVideoId(req.params.courseId);
-    if (!courseId) return res.status(400).json({ error: 'Invalid course ID format' });
+    const { courseSlug } = req.params;
+    if (!isValidSlug(courseSlug)) return res.status(400).json({ error: 'Invalid course slug' });
 
     const course = await prisma.course.findUnique({
-      where: { id: courseId },
+      where: { slug: courseSlug },
       include: { bunnyVideos: { where: { status: 'READY' }, orderBy: [{ position: 'asc' }, { createdAt: 'asc' }] } }
     });
 
     if (!course) {
       return res.status(404).json({ error: 'Course not found' });
     }
+
+    const courseId = course.id;
 
     // Enrollment gate — mirrors markVideoCompleted/evaluateGate.
     if (!(await isAdmin(req))) {
@@ -204,7 +211,7 @@ const getCourseVideoProgress = async (req, res) => {
 
     // Create the response with all videos and their completion status
     const videosWithProgress = course.bunnyVideos.map(video => ({
-      id: video.id,
+      videoSlug: video.slug,
       title: video.title,
       duration: video.duration,
       completed: progressMap[video.id] ? progressMap[video.id].completed : false,
@@ -212,7 +219,7 @@ const getCourseVideoProgress = async (req, res) => {
     }));
 
     res.json({
-      courseId,
+      courseSlug,
       totalVideos: course.bunnyVideos.length,
       completedVideos: Object.values(progressMap).filter(p => p.completed).length,
       videos: videosWithProgress

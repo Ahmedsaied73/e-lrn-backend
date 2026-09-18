@@ -53,7 +53,7 @@ async function login(email, password) {
     // Admin enrolls student
     const enrollRes = await (await fetch(`${BASE}/admin/enrollments`, {
       method: 'POST', headers: { Cookie: admin.cookie, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: stuUser.id, courseId: course.id })
+      body: JSON.stringify({ userSlug: stuUser.slug, courseSlug: course.slug })
     })).json();
     check('admin enroll creates enrollment', enrollRes.success === true && enrollRes.data?.enrollment?.id, JSON.stringify(enrollRes.data?.enrollment?.id));
     enrollmentId = enrollRes.data?.enrollment?.id;
@@ -63,14 +63,14 @@ async function login(email, password) {
     // Duplicate → 409
     const dup = await (await fetch(`${BASE}/admin/enrollments`, {
       method: 'POST', headers: { Cookie: admin.cookie, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: stuUser.id, courseId: course.id })
+      body: JSON.stringify({ userSlug: stuUser.slug, courseSlug: course.slug })
     }));
     check('duplicate enroll → 409', dup.status === 409, `status=${dup.status}`);
 
     // Bad refs
     const badUser = await (await fetch(`${BASE}/admin/enrollments`, {
       method: 'POST', headers: { Cookie: admin.cookie, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: 999999, courseId: course.id })
+      body: JSON.stringify({ userSlug: 'u_doesnotexist999', courseSlug: course.slug })
     }));
     check('enroll unknown user → 404', badUser.status === 404, `status=${badUser.status}`);
 
@@ -81,18 +81,18 @@ async function login(email, password) {
     check('row has student + course context', row?.student?.name === 'T32 Student' && row?.course?.title === course.title, JSON.stringify(row?.course?.title));
     check('list payload has no secrets', !JSON.stringify(list).includes('"password"') && !JSON.stringify(list).includes('refreshToken'));
 
-    const byUser = await (await fetch(`${BASE}/admin/enrollments?userId=${stuUser.id}`, { headers: { Cookie: admin.cookie } })).json();
-    check('userId filter works', byUser.success === true && byUser.meta.total === 1);
+    const byUser = await (await fetch(`${BASE}/admin/enrollments?userSlug=${stuUser.slug}`, { headers: { Cookie: admin.cookie } })).json();
+    check('userSlug filter works', byUser.success === true && byUser.meta.total === 1);
 
     // Admin edits grade + phoneNumber
-    const upd = await (await fetch(`${BASE}/user/${stuUser.id}`, {
+    const upd = await (await fetch(`${BASE}/user/${stuUser.slug}`, {
       method: 'PUT', headers: { Cookie: admin.cookie, 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: 'T32 Student Updated', grade: 'THIRD_SECONDARY', phoneNumber: '01199900099' })
     })).json();
     check('admin updates name/grade/phone', upd.success === true && upd.data?.grade === 'THIRD_SECONDARY' && upd.data?.phoneNumber === '01199900099' && upd.data?.name === 'T32 Student Updated', JSON.stringify({ g: upd.data?.grade, p: upd.data?.phoneNumber }));
 
     // Student self-edit cannot change grade/phone
-    const selfUpd = await (await fetch(`${BASE}/user/${stuUser.id}`, {
+    const selfUpd = await (await fetch(`${BASE}/user/${stuUser.slug}`, {
       method: 'PUT', headers: { Cookie: stuLogin.cookie, 'Content-Type': 'application/json' },
       body: JSON.stringify({ grade: 'FIRST_SECONDARY', phoneNumber: '01100000000', name: 'T32 Self' })
     })).json();
@@ -105,7 +105,7 @@ async function login(email, password) {
     const gone = await prisma.enrollment.findUnique({ where: { id: enrollmentId } });
     check('enrollment truly gone', gone === null);
     enrollmentId = null;
-    const listAfter = await (await fetch(`${BASE}/admin/enrollments?userId=${stuUser.id}`, { headers: { Cookie: admin.cookie } })).json();
+    const listAfter = await (await fetch(`${BASE}/admin/enrollments?userSlug=${stuUser.slug}`, { headers: { Cookie: admin.cookie } })).json();
     check('user no longer enrolled', listAfter.meta.total === 0, `total=${listAfter.meta?.total}`);
   } catch (error) {
     console.error('FATAL', error.message);

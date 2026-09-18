@@ -97,8 +97,10 @@ async function getAchievements(req, res) {
 
           return {
             videoId: video.id,
+            videoSlug: video.slug,
             videoTitle: video.title,
             quizId: quiz.id,
+            quizSlug: quiz.slug,
             quizTitle: quiz.title,
             passingScore: quiz.passingScore,
             timeLimitSec: quiz.timeLimitSec,
@@ -113,6 +115,7 @@ async function getAchievements(req, res) {
       return {
         course: {
           id: course.id,
+          slug: course.slug,
           title: course.title,
           description: course.description,
           thumbnail: course.thumbnail,

@@ -14,6 +14,7 @@ model User {
   email             String             @unique
   phoneNumber       String?            @unique
   password          String
+  slug              String             @unique // Opaque public identifier (u_<random>) — replaces numeric id in URLs
   role              Role               @default(STUDENT)
   grade             Grade              @default(FIRST_SECONDARY) // Student's grade/year (required)
   courses           Course[]           @relation("AdminCourses") // Courses created by the admin
@@ -36,6 +37,7 @@ certificates      Certificate[]
 model Course {
   id            Int            @id @default(autoincrement())
   title         String
+  slug          String            @unique // Public URL identifier — replaces numeric id in URLs
   description   String
   price         Float
   thumbnail     String
@@ -160,6 +162,7 @@ model Quiz {
   id           Int           @id @default(autoincrement())
   bunnyVideoId Int           @unique               // 1-to-1: one quiz per Bunny video
   title        String
+  slug         String        @unique               // Public URL identifier — replaces numeric id in URLs
   timeLimitSec Int?                                // null = untimed; e.g. 600 = 10 min
   passingScore Int           @default(50)          // percentage required to pass (default 50%)
   maxAttempts  Int           @default(3)           // max retakes per student; 409 once exhausted
@@ -354,6 +357,7 @@ model BunnyVideo {
   id                 Int         @id @default(autoincrement())
   courseId           Int
   title              String
+  slug               String      @unique // Public URL identifier — replaces numeric id in URLs
   // Position in the course sequence — used for ordering and the sequential gate.
   // Nullable only for legacy rows; new videos always get max(position)+1.
   position           Int?

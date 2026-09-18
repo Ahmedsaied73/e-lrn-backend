@@ -1,6 +1,15 @@
 const prisma = require('../config/db');
 const cache = require('../integrations/redis/cache');
 const audit = require('../services/auditLog');
+const { isValidSlug, isValidUserSlug } = require('../utils/slugs');
+
+// Strip numeric course/user references from Enrollment rows — the public
+// surface identifies those resources by slug.
+function publicEnrollment(enrollment) {
+  if (!enrollment) return enrollment;
+  const { userId: _uid, courseId: _cid, ...rest } = enrollment;
+  return rest;
+}
 
 /**
  * Enroll the authenticated user in a course.
@@ -9,30 +18,27 @@ const audit = require('../services/auditLog');
 const enrollUserInCourse = async (req, res) => {
   try {
     const userId = req.user.id; // [C-8] Derived from token, not body
-    const { courseId } = req.body;
+    const { courseSlug } = req.body;
 
-    if (!courseId) {
-      return res.status(400).json({ success: false, error: 'Course ID is required.' });
-    }
-
-    const parsedCourseId = parseInt(courseId, 10);
-    if (isNaN(parsedCourseId)) {
-      return res.status(400).json({ success: false, error: 'Invalid course ID format.' });
+    if (!isValidSlug(courseSlug)) {
+      return res.status(400).json({ success: false, error: 'Course slug is required.' });
     }
 
     // Verify the course exists
     const course = await prisma.course.findUnique({
-      where: { id: parsedCourseId },
-      select: { id: true, price: true }
+      where: { slug: courseSlug },
+      select: { id: true, slug: true, price: true }
     });
 
     if (!course) {
       return res.status(404).json({ success: false, error: 'Course not found.' });
     }
 
+    const courseId = course.id;
+
     // Check if already enrolled
     const existingEnrollment = await prisma.enrollment.findFirst({
-      where: { userId, courseId: parsedCourseId }
+      where: { userId, courseId }
     });
 
     if (existingEnrollment) {
@@ -44,7 +50,7 @@ const enrollUserInCourse = async (req, res) => {
         return res.status(200).json({
           success: true,
           message: 'Enrollment updated to active!',
-          data: { enrollment: updatedEnrollment }
+          data: { enrollment: publicEnrollment(updatedEnrollment) }
         });
       }
       return res.status(409).json({ success: false, error: 'Already enrolled in this course.' });
@@ -56,7 +62,7 @@ const enrollUserInCourse = async (req, res) => {
     const enrollment = await prisma.enrollment.create({
       data: {
         userId,
-        courseId: parsedCourseId,
+        courseId,
         isPaid,
         paymentDate: new Date(),
         startedAt: new Date(),
@@ -70,12 +76,12 @@ const enrollUserInCourse = async (req, res) => {
     // Per-user course page cache (courses/controllers getCourseById) — the
     // student's payload carries `enrollment`; drop it so the course page shows
     // their new enrollment on next load.
-    await cache.del(cache.buildKey('courses', 'byid', parsedCourseId, `u${userId}`));
+    await cache.del(cache.buildKey('courses', 'byid', courseId, `u${userId}`));
 
     return res.status(201).json({
       success: true,
       message: 'Enrollment successful!',
-      data: { enrollment }
+      data: { enrollment: publicEnrollment(enrollment) }
     });
   } catch (error) {
     if (isUniqueError(error)) {
@@ -92,26 +98,30 @@ const enrollUserInCourse = async (req, res) => {
 const checkEnrollmentStatus = async (req, res) => {
   try {
     const userId = req.user.id;
-    const { courseId } = req.body;
+    const { courseSlug } = req.body;
 
-    if (!courseId) {
-      return res.status(400).json({ success: false, error: 'Course ID is required.' });
+    if (!isValidSlug(courseSlug)) {
+      return res.status(400).json({ success: false, error: 'Course slug is required.' });
     }
 
-    const parsedCourseId = parseInt(courseId, 10);
-    if (isNaN(parsedCourseId)) {
-      return res.status(400).json({ success: false, error: 'Invalid course ID format.' });
+    const course = await prisma.course.findUnique({
+      where: { slug: courseSlug },
+      select: { id: true },
+    });
+
+    if (!course) {
+      return res.status(404).json({ success: false, error: 'Course not found.' });
     }
 
     const enrollment = await prisma.enrollment.findFirst({
-      where: { userId, courseId: parsedCourseId }
+      where: { userId, courseId: course.id }
     });
 
     return res.status(200).json({
       success: true,
       data: {
         enrolled: !!enrollment,
-        enrollment: enrollment || null
+        enrollment: publicEnrollment(enrollment)
       }
     });
   } catch (error) {
@@ -139,7 +149,7 @@ const parseBool = (value) => {
 /**
  * GET /admin/enrollments
  * Admin console: paginated enrollment list with student + course context.
- * ?page= &limit= &userId= &courseId= &isPaid= &isCompleted= &search= (student name/email or course title)
+ * ?page= &limit= &userSlug= &courseSlug= &isPaid= &isCompleted= &search= (student name/email or course title)
  */
 const listAllEnrollments = async (req, res) => {
   try {
@@ -148,10 +158,24 @@ const listAllEnrollments = async (req, res) => {
     const skip = (page - 1) * take;
 
     const where = {};
-    const userId = parsePositiveInt(req.query.userId);
-    if (userId) where.userId = userId;
-    const courseId = parsePositiveInt(req.query.courseId);
-    if (courseId) where.courseId = courseId;
+    const userSlug = (req.query.userSlug || '').trim();
+    if (userSlug) {
+      const user = await prisma.user.findUnique({
+        where: { slug: userSlug },
+        select: { id: true },
+      });
+      if (!user) return res.json({ success: true, data: [], meta: { total: 0, page, limit: take, totalPages: 0 } });
+      where.userId = user.id;
+    }
+    const courseSlug = (req.query.courseSlug || '').trim();
+    if (courseSlug) {
+      const course = await prisma.course.findUnique({
+        where: { slug: courseSlug },
+        select: { id: true },
+      });
+      if (!course) return res.json({ success: true, data: [], meta: { total: 0, page, limit: take, totalPages: 0 } });
+      where.courseId = course.id;
+    }
     const isPaid = parseBool(req.query.isPaid);
     if (isPaid !== undefined) where.isPaid = isPaid;
     const isCompleted = parseBool(req.query.isCompleted);
@@ -181,8 +205,8 @@ const listAllEnrollments = async (req, res) => {
           startedAt: true,
           lastAccess: true,
           createdAt: true,
-          user: { select: { id: true, name: true, email: true, grade: true } },
-          course: { select: { id: true, title: true, grade: true } },
+          user: { select: { id: true, slug: true, name: true, email: true, grade: true } },
+          course: { select: { slug: true, title: true, grade: true } },
         },
       }),
       prisma.enrollment.count({ where }),
@@ -216,27 +240,26 @@ const listAllEnrollments = async (req, res) => {
 /**
  * POST /admin/enrollments
  * Admin enrolls a specific student into a specific course (admin bypass of self-enroll).
- * Body: { userId, courseId }. Auto-paid (payment disabled platform-wide).
+ * Body: { userSlug, courseSlug }. Auto-paid (payment disabled platform-wide).
  */
 const adminEnroll = async (req, res) => {
   try {
-    const { userId, courseId } = req.body;
-    const parsedUserId = parsePositiveInt(userId);
-    const parsedCourseId = parsePositiveInt(courseId);
-
-    if (!parsedUserId || !parsedCourseId) {
-      return res.status(400).json({ success: false, error: 'userId and courseId are required.' });
+    const { userSlug, courseSlug } = req.body;
+    if (!isValidUserSlug(userSlug) || !isValidSlug(courseSlug)) {
+      return res.status(400).json({ success: false, error: 'userSlug and courseSlug are required.' });
     }
 
-    const user = await prisma.user.findUnique({ where: { id: parsedUserId }, select: { id: true, role: true } });
+    const user = await prisma.user.findUnique({ where: { slug: userSlug }, select: { id: true, role: true } });
     if (!user) {
       return res.status(404).json({ success: false, error: 'User not found.' });
     }
+    const parsedUserId = user.id;
 
-    const course = await prisma.course.findUnique({ where: { id: parsedCourseId }, select: { id: true } });
+    const course = await prisma.course.findUnique({ where: { slug: courseSlug }, select: { id: true } });
     if (!course) {
       return res.status(404).json({ success: false, error: 'Course not found.' });
     }
+    const parsedCourseId = course.id;
 
     const existing = await prisma.enrollment.findFirst({
       where: { userId: parsedUserId, courseId: parsedCourseId },
@@ -271,7 +294,7 @@ const adminEnroll = async (req, res) => {
     return res.status(201).json({
       success: true,
       message: 'Student enrolled successfully.',
-      data: { enrollment },
+      data: { enrollment: publicEnrollment(enrollment) },
     });
   } catch (error) {
     if (isUniqueError(error)) {

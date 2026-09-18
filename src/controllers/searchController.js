@@ -148,6 +148,7 @@ const searchContent = async (req, res) => {
               teacher: {
                 select: {
                   id: true,
+                  slug: true,
                   name: true,
                   email: true
                 }
@@ -187,7 +188,7 @@ const searchContent = async (req, res) => {
             include: {
               course: {
                 select: {
-                  id: true,
+                  slug: true,
                   title: true,
                   thumbnail: true,
                   category: true,
@@ -207,33 +208,33 @@ const searchContent = async (req, res) => {
     // ── Per-request shaping (host-dependent — never cached) ───────────────────
 
     // Add full URLs for thumbnails + flatten _count, then strip _count out
-    courses = rawCourses.map(course => ({
-      ...course,
-      videoCount: course._count.videos,
-      enrollmentCount: course._count.enrollments,
-      thumbnail: course.thumbnail && !course.thumbnail.startsWith('http')
-        ? `${baseUrl}/${course.thumbnail}`
-        : course.thumbnail
-    }));
-
-    // Remove _count field from response
-    courses = courses.map(course => {
-      const { _count, ...rest } = course;
-      return rest;
+    courses = rawCourses.map(course => {
+      const { id: _id, teacherId: _tid, _count, ...rest } = course;
+      return {
+        ...rest,
+        videoCount: _count.videos,
+        enrollmentCount: _count.enrollments,
+        thumbnail: course.thumbnail && !course.thumbnail.startsWith('http')
+          ? `${baseUrl}/${course.thumbnail}`
+          : course.thumbnail
+      };
     });
 
     // Add full URLs for thumbnails. No `url` is exposed here — playable links
     // are only issued per-request via the signed playback endpoint.
-    videos = rawVideos.map(video => ({
-      ...video,
-      thumbnail: video.thumbnailUrl && !video.thumbnailUrl.startsWith('http') ? `${baseUrl}/${video.thumbnailUrl}` : video.thumbnailUrl,
-      course: {
-        ...video.course,
-        thumbnail: video.course.thumbnail && !video.course.thumbnail.startsWith('http')
-          ? `${baseUrl}/${video.course.thumbnail}`
-          : video.course.thumbnail
-      }
-    }));
+    videos = rawVideos.map(video => {
+      const { id: _id, courseId: _cid, ...rest } = video;
+      return {
+        ...rest,
+        thumbnail: video.thumbnailUrl && !video.thumbnailUrl.startsWith('http') ? `${baseUrl}/${video.thumbnailUrl}` : video.thumbnailUrl,
+        course: {
+          ...video.course,
+          thumbnail: video.course.thumbnail && !video.course.thumbnail.startsWith('http')
+            ? `${baseUrl}/${video.course.thumbnail}`
+            : video.course.thumbnail
+        }
+      };
+    });
     
     // Get categories for filtering
     const categories = await getCategoriesList();
@@ -297,6 +298,7 @@ const getTrendingCourses = async (req, res) => {
         teacher: {
           select: {
             id: true,
+            slug: true,
             name: true,
             email: true
           }
@@ -318,7 +320,7 @@ const getTrendingCourses = async (req, res) => {
     // Add full URLs for thumbnails
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     const formattedCourses = courses.map(course => ({
-      id: course.id,
+      slug: course.slug,
       title: course.title,
       description: course.description,
       price: course.price,
@@ -327,7 +329,6 @@ const getTrendingCourses = async (req, res) => {
       thumbnail: course.thumbnail && !course.thumbnail.startsWith('http') 
         ? `${baseUrl}/${course.thumbnail}` 
         : course.thumbnail,
-      teacherId: course.teacherId,
       teacher: course.teacher,
       enrollmentCount: course._count.enrollments,
       videoCount: course._count.videos
@@ -387,6 +388,7 @@ const getRecommendedCourses = async (req, res) => {
         teacher: {
           select: {
             id: true,
+            slug: true,
             name: true,
             email: true
           }
@@ -401,7 +403,7 @@ const getRecommendedCourses = async (req, res) => {
     // Add full URLs for thumbnails
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     const formattedCourses = recommendedCourses.map(course => ({
-      id: course.id,
+      slug: course.slug,
       title: course.title,
       description: course.description,
       price: course.price,
@@ -410,7 +412,6 @@ const getRecommendedCourses = async (req, res) => {
       thumbnail: course.thumbnail && !course.thumbnail.startsWith('http') 
         ? `${baseUrl}/${course.thumbnail}` 
         : course.thumbnail,
-      teacherId: course.teacherId,
       teacher: course.teacher,
       videoCount: course._count.videos
     }));

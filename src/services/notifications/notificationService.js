@@ -62,7 +62,7 @@ function validateContent({ title, body }) {
 
 /**
  * Resolve an audience descriptor to student user IDs — server-side only.
- * audience: { kind: 'all' } | { kind: 'course', courseId } | { kind: 'grade', grade }
+ * audience: { kind: 'all' } | { kind: 'course', courseSlug } | { kind: 'grade', grade }
  */
 async function resolveAudience(audience) {
   if (!audience || audience.kind === 'all') {
@@ -70,11 +70,11 @@ async function resolveAudience(audience) {
     return users.map((u) => u.id);
   }
   if (audience.kind === 'course') {
-    const courseId = Number(audience.courseId);
-    if (!Number.isSafeInteger(courseId) || courseId <= 0) throw badRequest('Invalid courseId');
-    const course = await prisma.course.findUnique({ where: { id: courseId }, select: { id: true } });
+    const { courseSlug } = audience;
+    if (typeof courseSlug !== 'string') throw badRequest('Invalid courseSlug');
+    const course = await prisma.course.findUnique({ where: { slug: courseSlug }, select: { id: true } });
     if (!course) throw notFound('Course not found');
-    const enrollments = await prisma.enrollment.findMany({ where: { courseId }, select: { userId: true } });
+    const enrollments = await prisma.enrollment.findMany({ where: { courseId: course.id }, select: { userId: true } });
     return enrollments.map((e) => e.userId);
   }
   if (audience.kind === 'grade') {
@@ -183,14 +183,24 @@ async function notifyQuizGraded(attemptId) {
     if (!moduleOn()) return 0;
     const attempt = await prisma.quizAttempt.findUnique({
       where: { id: attemptId },
-      include: { quiz: { select: { id: true, title: true, bunnyVideo: { select: { id: true, courseId: true } } } } },
+      include: {
+        quiz: {
+          select: {
+            id: true,
+            title: true,
+            bunnyVideo: { select: { id: true, slug: true, courseId: true, course: { select: { slug: true } } } },
+          },
+        },
+      },
     });
     if (!attempt || attempt.status !== 'GRADED' || !attempt.quiz) return 0;
     const { quiz } = attempt;
     const videoId = quiz.bunnyVideo ? quiz.bunnyVideo.id : null;
     const courseId = quiz.bunnyVideo ? quiz.bunnyVideo.courseId : null;
+    const videoSlug = quiz.bunnyVideo ? quiz.bunnyVideo.slug : null;
+    const courseSlug = quiz.bunnyVideo && quiz.bunnyVideo.course ? quiz.bunnyVideo.course.slug : null;
     const score = attempt.scorePercent != null ? Math.round(attempt.scorePercent) : null;
-    const linkUrl = videoId && courseId ? `/course/${courseId}/video/${videoId}/quiz/result/${attempt.id}` : null;
+    const linkUrl = videoSlug && courseSlug ? `/course/${courseSlug}/video/${videoSlug}/quiz/result/${attempt.id}` : null;
     const { count } = await createForUsers({
       userIds: [attempt.userId],
       type: NOTIFICATION_TYPES.QUIZ_GRADED,
@@ -216,17 +226,18 @@ async function notifyVideoReady(videoId) {
     if (!moduleOn()) return 0;
     const video = await prisma.bunnyVideo.findUnique({
       where: { id: videoId },
-      select: { id: true, courseId: true, title: true, status: true },
+      select: { id: true, slug: true, courseId: true, title: true, status: true, course: { select: { slug: true } } },
     });
     if (!video || video.status !== 'READY') return 0;
-    const userIds = await resolveAudience({ kind: 'course', courseId: video.courseId });
+    const courseSlug = video.course ? video.course.slug : null;
+    const userIds = await resolveAudience({ kind: 'course', courseSlug });
     if (userIds.length === 0) return 0;
     const { count } = await createForUsers({
       userIds,
       type: NOTIFICATION_TYPES.VIDEO_READY,
       title: 'محاضرة جديدة متاحة',
       body: video.title,
-      linkUrl: `/course/${video.courseId}/video/${video.id}`,
+      linkUrl: courseSlug ? `/course/${courseSlug}/video/${video.slug}` : null,
       metadata: { videoId: video.id, courseId: video.courseId },
     });
     return count;

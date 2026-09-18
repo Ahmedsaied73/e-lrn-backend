@@ -6,6 +6,8 @@
  * Thin HTTP layer only — extract params, call service, map to response envelope.
  * No business logic here. No Bunny API calls here.
  *
+ * All resource identifiers are public slugs; numeric ids stay internal.
+ *
  * Response envelope matches existing repo pattern:
  *   Success: { success: true, data: { ... } }
  *   Error: handled by global error handler via next(err)
@@ -15,6 +17,7 @@ const busboy = require('busboy');
 const bunnyVideoService = require('../services/bunnyVideoService');
 const bunnyClient = require('../integrations/bunny/bunnyStreamClient');
 const { AppError, ErrorCodes } = require('../utils/AppError');
+const { isValidSlug } = require('../utils/slugs');
 
 // Allowed MIME types for video upload — server-side allowlist, not client-supplied
 const ALLOWED_MIME_TYPES = new Set([
@@ -32,7 +35,7 @@ const log = {
   error: (event, ctx = {}) => console.error(`[ERROR] ${event}`, JSON.stringify(ctx)),
 };
 
-// ─── POST /courses/:courseId/videos ──────────────────────────────────────────
+// ─── POST /courses/:courseSlug/videos ────────────────────────────────────────
 
 /**
  * Create a Bunny video record + Bunny video object.
@@ -42,11 +45,11 @@ const log = {
  */
 const createBunnyVideo = async (req, res, next) => {
   try {
-    const courseId = parseInt(req.params.courseId, 10);
+    const { courseSlug } = req.params;
     const { title } = req.body;
 
-    if (!courseId || isNaN(courseId)) {
-      return next(new AppError('Invalid course ID', 400, ErrorCodes.COURSE_NOT_FOUND));
+    if (!isValidSlug(courseSlug)) {
+      return next(new AppError('Invalid course slug', 400, ErrorCodes.COURSE_NOT_FOUND));
     }
 
     if (!title || typeof title !== 'string' || !title.trim()) {
@@ -54,7 +57,7 @@ const createBunnyVideo = async (req, res, next) => {
     }
 
     const video = await bunnyVideoService.createVideo({
-      courseId,
+      courseSlug,
       title: title.trim(),
       requestedByUserId: req.user.id, // always from JWT — never trust body/params
     });
@@ -62,10 +65,10 @@ const createBunnyVideo = async (req, res, next) => {
     return res.status(201).json({
       success: true,
       data: {
-        id: video.id,
-        courseId: video.courseId,
+        slug: video.slug,
+        courseSlug,
         title: video.title,
-        bunnyVideoId: video.bunnyVideoId,
+        position: video.position,
         status: video.status,
         createdAt: video.createdAt,
       },
@@ -75,7 +78,7 @@ const createBunnyVideo = async (req, res, next) => {
   }
 };
 
-// ─── POST /videos/:videoId/upload ────────────────────────────────────────────
+// ─── POST /videos/:videoSlug/upload ──────────────────────────────────────────
 
 /**
  * Stream a video binary to Bunny — no buffering, no temp files.
@@ -90,19 +93,21 @@ const createBunnyVideo = async (req, res, next) => {
  * it sends the response inside the busboy file event after the upload resolves.
  */
 const uploadBunnyVideo = async (req, res, next) => {
-  const videoId = parseInt(req.params.videoId, 10);
+  const { videoSlug } = req.params;
 
-  if (!videoId || isNaN(videoId)) {
-    return next(new AppError('Invalid video ID', 400, ErrorCodes.VIDEO_NOT_FOUND));
+  if (!isValidSlug(videoSlug)) {
+    return next(new AppError('Invalid video slug', 400, ErrorCodes.VIDEO_NOT_FOUND));
   }
 
   let video;
+  let videoId;
   try {
     // Load video and verify it exists
-    video = await bunnyVideoService.findById(videoId);
+    video = await bunnyVideoService.findBySlug(videoSlug);
     if (!video) {
       return next(new AppError('Video not found', 404, ErrorCodes.VIDEO_NOT_FOUND));
     }
+    videoId = video.id;
 
     // Ownership is already verified by authorizeAdmin (admin owns all videos).
     // State machine check: only PENDING or FAILED videos can be (re-)uploaded.
@@ -123,7 +128,7 @@ const uploadBunnyVideo = async (req, res, next) => {
     return next(err);
   }
   log.info('video.upload.started', {
-    videoId,
+    videoSlug,
     courseId: video.courseId,
     bunnyVideoId: video.bunnyVideoId,
   });
@@ -180,7 +185,7 @@ const uploadBunnyVideo = async (req, res, next) => {
 
     // Size limit handler: busboy emits 'limit' event when fileSize limit is hit
     fileStream.on('limit', () => {
-      log.warn('video.upload.size_limit_exceeded', { videoId, maxBytes });
+      log.warn('video.upload.size_limit_exceeded', { videoSlug, maxBytes });
       bb.destroy(new Error('VIDEO_TOO_LARGE'));
     });
 
@@ -190,7 +195,7 @@ const uploadBunnyVideo = async (req, res, next) => {
       .then(() => bunnyVideoService.transitionStatus(videoId, 'PROCESSING'))
       .then(() => {
         log.info('video.upload.completed', {
-          videoId,
+          videoSlug,
           courseId: video.courseId,
           bunnyVideoId: video.bunnyVideoId,
         });
@@ -199,7 +204,7 @@ const uploadBunnyVideo = async (req, res, next) => {
           res.json({
             success: true,
             data: {
-              videoId,
+              videoSlug,
               status: 'PROCESSING',
               message: 'Upload complete. Video is now encoding on Bunny Stream.',
             },
@@ -210,7 +215,7 @@ const uploadBunnyVideo = async (req, res, next) => {
         if (!uploadSettled) {
           uploadSettled = true;
           log.error('video.upload.failed', {
-            videoId,
+            videoSlug,
             bunnyVideoId: video.bunnyVideoId,
             error: err.message,
           });
@@ -239,7 +244,7 @@ const uploadBunnyVideo = async (req, res, next) => {
   req.on('aborted', async () => {
     if (!uploadSettled && !res.writableEnded) {
       uploadSettled = true;
-      log.warn('video.upload.client_aborted', { videoId });
+      log.warn('video.upload.client_aborted', { videoSlug });
       await bunnyVideoService.markFailed(videoId, 'Client aborted upload').catch(() => {});
     }
   });
@@ -261,7 +266,7 @@ const uploadBunnyVideo = async (req, res, next) => {
   req.pipe(bb);
 };
 
-// ─── GET /videos/:videoId/playback ───────────────────────────────────────────
+// ─── GET /videos/:videoSlug/playback ─────────────────────────────────────────
 
 /**
  * Return a signed Bunny embed URL for a READY video.
@@ -272,10 +277,10 @@ const uploadBunnyVideo = async (req, res, next) => {
  */
 const getBunnyVideoPlayback = async (req, res, next) => {
   try {
-    const videoId = parseInt(req.params.videoId, 10);
+    const { videoSlug } = req.params;
 
-    if (!videoId || isNaN(videoId)) {
-      return next(new AppError('Invalid video ID', 400, ErrorCodes.VIDEO_NOT_FOUND));
+    if (!isValidSlug(videoSlug)) {
+      return next(new AppError('Invalid video slug', 400, ErrorCodes.VIDEO_NOT_FOUND));
     }
 
     const userId = req.user.id;     // Always from JWT — never from params/body
@@ -283,7 +288,7 @@ const getBunnyVideoPlayback = async (req, res, next) => {
 
     // ADMIN bypass: can access any video without enrollment check
     if (userRole === 'ADMIN') {
-      const video = await bunnyVideoService.findById(videoId);
+      const video = await bunnyVideoService.findBySlug(videoSlug);
       if (!video) {
         return next(new AppError('Video not found', 404, ErrorCodes.VIDEO_NOT_FOUND));
       }
@@ -296,10 +301,10 @@ const getBunnyVideoPlayback = async (req, res, next) => {
       }
       const { token, expiresAt } = bunnyClient.generatePlaybackToken(video.bunnyVideoId);
       const playbackUrl = `https://iframe.mediadelivery.net/embed/${video.bunnyLibraryId}/${video.bunnyVideoId}?token=${token}&expires=${expiresAt}`;
-      return res.json({ success: true, data: { videoId: video.id, playbackUrl, expiresAt } });
+      return res.json({ success: true, data: { videoSlug, playbackUrl, expiresAt } });
     }
 
-    // Student path: enrollment + READY checks enforced in service
+    // Student path: enrollment + READY checks enforced in the sequential gate.
     //
     // Fast path: the sequential gate already fetched this video's playback
     // fields AND verified enrollment (via the gate).  Skip the redundant
@@ -319,10 +324,15 @@ const getBunnyVideoPlayback = async (req, res, next) => {
       }
       const { token, expiresAt } = bunnyClient.generatePlaybackToken(v.bunnyVideoId);
       const playbackUrl = `https://iframe.mediadelivery.net/embed/${v.bunnyLibraryId}/${v.bunnyVideoId}?token=${token}&expires=${expiresAt}`;
-      return res.json({ success: true, data: { videoId: v.id, playbackUrl, expiresAt } });
+      return res.json({ success: true, data: { videoSlug: v.slug, playbackUrl, expiresAt } });
     }
 
-    const result = await bunnyVideoService.getPlaybackAccess(videoId, userId);
+    const video = await bunnyVideoService.findBySlug(videoSlug);
+    if (!video) {
+      return next(new AppError('Video not found', 404, ErrorCodes.VIDEO_NOT_FOUND));
+    }
+
+    const result = await bunnyVideoService.getPlaybackAccess(video.id, userId);
 
     return res.json({ success: true, data: result });
   } catch (err) {
@@ -330,7 +340,7 @@ const getBunnyVideoPlayback = async (req, res, next) => {
   }
 };
 
-// ─── DELETE /videos/bunny/:videoId ───────────────────────────────────────────
+// ─── DELETE /videos/bunny/:videoSlug ─────────────────────────────────────────
 
 /**
  * Delete a Bunny video from Bunny Stream and local DB.
@@ -338,18 +348,23 @@ const getBunnyVideoPlayback = async (req, res, next) => {
  */
 const deleteBunnyVideo = async (req, res, next) => {
   try {
-    const videoId = parseInt(req.params.videoId, 10);
+    const { videoSlug } = req.params;
 
-    if (!videoId || isNaN(videoId)) {
-      return next(new AppError('Invalid video ID', 400, ErrorCodes.VIDEO_NOT_FOUND));
+    if (!isValidSlug(videoSlug)) {
+      return next(new AppError('Invalid video slug', 400, ErrorCodes.VIDEO_NOT_FOUND));
     }
 
-    const result = await bunnyVideoService.deleteVideo(videoId);
+    const video = await bunnyVideoService.findBySlug(videoSlug);
+    if (!video) {
+      return next(new AppError('Video not found', 404, ErrorCodes.VIDEO_NOT_FOUND));
+    }
+
+    const result = await bunnyVideoService.deleteVideo(video.id);
 
     return res.json({
       success: true,
       data: {
-        id: result.id,
+        slug: video.slug,
         bunnyVideoId: result.bunnyVideoId,
         message: 'Video successfully deleted from Bunny Stream and database.',
       },
@@ -359,24 +374,24 @@ const deleteBunnyVideo = async (req, res, next) => {
   }
 };
 
-// ─── GET /courses/:courseId/bunny-videos ──────────────────────────────────────
+// ─── GET /courses/:courseSlug/bunny-videos ───────────────────────────────────
 
 /**
  * List all Bunny videos for a given course.
- * Auth: authenticateToken (Admin sees all statuses; Student sees READY only after enrollment verification)
+ * Auth: authenticateToken (Admin sees all statuses; Student sees READY only)
  */
 const listCourseBunnyVideos = async (req, res, next) => {
   try {
-    const courseId = parseInt(req.params.courseId, 10);
+    const { courseSlug } = req.params;
 
-    if (!courseId || isNaN(courseId)) {
-      return next(new AppError('Invalid course ID', 400, ErrorCodes.COURSE_NOT_FOUND));
+    if (!isValidSlug(courseSlug)) {
+      return next(new AppError('Invalid course slug', 400, ErrorCodes.COURSE_NOT_FOUND));
     }
 
     const userId = req.user.id;
     const role = req.user.role;
 
-    const videos = await bunnyVideoService.listCourseVideos(courseId, userId, role);
+    const videos = await bunnyVideoService.listCourseVideos(courseSlug, userId, role);
 
     return res.json({
       success: true,
@@ -387,25 +402,25 @@ const listCourseBunnyVideos = async (req, res, next) => {
   }
 };
 
-// ─── PUT /courses/:courseId/reorder ──────────────────────────────────────────
+// ─── PUT /courses/:courseSlug/reorder ────────────────────────────────────────
 
 /**
  * Reorder videos within a course.
  * Auth: authenticateToken + authorizeAdmin (admin only)
  *
- * Body: { videoIds: number[] } — BunnyVideo IDs in the desired order.
+ * Body: { videoSlugs: string[] } — BunnyVideo slugs in the desired order.
  * Positions are reassigned 1-based in the submitted order.
  */
 const reorderCourseVideos = async (req, res, next) => {
   try {
-    const courseId = parseInt(req.params.courseId, 10);
-    const { videoIds } = req.body;
+    const { courseSlug } = req.params;
+    const { videoSlugs } = req.body;
 
-    if (!courseId || isNaN(courseId)) {
-      return next(new AppError('Invalid course ID', 400, ErrorCodes.COURSE_NOT_FOUND));
+    if (!isValidSlug(courseSlug)) {
+      return next(new AppError('Invalid course slug', 400, ErrorCodes.COURSE_NOT_FOUND));
     }
 
-    const videos = await bunnyVideoService.reorderVideos(courseId, videoIds, req.user.id);
+    const videos = await bunnyVideoService.reorderVideos(courseSlug, videoSlugs, req.user.id);
 
     // Reordering changes the gate sequence for every enrolled student — their
     // cached gate verdicts may now point at the wrong "previous" video.
@@ -414,11 +429,17 @@ const reorderCourseVideos = async (req, res, next) => {
     const prisma = require('../config/db');
     const quizService = require('../services/quizService');
     try {
-      const enrolled = await prisma.enrollment.findMany({
-        where: { courseId },
-        select: { userId: true },
+      const course = await prisma.course.findUnique({
+        where: { slug: courseSlug },
+        select: { id: true },
       });
-      await Promise.all(enrolled.map((e) => quizService.invalidateGateForUser(e.userId)));
+      if (course) {
+        const enrolled = await prisma.enrollment.findMany({
+          where: { courseId: course.id },
+          select: { userId: true },
+        });
+        await Promise.all(enrolled.map((e) => quizService.invalidateGateForUser(e.userId)));
+      }
     } catch (err) {
       console.error('[BunnyVideoController] gate invalidation after reorder failed:', err);
     }
