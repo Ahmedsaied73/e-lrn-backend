@@ -23,9 +23,10 @@
 - Plans: `plans/*.md`. Audit record: `tasks/db-audit-*.md`.
 
 ## [ORPHANS & PENDING]
-- P2 hardening plan `plans/p2-hardening-plan.md` — Tasks 2 + 5 + 1 DONE & approved (commits 08abacf/b2fcb89, 640e88b/88d4742/5830578, 92db23b). User said "continue" 2026-09-19 → resuming: Task 3 (RLS lockdown) IN PROGRESS, then Task 4 (test coverage). [IN PROGRESS]
-- USER ACTION owed (from Task 5): restart dev server on 3005 (predates `/metrics`); add `PROD_BASE_URL` repo secret; push; trigger `uptime-probe` once via workflow_dispatch.
-- USER-SIDE DEFERRED: paymob payments WIP in working tree (uncommitted, unrelated to this plan — user said ignore for now; note Task 1 will touch app.js which paymob WIP also touches — needs hunk-scoped staging when resumed).
-- Deferred minors (reviewer, Task 2): optional METRICS_TOKEN/IP allowlist on `/metrics`; resetMetrics test export; count client-aborted requests.
+- **P2 hardening plan COMPLETE (2026-09-19)** — all 5 tasks delivered on `Dev`: `plans/p2-hardening-plan.md`. Commits: 08abacf+b2fcb89 (/metrics), 640e88b+88d4742+5830578 (uptime probe + docs), 92db23b (login semaphore + threadpool), 8d63dc4 (RLS lockdown, applied to staging), ae235bf (3 test suites). `npm test` 25/25, lint clean.
+- USER ACTION required to activate Task 5: add `PROD_BASE_URL` repo secret, push `Dev`, trigger `uptime-probe` once via workflow_dispatch. Restart the local dev server (3005) to expose `/metrics`.
+- USER ACTION: production must run the RLS migration (`prisma migrate deploy`, or the documented `db execute` + `migrate resolve --applied` procedure) at deploy time.
+- Deferred (documented, non-blocking): `/metrics` auth token option; AGENTS.md note that public.* is RLS default-deny (zero policies); `tests/` not covered by `npm run lint` (script is `eslint src app.js`); cold-cache gate tail + dashboard 16-query fanout.
+- Housekeeping: one locked temp file `anon-probe.txt` could not be deleted (held by another process) — untracked, safe to remove after that process exits.
+- PAYMOB WIP (not ours, untouched): `prisma/schema.prisma`, `.env.example`, `src/config/env.js`, `app.js` working diff, payment/enrollment/notification controllers, `src/controllers/paymobWebhookController.js`, `src/integrations/paymob/`, `src/services/paymentService.js`, `tests/paymob.test.js`, `prisma/migrations/20260919120000_paymob_payments/` (migration deliberately left UNAPPLIED), `test-out.txt`.
 - Load-test cohort cleanup (`%loadtest.local` users) on staging — awaits user sign-off (tasks/db-audit-todo.md last checkbox).
-- Optional: hosted Prometheus/Grafana scraping of `/metrics` (endpoint live as of Task 2); cold-cache gate tail + dashboard 16-query fanout (deferred, documented in audit).
