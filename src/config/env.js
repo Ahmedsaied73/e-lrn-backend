@@ -189,6 +189,11 @@ const config = {
     requireRedis: resolveRateLimitRequireRedis(),
   },
   aiGrader: resolveAiGrader(),
+  sentry: {
+    // Optional. Present → backend errors go to Sentry (src/config/sentry.js);
+    // absent → that module no-ops. Never boot-critical.
+    dsn: process.env.SENTRY_DSN || null,
+  },
   features: {
     notifications: resolveFlag(process.env.NOTIFICATIONS_ENABLED, true),
     aiGrader: resolveFlag(process.env.AI_GRADER_ENABLED, true),

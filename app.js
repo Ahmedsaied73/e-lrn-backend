@@ -20,6 +20,7 @@ const redisStoreEnabled = isRedisEnabled();
 const helmet = require('helmet'); // S-5: security headers WITHOUT CSP (full CSP needs FE coordination)
 const config = require('./src/config/env');
 const requireRedisRateLimit = config.rateLimit.requireRedis;
+const { initSentry, captureException } = require('./src/config/sentry');
 // Bunny Stream — new modules
 const bunnyVideoRoutes = require('./src/routes/bunnyVideoRoutes');
 const { handleBunnyWebhook } = require('./src/controllers/bunnyWebhookController');
@@ -47,6 +48,10 @@ app.set('trust proxy', process.env.TRUST_PROXY || 1);
 
 // Initialize default admin on startup
 setupDefaultAdmin().catch(console.error);
+
+// Backend error tracking (DSN-gated no-op): must be called before the request
+// middleware so Sentry's error paths are live when the handler fires.
+initSentry();
 
 // Define allowed frontend origins (single source of truth: src/config/cors.js).
 // FRONTEND_URL may be comma-separated: prod Vercel domain plus any PR/preview
@@ -183,21 +188,44 @@ const loginLimiter = makeAuthLimiter('rl:login:', 20);
 const registerLimiter = makeAuthLimiter('rl:register:', 20);
 const refreshLimiter = makeAuthLimiter('rl:refresh:', 60);
 
-// ── Health check (mounted BEFORE the rate limiter — probes must never be
-//     throttled, and this doubles as Railway's `/health` healthcheck path).
-//     Errors are logged by the process-level handlers; the route itself stays
-//     silent to keep health probes quiet in the request logs.
+// ── Health probes (all mounted BEFORE the rate limiter — probes must never
+//     be throttled; `/health` doubles as Railway's healthcheck path). Errors
+//     are logged by the process-level handlers; the routes stay silent to
+//     keep probes quiet in the request logs.
+//     Liveness (`/healthz`) = process up, zero I/O. Readiness (`/readyz`) =
+//     DB ping only (Redis fail-opens by design, so it never gates readiness,
+//     and the process never kills itself on dependency degradation — the
+//     orchestrator decides). `/health` is the legacy DB-ping healthcheck kept
+//     byte-compatible for the test harness and CI.
+const dbPing = async () => {
+  const prisma = require('./src/config/db');
+  await Promise.race([
+    prisma.$queryRaw`SELECT 1`,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('db ping timeout')), 3000)),
+  ]);
+};
+
+app.get('/healthz', (req, res) => {
+  res.status(200).json({ status: 'ok', uptime: Math.round(process.uptime()) });
+});
+
+app.get('/readyz', async (req, res) => {
+  const started = Date.now();
+  try {
+    await dbPing();
+    res.status(200).json({ status: 'ok', db: 'up', uptime: Math.round(process.uptime()), ms: Date.now() - started });
+  } catch {
+    res.status(503).json({ status: 'error', db: 'down', ms: Date.now() - started });
+  }
+});
+
 app.get('/health', async (req, res) => {
   const started = Date.now();
   try {
-    const prisma = require('./src/config/db');
     // Live DB ping — a 200 without this only proves the process is up, not
     // that it can serve requests (the pool collapsing is exactly what killed
     // it under load in the DB-audit incident).
-    await Promise.race([
-      prisma.$queryRaw`SELECT 1`,
-      new Promise((_, reject) => setTimeout(() => reject(new Error('db ping timeout')), 3000)),
-    ]);
+    await dbPing();
     res.status(200).json({ status: 'ok', db: 'up', uptime: Math.round(process.uptime()), ms: Date.now() - started });
   } catch {
     res.status(503).json({ status: 'error', db: 'down', ms: Date.now() - started });
@@ -264,6 +292,11 @@ app.get('/', (req, res) => {
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   if (err instanceof AppError) {
+    // Report server-side AppErrors to Sentry (those with a 5xx status —
+    // 4xx are expected client errors and are noise in an error tracker).
+    if (err.statusCode >= 500) {
+      captureException(err, req);
+    }
     return res.status(err.statusCode).json({
       success: false,
       error: err.message,
@@ -275,6 +308,7 @@ app.use((err, req, res, next) => {
   // store → the limiter rethrows RateLimitStoreUnavailableError. Serve 503 so
   // clients retry instead of getting an unthrottled pass-through or a 500.
   if (err && err.code === 'RATE_LIMIT_STORE_UNAVAILABLE') {
+    captureException(err, req);
     const statusCode = err.statusCode || 503;
     return res.status(statusCode).json({
       success: false,
@@ -283,7 +317,9 @@ app.use((err, req, res, next) => {
     });
   }
 
-  // Log unexpected errors (never log the err object directly — it may contain secrets)
+  // Report unexpected errors to Sentry (never log the err object directly —
+  // it may contain secrets).
+  captureException(err, req);
   console.error('[ERROR] Unhandled error:', err.message || 'Unknown error', {
     path: req.path,
     method: req.method,
@@ -301,11 +337,14 @@ app.use((err, req, res, next) => {
 // then exit so the platform (Railway) restarts us cleanly. Railway restarts on
 // exit; systemd/docker restart policies handle it elsewhere.
 process.on('uncaughtException', (err) => {
+  captureException(err);
   console.error('[FATAL] uncaughtException:', err);
   process.exit(1);
 });
 
 process.on('unhandledRejection', (reason) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  captureException(err);
   console.error('[FATAL] unhandledRejection:', reason);
   process.exit(1);
 });
