@@ -48,7 +48,7 @@ router.get('/:courseSlug/bunny-videos', authenticateToken, listCourseBunnyVideos
 /**
  * PUT /courses/:courseSlug/reorder
  * Reorder Bunny videos within a course.
- * Body: { "videoSlugs": ["video-1", "video-2"] } — BunnyVideo slugs in desired order
+ * Body: { "videoSlugs": ["abcdef123456", "ghijkl789abc"] } — BunnyVideo slugs in desired order
  * Auth: ADMIN only
  */
 router.put('/:courseSlug/reorder', authenticateToken, authorizeAdmin(), reorderCourseVideos);

@@ -2,7 +2,7 @@ const prisma = require('../config/db');
 const bunnyClient = require('../integrations/bunny/bunnyStreamClient');
 const cache = require('../integrations/redis/cache');
 const audit = require('../services/auditLog');
-const { isValidSlug, slugifyTitle, uniqueSlug } = require('../utils/slugs');
+const { isValidSlug, randomBase36Slug } = require('../utils/slugs');
 
 /**
  * Strip numeric identifiers from nested User rows (public resource shape uses slug).
@@ -267,7 +267,7 @@ const createCourse = async (req, res) => {
     const course = await prisma.course.create({
       data: {
         title,
-        slug: await uniqueSlug('Course', slugifyTitle(title), 'course'),
+        slug: randomBase36Slug(),
         description,
         price: Number(price),
         grade,

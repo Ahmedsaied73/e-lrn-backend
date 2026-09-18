@@ -25,7 +25,7 @@ const prisma = require('../config/db');
 const bunnyClient = require('../integrations/bunny/bunnyStreamClient');
 const { AppError, ErrorCodes } = require('../utils/AppError');
 const cache = require('../integrations/redis/cache');
-const { isValidSlug, slugifyTitle, uniqueSlug } = require('../utils/slugs');
+const { isValidSlug, randomBase36Slug } = require('../utils/slugs');
 
 /**
  * Invalidate cached video lists + catalog after any video mutation.
@@ -177,7 +177,7 @@ async function createVideo({ courseSlug, title, requestedByUserId }) {
       return {
         courseId,
         title,
-        slug: await uniqueSlug('BunnyVideo', slugifyTitle(title), 'video'),
+        slug: randomBase36Slug(),
         bunnyVideoId: bunnyVideo.guid,
         bunnyLibraryId: process.env.BUNNY_STREAM_LIBRARY_ID,
         status: 'PENDING',

@@ -5,7 +5,7 @@ const { jwt: jwtConfig } = require('../config/env');
 const { createToken, createRefreshToken, hashRefreshToken, createRefreshTokenFamily } = require('../utils');
 const { accessTokenCookieOptions, refreshTokenCookieOptions } = require('../config/cookie');
 const { getLockState, recordFailure, clearFailures } = require('../integrations/redis/accountLockout');
-const { opaqueUserSlug } = require('../utils/slugs');
+const { randomBase36Slug } = require('../utils/slugs');
 
 async function login(req, res) {
   try {
@@ -98,7 +98,7 @@ async function register(req, res) {
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const newUser = await prisma.user.create({
-      data: { name: name.trim(), email: email.trim().toLowerCase(), phoneNumber: phoneNumber.trim(), password: hashedPassword, grade, slug: opaqueUserSlug() }
+      data: { name: name.trim(), email: email.trim().toLowerCase(), phoneNumber: phoneNumber.trim(), password: hashedPassword, grade, slug: randomBase36Slug() }
     });
 
     const payload = { id: newUser.id, slug: newUser.slug, email: newUser.email, name: newUser.name, phoneNumber: newUser.phoneNumber, grade: newUser.grade, role: newUser.role };

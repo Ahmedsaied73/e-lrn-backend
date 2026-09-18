@@ -70,7 +70,7 @@ async function login(email, password) {
     // Bad refs
     const badUser = await (await fetch(`${BASE}/admin/enrollments`, {
       method: 'POST', headers: { Cookie: admin.cookie, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userSlug: 'u_doesnotexist999', courseSlug: course.slug })
+      body: JSON.stringify({ userSlug: 'zzzzzzzzzzzz', courseSlug: course.slug })
     }));
     check('enroll unknown user → 404', badUser.status === 404, `status=${badUser.status}`);
 

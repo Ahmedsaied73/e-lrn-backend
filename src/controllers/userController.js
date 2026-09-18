@@ -3,7 +3,7 @@ const bcrypt = require('bcrypt');
 const config = require('../config/env');
 const quizService = require('../services/quizService');
 const audit = require('../services/auditLog');
-const { isValidUserSlug } = require('../utils/slugs');
+const { isValidSlug } = require('../utils/slugs');
 
 const selectWithoutPassword = {
   id: true,
@@ -19,7 +19,7 @@ const selectWithoutPassword = {
 
 // Resolve a userSlug param to a numeric user id, or null. Never throws.
 async function resolveUserIdBySlug(slug) {
-  if (!isValidUserSlug(slug)) return null;
+  if (!isValidSlug(slug)) return null;
   const user = await prisma.user.findUnique({
     where: { slug },
     select: { id: true },
@@ -56,7 +56,7 @@ const deleteUser = async (req, res) => {
   const { userSlug } = req.params;
 
   try {
-    if (!isValidUserSlug(userSlug)) {
+    if (!isValidSlug(userSlug)) {
       return res.status(400).json({ success: false, error: 'Invalid user slug.' });
     }
     const userIdNum = await resolveUserIdBySlug(userSlug);
@@ -129,7 +129,7 @@ const updateUser = async (req, res) => {
   const requesterRole = req.user.role;
 
   try {
-    if (!isValidUserSlug(userSlug)) {
+    if (!isValidSlug(userSlug)) {
       return res.status(400).json({ success: false, error: 'Invalid user slug.' });
     }
     const parsedUserId = await resolveUserIdBySlug(userSlug);
@@ -217,7 +217,7 @@ const getUserById = async (req, res) => {
   const { userSlug } = req.params;
 
   try {
-    if (!isValidUserSlug(userSlug)) {
+    if (!isValidSlug(userSlug)) {
       return res.status(400).json({ success: false, error: 'Invalid user slug.' });
     }
     const userIdNum = await resolveUserIdBySlug(userSlug);

@@ -28,7 +28,7 @@ const path = require('path');
 const prisma = require('../src/config/db');
 const bunnyVideoService = require('../src/services/bunnyVideoService');
 const bunnyClient = require('../src/integrations/bunny/bunnyStreamClient');
-const { slugifyTitle, uniqueSlug } = require('../src/utils/slugs');
+const { randomBase36Slug } = require('../src/utils/slugs');
 
 const FOLDER = process.argv[2] || 'I:\\vids\\TypeScript';
 const COURSE_TITLE = process.argv[3] || 'Learn TypeScript in Arabic 2022';
@@ -113,7 +113,7 @@ async function getOrCreateCourse(adminId) {
     data: {
       ...COURSE_DEFAULTS,
       title: COURSE_TITLE,
-      slug: await uniqueSlug('Course', COURSE_TITLE, 'course'),
+      slug: randomBase36Slug(),
       teacherId: adminId,
     },
   });

@@ -55,13 +55,13 @@ Users, courses, Bunny videos and quizzes carry a unique, externally visible `slu
 
 | Resource | Slug pattern | Exposed in public payloads | Numeric id |
 |---|---|---|---|
-| `User` | `u_` + random hex (opaque, non-enumerable) | `{ id, slug, name, ... }` — **both** kept (id needed by deferred admin surfaces) | kept |
-| `Course` | readable slug (`course-1`, `course-...`) | `{ slug, ... }` — `id`/`teacherId` **removed** | internal only |
-| `BunnyVideo` | readable slug (`video-1`, `video-...`) | `{ slug, courseSlug, quizSlug | null, ... }` — `id`, `courseId`, `bunnyVideoId` **removed** | internal only |
-| `Quiz` | readable slug (`quiz-1`, `quiz-...`) | `{ slug, videoSlug, ... }` — `id`, `bunnyVideoId` **removed** | internal only |
+| `User` | `[0-9a-z]{12}` (random, opaque) | `{ id, slug, name, ... }` — **both** kept (id needed by deferred admin surfaces) | kept |
+| `Course` | `[0-9a-z]{12}` (random, opaque) | `{ slug, ... }` — `id`/`teacherId` **removed** | internal only |
+| `BunnyVideo` | `[0-9a-z]{12}` (random, opaque) | `{ slug, courseSlug, quizSlug | null, ... }` — `id`, `courseId`, `bunnyVideoId` **removed** | internal only |
+| `Quiz` | `[0-9a-z]{12}` (random, opaque) | `{ slug, videoSlug, ... }` — `id`, `bunnyVideoId` **removed** | internal only |
 
-- `User` slugs are **opaque** (`u_...`) and can NOT be enumerated/guessed; course/video/quiz slugs are readable and used in browser URLs.
-- Route params are slugs everywhere for these resources, e.g. `GET /courses/:slug`, `POST /progress/complete { videoSlug }`. **No redirect shim** — old numeric URLs now `404`.
+- All slugs are **opaque random tokens** (`0-9a-z`, exactly 12 chars, ~62 bits) generated server-side — none can be enumerated or guessed from a URL. The same shape is shared by all four resources so a token leaks nothing about its type.
+- Route params are slugs everywhere for these resources, e.g. `GET /courses/:slug`, `POST /progress/complete { videoSlug }`. **No redirect shim** — old numeric or readable-slug URLs now `400` (malformed) or `404` (well-formed but missing).
 - Deferred surfaces still numeric by design: quiz **attempt** params (`/quizzes/attempts/:id/*`, result/grade/save/submit/reset), exemption params (`/quizzes/exemptions/:exemptionId`), `QuizAttempt`/`Enrollment`/`Submission`/`GateExemption` row ids in admin lists, and legacy `Video` rows.
 - Databases, caches (`Redis`), BullMQ, audit `targetId` and notification `metadata` keep numeric ids internally.
 
@@ -152,7 +152,7 @@ Any authenticated user.
 
 ### `GET /user/:userSlug` — ADMIN
 - **200** `{ success, data: { id, slug, name, email, phoneNumber, grade, role, lastLoginAt, createdAt } }`
-- **400** `Invalid user slug.` (malformed `u_...`) · **404** `User not found.`
+- **400** `Invalid user slug.` (not `[0-9a-z]{12}`) · **404** `User not found.`
 
 ### `PUT /user/:userSlug`
 Authenticated (self **or** ADMIN).

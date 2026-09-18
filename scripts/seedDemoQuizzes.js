@@ -138,11 +138,11 @@ async function main() {
     },
   };
 
-  for (const vId of [v1.id, v2.id, v3.id]) {
-    const s = surveys[vId];
-    const r = await api(`/quizzes/videos/${vId}`, { method: 'POST', cookie: adminCookie, body: { title: s.title, passingScore: s.passingScore, timeLimitSec: null, maxAttempts: 3, surveyJson: s.surveyJson, answerKey: s.answerKey } });
-    if (!r.data?.success) throw new Error(`quiz create on video ${vId} failed: ${JSON.stringify(r.data)}`);
-    console.log(`Quiz "${s.title}" → video #${vId} (quiz id ${r.data.data.id})`);
+  for (const v of [v1, v2, v3]) {
+    const s = surveys[v.id];
+    const r = await api(`/quizzes/videos/${v.slug}`, { method: 'POST', cookie: adminCookie, body: { title: s.title, passingScore: s.passingScore, timeLimitSec: null, maxAttempts: 3, surveyJson: s.surveyJson, answerKey: s.answerKey } });
+    if (!r.data?.success) throw new Error(`quiz create on video ${v.slug} failed: ${JSON.stringify(r.data)}`);
+    console.log(`Quiz "${s.title}" → video #${v.id} (quiz id ${r.data.data.id})`);
   }
 
   // ── Re-enroll both students ───────────────────────────────────────────────
@@ -184,9 +184,9 @@ async function main() {
     console.log(`Enrolled ${GRADER_STUDENT.email} in course #${course.id}.`);
   }
 
-  const comp = await api('/progress/complete', { method: 'POST', cookie: graderSession.cookie, body: { videoId: v1.id } });
+  const comp = await api('/progress/complete', { method: 'POST', cookie: graderSession.cookie, body: { videoSlug: v1.slug } });
   if (comp.status !== 200) throw new Error(`grader-demo complete v1 failed: ${comp.status} ${JSON.stringify(comp.data)}`);
-  const start = await api(`/quizzes/videos/${v1.id}/start`, { method: 'POST', cookie: graderSession.cookie, body: {} });
+  const start = await api(`/quizzes/videos/${v1.slug}/start`, { method: 'POST', cookie: graderSession.cookie, body: {} });
   const attemptId = start.data?.data?.attemptId;
   if (!attemptId) throw new Error(`grader-demo start failed: ${JSON.stringify(start.data)}`);
   const submit = await api(`/quizzes/attempts/${attemptId}/submit`, { method: 'POST', cookie: graderSession.cookie, body: { answers: { q1: '4', essay1: 'أعتقد أن الإجابة هي 4 لأن 2+2=4' } } });

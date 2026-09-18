@@ -13,7 +13,7 @@ const cache = require('../integrations/redis/cache');
 const busboy = require('busboy');
 const crypto = require('crypto');
 const audit = require('../services/auditLog');
-const { isValidSlug, isValidUserSlug, slugifyTitle, uniqueSlug } = require('../utils/slugs');
+const { isValidSlug, randomBase36Slug } = require('../utils/slugs');
 
 function parseInteger(value) {
   const parsed = typeof value === 'number' ? value : Number(value);
@@ -550,7 +550,7 @@ const hasPassingScore = passingScore !== undefined && passingScore !== null && p
       create: {
         bunnyVideoId: videoId,
         title: title.trim(),
-        slug: await uniqueSlug('Quiz', slugifyTitle(title), 'quiz'),
+        slug: randomBase36Slug(),
         timeLimitSec: timeLimit,
         passingScore: passScore,
         maxAttempts: maxAttemptsValue,
@@ -990,7 +990,7 @@ async function grantExemption(req, res) {
     const adminId = req.user.id;
     const { userSlug, reason } = req.body;
 
-    if (!isValidSlug(videoSlug) || !isValidUserSlug(userSlug)) {
+    if (!isValidSlug(videoSlug) || !isValidSlug(userSlug)) {
       return res.status(400).json({ success: false, error: 'videoSlug and userSlug are required' });
     }
 

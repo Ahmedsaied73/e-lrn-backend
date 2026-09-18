@@ -1,7 +1,7 @@
 const prisma = require('./db');
 const bcrypt = require('bcrypt');
 const config = require('./env');
-const { opaqueUserSlug } = require('../utils/slugs');
+const { randomBase36Slug } = require('../utils/slugs');
 
 /**
  * Ensures that a default admin exists in the system.
@@ -23,7 +23,7 @@ async function setupDefaultAdmin() {
           email: config.admin.email,
           password: hashedPassword,
           role: 'ADMIN',
-          slug: opaqueUserSlug()
+          slug: randomBase36Slug()
         }
       });
 

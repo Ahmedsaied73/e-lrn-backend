@@ -1,7 +1,7 @@
 const prisma = require('../config/db');
 const cache = require('../integrations/redis/cache');
 const audit = require('../services/auditLog');
-const { isValidSlug, isValidUserSlug } = require('../utils/slugs');
+const { isValidSlug } = require('../utils/slugs');
 
 // Strip numeric course/user references from Enrollment rows — the public
 // surface identifies those resources by slug.
@@ -245,7 +245,7 @@ const listAllEnrollments = async (req, res) => {
 const adminEnroll = async (req, res) => {
   try {
     const { userSlug, courseSlug } = req.body;
-    if (!isValidUserSlug(userSlug) || !isValidSlug(courseSlug)) {
+    if (!isValidSlug(userSlug) || !isValidSlug(courseSlug)) {
       return res.status(400).json({ success: false, error: 'userSlug and courseSlug are required.' });
     }
 

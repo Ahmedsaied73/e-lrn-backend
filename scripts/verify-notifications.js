@@ -3,7 +3,7 @@
 process.chdir('H:/e-learning-platform');
 const crypto = require('crypto');
 const { createToken } = require('H:/e-learning-platform/src/utils.js');
-const { opaqueUserSlug } = require('H:/e-learning-platform/src/utils/slugs.js');
+const { randomBase36Slug } = require('H:/e-learning-platform/src/utils/slugs.js');
 const config = require('H:/e-learning-platform/src/config/env.js');
 const { PrismaClient } = require('H:/e-learning-platform/node_modules/@prisma/client');
 const prisma = new PrismaClient();
@@ -28,7 +28,7 @@ let studentH = null;
   try {
     await check('scratch student (Prisma) + forged token', async () => {
       student = await prisma.user.create({
-        data: { slug: opaqueUserSlug(), name: 'Notif Probe', email: `notifprobe-${stamp}@localhost.test`, password: 'x', phoneNumber: `010999${stamp.slice(-5)}`, grade: 'FIRST_SECONDARY', role: 'STUDENT' },
+        data: { slug: randomBase36Slug(), name: 'Notif Probe', email: `notifprobe-${stamp}@localhost.test`, password: 'x', phoneNumber: `010999${stamp.slice(-5)}`, grade: 'FIRST_SECONDARY', role: 'STUDENT' },
       });
       studentH = { Cookie: forge(student.id, student.email, 'STUDENT'), 'Content-Type': 'application/json' };
       const me = await call('GET', '/user/me', null, studentH);
@@ -76,7 +76,7 @@ let studentH = null;
       assert((await call('POST', '/notifications/broadcast', { body: 'x', audience: { kind: 'all' } })).status === 400, 'no title');
       assert((await call('POST', '/notifications/broadcast', { title: 't', linkUrl: 'https://evil.test/x', audience: { kind: 'all' } })).status === 400, 'ext link');
       assert((await call('POST', '/notifications/broadcast', { title: 't', audience: { kind: 'planet' } })).status === 400, 'bad aud');
-      assert((await call('POST', '/notifications/broadcast', { title: 't', audience: { kind: 'course', courseSlug: 'does-not-exist-999999' } })).status === 404, 'no course');
+      assert((await call('POST', '/notifications/broadcast', { title: 't', audience: { kind: 'course', courseSlug: 'dddddddddddd' } })).status === 404, 'no course');
       assert((await call('PATCH', '/notifications/abc/read', {}, studentH)).status === 400, 'bad id');
     });
 
