@@ -74,6 +74,8 @@ const logger = (options = {}) => {
         durationMs: Date.now() - startTime,
       };
 
+      try { require('../metrics/metrics').recordRequest(res.statusCode, entry.durationMs); } catch { /* metrics never break requests */ }
+
       // The enriched object stays private to this handler; on error we log the
       // same masked payload (never the raw request body/headers).
       const logLine = JSON.stringify(entry);

@@ -209,6 +209,12 @@ app.get('/healthz', (req, res) => {
   res.status(200).json({ status: 'ok', uptime: Math.round(process.uptime()) });
 });
 
+const { renderPrometheus } = require('./src/metrics/metrics');
+app.get('/metrics', (req, res) => {
+  res.setHeader('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+  res.send(renderPrometheus());
+});
+
 app.get('/readyz', async (req, res) => {
   const started = Date.now();
   try {
