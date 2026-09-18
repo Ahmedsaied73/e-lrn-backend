@@ -23,7 +23,7 @@
 - Plans: `plans/*.md`. Audit record: `tasks/db-audit-*.md`.
 
 ## [ORPHANS & PENDING]
-- P2 hardening plan `plans/p2-hardening-plan.md` — Tasks 2 + 5 DONE & approved. PAUSED by user 2026-09-19: Tasks 1 (login burst), 3 (RLS lockdown), 4 (test coverage) remain. [PAUSED]
+- P2 hardening plan `plans/p2-hardening-plan.md` — Tasks 2 + 5 + 1 DONE & approved (commits 08abacf/b2fcb89, 640e88b/88d4742/5830578, 92db23b). User said "continue" 2026-09-19 → resuming: Task 3 (RLS lockdown) IN PROGRESS, then Task 4 (test coverage). [IN PROGRESS]
 - USER ACTION owed (from Task 5): restart dev server on 3005 (predates `/metrics`); add `PROD_BASE_URL` repo secret; push; trigger `uptime-probe` once via workflow_dispatch.
 - USER-SIDE DEFERRED: paymob payments WIP in working tree (uncommitted, unrelated to this plan — user said ignore for now; note Task 1 will touch app.js which paymob WIP also touches — needs hunk-scoped staging when resumed).
 - Deferred minors (reviewer, Task 2): optional METRICS_TOKEN/IP allowlist on `/metrics`; resetMetrics test export; count client-aborted requests.
