@@ -77,4 +77,20 @@ function captureException(err, req) {
   }
 }
 
-module.exports = { initSentry, captureException, isEnabled: () => enabled };
+/**
+ * Flush queued events before the process exits (crash handlers). Sentry's
+ * transport buffers and flushes on an interval; process.exit(1) right after
+ * capture would drop the just-captured crash. Wait up to `timeoutMs` for the
+ * payload to leave. Never throws.
+ * @param {number} [timeoutMs]
+ */
+async function flush(timeoutMs = 2000) {
+  if (!enabled || !Sentry) return;
+  try {
+    await Sentry.flush(timeoutMs);
+  } catch (err) {
+    console.warn('[WARN] Sentry flush failed:', err.message);
+  }
+}
+
+module.exports = { initSentry, captureException, flush, isEnabled: () => enabled };

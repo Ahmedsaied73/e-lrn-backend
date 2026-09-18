@@ -20,7 +20,7 @@ const redisStoreEnabled = isRedisEnabled();
 const helmet = require('helmet'); // S-5: security headers WITHOUT CSP (full CSP needs FE coordination)
 const config = require('./src/config/env');
 const requireRedisRateLimit = config.rateLimit.requireRedis;
-const { initSentry, captureException } = require('./src/config/sentry');
+const { initSentry, captureException, flush } = require('./src/config/sentry');
 // Bunny Stream — new modules
 const bunnyVideoRoutes = require('./src/routes/bunnyVideoRoutes');
 const { handleBunnyWebhook } = require('./src/controllers/bunnyWebhookController');
@@ -334,19 +334,22 @@ app.use((err, req, res, next) => {
 // ── Process-level crash handlers ─────────────────────────────────────────────
 // An uncaught exception / unhandled rejection that slips past route-level
 // try/catch must not leave the process half-alive serving stale state — log it,
-// then exit so the platform (Railway) restarts us cleanly. Railway restarts on
-// exit; systemd/docker restart policies handle it elsewhere.
+// flush the Sentry crash report (non-blocking), then exit so the platform
+// (Railway) restarts us cleanly. Railway restarts on exit; systemd/docker
+// restart policies handle it elsewhere.
 process.on('uncaughtException', (err) => {
   captureException(err);
   console.error('[FATAL] uncaughtException:', err);
-  process.exit(1);
+  // Give Sentry a moment to flush the crash event before the process dies —
+  // otherwise the just-captured report is dropped with the event loop.
+  flush().finally(() => process.exit(1));
 });
 
 process.on('unhandledRejection', (reason) => {
   const err = reason instanceof Error ? reason : new Error(String(reason));
   captureException(err);
   console.error('[FATAL] unhandledRejection:', reason);
-  process.exit(1);
+  flush().finally(() => process.exit(1));
 });
 
 const server = app.listen(port, () => {
