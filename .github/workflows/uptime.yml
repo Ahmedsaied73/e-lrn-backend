@@ -1,0 +1,33 @@
+# .github/workflows/uptime.yml
+name: uptime-probe
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Readiness probe
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "${{ secrets.PROD_BASE_URL }}/readyz")
+          echo "readyz=$code"
+          [ "$code" = "200" ] || { echo "READYZ FAILED"; exit 1; }
+      - name: Metrics scrape + 5xx-rate guard
+        run: |
+          metrics=$(curl -s --max-time 20 "${{ secrets.PROD_BASE_URL }}/metrics")
+          echo "$metrics" > metrics.txt
+          total=$(echo "$metrics" | grep '^http_requests_total' | awk -F'} ' '{s+=$2} END {print s+0}')
+          errs=$(echo "$metrics" | grep '^http_errors_5xx_total ' | awk '{print $2+0}')
+          echo "requests=$total errors5xx=$errs"
+          # Counter is process-lifetime (single scrape); a true rate needs two
+          # scrapes. Guard: fail if errors exceed 5% of requests since boot.
+          if [ "$total" -gt 100 ] && [ "$(awk "BEGIN{print ($errs/$total)*100}")" -gt 5 ]; then
+            echo "5XX RATE ABOVE 5%"; exit 1
+          fi
+      - name: Attach metrics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrics-snapshot
+          path: metrics.txt

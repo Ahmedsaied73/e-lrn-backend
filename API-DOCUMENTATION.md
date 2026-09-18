@@ -25,7 +25,7 @@ Single reference for every HTTP endpoint of the e-learning platform backend. Cov
 - [13. Notifications (`/notifications`)](#13-notifications-notifications)
 - [14. Search (`/search`)](#14-search-search)
 - [15. Admin (`/admin`)](#15-admin-admin)
-- [16. Health Probes (`/healthz`, `/readyz`, `/health`)](#16-health-probes-healthz-readyz-health)
+- [16. Health Probes (`/healthz`, `/readyz`, `/health`, `/metrics`)](#16-health-probes-healthz-readyz-health-metrics)
 - [17. Sequential Access Gate](#17-sequential-access-gate)
 - [18. Error Codes](#18-error-codes)
 
@@ -476,7 +476,7 @@ Every route behind `authenticateToken` + `authorizeAdmin()` at the router level.
 
 ---
 
-## 16. Health Probes (`/healthz`, `/readyz`, `/health`)
+## 16. Health Probes (`/healthz`, `/readyz`, `/health`, `/metrics`)
 
 Mounted **before** the global rate limiter — never throttled, no auth.
 
@@ -488,6 +488,10 @@ Mounted **before** the global rate limiter — never throttled, no auth.
 
 ### `GET /health`
 - **200** `{ status: 'ok', db: 'up', uptime, ms }` · **503** — legacy DB-ping healthcheck (test harness / CI compatible).
+
+### `GET /metrics`
+- **200** Prometheus text format (a scrape target, not an API — no auth, no envelope). Exposes process-lifetime counters: `http_requests_total{status="..."}` and `http_errors_5xx_total`. Counters are **per-instance since process boot** (they reset on restart; a single scrape yields totals, not a rate).
+- The `uptime-probe` GitHub Action (`.github/workflows/uptime.yml`) polls `/readyz` every 15 minutes and fails the run (→ notification email to repo watchers) on a non-200 readiness response or when lifetime 5xx errors exceed 5% of total requests. On failure it attaches the raw metrics snapshot as a `metrics-snapshot` artifact for debugging. Requires the `PROD_BASE_URL` repo secret (base URL without trailing slash).
 
 ---
 
