@@ -11,14 +11,24 @@ function createSemaphore(max) {
   let active = 0;
   const queue = [];
   async function acquire(fn) {
-    if (active >= cap) await new Promise((resolve) => queue.push(resolve));
-    active++;
+    // Ownership transfer: when a slot frees, the release path increments on
+    // behalf of the woken waiter (which does NOT increment itself). A fresh
+    // arrival therefore never sneaks in between the decrement and the
+    // waiter's resumption — the cap can never be transiently exceeded.
+    if (active >= cap) {
+      await new Promise((resolve) => queue.push(resolve));
+    } else {
+      active++;
+    }
     try {
       return await fn();
     } finally {
       active--;
       const next = queue.shift();
-      if (next) next();
+      if (next) {
+        active++;
+        next();
+      }
     }
   }
   return acquire;
