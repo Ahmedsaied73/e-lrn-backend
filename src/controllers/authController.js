@@ -6,6 +6,11 @@ const { createToken, createRefreshToken, hashRefreshToken, createRefreshTokenFam
 const { accessTokenCookieOptions, refreshTokenCookieOptions } = require('../config/cookie');
 const { getLockState, recordFailure, clearFailures } = require('../integrations/redis/accountLockout');
 const { randomBase36Slug } = require('../utils/slugs');
+const { createSemaphore } = require('../utils/concurrency');
+// Bounds simultaneous credential checks. Pending logins queue in the semaphore
+// (no DB pool held) instead of stamping the pool with serial round-trips.
+// LOGIN_CONCURRENCY env-tunable; 8 matches the measured pool headroom.
+const loginSlot = createSemaphore(Number(process.env.LOGIN_CONCURRENCY) || 8);
 
 async function login(req, res) {
   try {
@@ -28,16 +33,24 @@ async function login(req, res) {
       });
     }
 
-    const user = await prisma.user.findUnique({
-      where: { email: email.trim().toLowerCase() }
+    // Credential-check section (user fetch + bcrypt compare) bounded by the
+    // login semaphore: pending logins wait here WITHOUT holding a DB pool
+    // connection. All 401/lockout semantics below are unchanged.
+    const { user, passwordMatch } = await loginSlot(async () => {
+      const found = await prisma.user.findUnique({
+        where: { email: email.trim().toLowerCase() }
+      });
+
+      if (!found) return { user: null, passwordMatch: false };
+
+      const ok = await bcrypt.compare(password, found.password);
+      return { user: found, passwordMatch: ok };
     });
 
     if (!user) {
       await recordFailure(email);
       return res.status(401).json({ success: false, error: 'Invalid credentials.' });
     }
-
-    const passwordMatch = await bcrypt.compare(password, user.password);
 
     if (!passwordMatch) {
       await recordFailure(email);
