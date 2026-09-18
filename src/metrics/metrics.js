@@ -31,10 +31,8 @@ function renderPrometheus() {
   lines.push('# TYPE http_errors_5xx_total counter');
   lines.push(`http_errors_5xx_total ${errors}`);
   lines.push('# TYPE http_request_duration_ms histogram');
-  let cumulative = 0;
   for (const b of DURATION_BUCKETS) {
-    cumulative += counters.buckets.get(b) || 0;
-    lines.push(`http_request_duration_ms_bucket{le="${b}"} ${cumulative}`);
+    lines.push(`http_request_duration_ms_bucket{le="${b}"} ${counters.buckets.get(b) || 0}`);
   }
   lines.push(`http_request_duration_ms_bucket{le="+Inf"} ${counters.count}`);
   lines.push(`http_request_duration_ms_sum ${counters.sum}`);
