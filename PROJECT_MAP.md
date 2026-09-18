@@ -23,6 +23,9 @@
 - Plans: `plans/*.md`. Audit record: `tasks/db-audit-*.md`.
 
 ## [ORPHANS & PENDING]
-- P2 hardening plan `plans/p2-hardening-plan.md` — Tasks 1–5 pending execution (login burst, /metrics, RLS lockdown, test coverage, uptime probe). [IN PROGRESS 2026-09-19]
+- P2 hardening plan `plans/p2-hardening-plan.md` — Tasks 2 + 5 DONE & approved. PAUSED by user 2026-09-19: Tasks 1 (login burst), 3 (RLS lockdown), 4 (test coverage) remain. [PAUSED]
+- USER ACTION owed (from Task 5): restart dev server on 3005 (predates `/metrics`); add `PROD_BASE_URL` repo secret; push; trigger `uptime-probe` once via workflow_dispatch.
+- USER-SIDE DEFERRED: paymob payments WIP in working tree (uncommitted, unrelated to this plan — user said ignore for now; note Task 1 will touch app.js which paymob WIP also touches — needs hunk-scoped staging when resumed).
+- Deferred minors (reviewer, Task 2): optional METRICS_TOKEN/IP allowlist on `/metrics`; resetMetrics test export; count client-aborted requests.
 - Load-test cohort cleanup (`%loadtest.local` users) on staging — awaits user sign-off (tasks/db-audit-todo.md last checkbox).
-- Optional: hosted Prometheus/Grafana scraping of `/metrics` (after Task 2 lands); cold-cache gate tail + dashboard 16-query fanout (deferred, documented in audit).
+- Optional: hosted Prometheus/Grafana scraping of `/metrics` (endpoint live as of Task 2); cold-cache gate tail + dashboard 16-query fanout (deferred, documented in audit).
