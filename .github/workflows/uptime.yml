@@ -14,19 +14,22 @@ jobs:
           echo "readyz=$code"
           [ "$code" = "200" ] || { echo "READYZ FAILED"; exit 1; }
       - name: Metrics scrape + 5xx-rate guard
+        id: metrics
         run: |
-          metrics=$(curl -s --max-time 20 "${{ secrets.PROD_BASE_URL }}/metrics")
+          metrics=$(curl -sf --max-time 20 "${{ secrets.PROD_BASE_URL }}/metrics") || { echo "METRICS SCRAPE FAILED"; exit 1; }
           echo "$metrics" > metrics.txt
           total=$(echo "$metrics" | grep '^http_requests_total' | awk -F'} ' '{s+=$2} END {print s+0}')
           errs=$(echo "$metrics" | grep '^http_errors_5xx_total ' | awk '{print $2+0}')
           echo "requests=$total errors5xx=$errs"
           # Counter is process-lifetime (single scrape); a true rate needs two
           # scrapes. Guard: fail if errors exceed 5% of requests since boot.
-          if [ "$total" -gt 100 ] && [ "$(awk "BEGIN{print ($errs/$total)*100}")" -gt 5 ]; then
+          # Integer-safe: [ ] cannot compare non-integers, so use errs*20 > total
+          # (equivalent to errs/total > 5%).
+          if [ "$total" -gt 100 ] && [ "$((errs * 20))" -gt "$total" ]; then
             echo "5XX RATE ABOVE 5%"; exit 1
           fi
       - name: Attach metrics on failure
-        if: failure()
+        if: failure() && steps.metrics.conclusion == 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: metrics-snapshot
