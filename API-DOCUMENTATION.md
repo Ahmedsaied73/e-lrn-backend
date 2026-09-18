@@ -1,1980 +1,521 @@
-# E-Learning Platform API Documentation
+# E-Learning Platform — API Documentation
 
-This document provides comprehensive information about the API endpoints available in the E-Learning Platform.
+Single reference for every HTTP endpoint of the e-learning platform backend. Covers **all** features: auth, users, courses, enrollments, payments, video progress, assignments, SurveyJS quizzes, Bunny.net videos, notifications, search, and the admin console.
+
+**Base URL**: `http://localhost:3005`
+
+> This document is the **single source of truth** for the API. Older per-domain guides (Bunny, quiz, cookie auth, frontend integration) live in [`docs/`](./docs/), kept as design/implementation history. If a guide contradicts this file, this file wins.
+
+---
 
 ## Table of Contents
 
-- [Authentication](#authentication)
-- [Users](#users)
-- [Courses](#courses)
-- [Videos](#videos)
-- [Enrollments](#enrollments)
-- [Payments](#payments)
-- [YouTube Integration](#youtube-integration)
-- [Video Streaming](#video-streaming)
-- [Search](#search)
-- [Video Progress](#video-progress)
-- [Assignments](#assignments)
-
-## Base URL
-
-All endpoints are relative to the base URL: `http://localhost:3005`
-
-## Authentication
-
-Most endpoints require authentication using a JWT token. The token can be provided in two ways:
-
-1. As a cookie named `token`
-2. In the Authorization header using the Bearer scheme: `Authorization: Bearer <token>`
-
-### Endpoints
-
-#### Login
-
-```
-POST /auth/login
-```
+- [1. Global Conventions](#1-global-conventions)
+- [2. Authentication & Cookies](#2-authentication--cookies)
+- [3. Auth (`/auth`)](#3-auth-auth)
+- [4. Users (`/user`)](#4-users-user)
+- [5. Courses (`/courses`)](#5-courses-courses)
+- [6. Enrollments (`/enroll`, `/admin/enrollments`)](#6-enrollments-enroll-adminenrollments)
+- [7. Payments (`/payments`) — disabled](#7-payments-payments--disabled)
+- [8. Video Progress (`/progress`)](#8-video-progress-progress)
+- [9. Assignments (`/assignments`)](#9-assignments-assignments)
+- [10. Quizzes (`/quizzes`)](#10-quizzes-quizzes)
+- [11. Bunny Videos (`/courses`, `/videos`)](#11-bunny-videos-courses-videos)
+- [12. Bunny Webhook (`/webhooks/bunny/stream`)](#12-bunny-webhook-webhooksbunnystream)
+- [13. Notifications (`/notifications`)](#13-notifications-notifications)
+- [14. Search (`/search`)](#14-search-search)
+- [15. Admin (`/admin`)](#15-admin-admin)
+- [16. Health Probes (`/healthz`, `/readyz`, `/health`)](#16-health-probes-healthz-readyz-health)
+- [17. Sequential Access Gate](#17-sequential-access-gate)
+- [18. Error Codes](#18-error-codes)
 
-**Request Body:**
+---
 
-```json
-{
-  "email": "user@example.com",
-  "password": "password123"
-}
-```
-
-**Response:**
-
-```json
-{
-  "message": "Login successful",
-  "token": "jwt_token_here",
-  "user": {
-    "id": 1,
-    "name": "User Name",
-    "email": "user@example.com",
-    "role": "STUDENT"
-  }
-}
-```
-
-#### Register
+## 1. Global Conventions
 
-```
-POST /auth/register
-```
+### Authentication
 
-**Request Body:**
-
-```json
-{
-  "name": "New User",
-  "email": "newuser@example.com",
-  "password": "password123",
-  "phoneNumber": "1234567890",
-  "grade": "A"
-}
-```
-
-**Response:**
-
-```json
-{
-  "message": "Registration successful",
-  "user": {
-    "id": 2,
-    "name": "New User",
-    "email": "newuser@example.com",
-    "role": "STUDENT"
-  }
-}
-```
-
-#### Logout
-
-```
-POST /auth/logout
-```
-
-**Response:**
-
-```json
-{
-  "message": "Logged out successfully"
-}
-```
+- Middleware: `authenticateToken` (in `src/middlewares/index.js`). Reads the token from, in order:
+  1. `accessToken` cookie (HttpOnly)
+  2. `token` cookie (legacy)
+  3. `Authorization: Bearer <jwt>` header (compat shim only — never populated by the frontend)
+- The JWT must carry `{ type: 'access' }`. Any token without that claim is rejected → **401**.
+- Common auth failures → `401 { success: false, error: 'Access denied. No token provided.' | 'Invalid or expired token.' }`
+- Admin-only routes use `authorizeAdmin()` (claim check + DB role re-verification with a 5-minute in-proc cache) → `403 { success: false, error: 'Access denied. Insufficient privileges.' }`
 
-#### Refresh Token
+### Response envelopes
 
-```
-POST /auth/refresh-token
-```
+- **Modern endpoints** return `{ success: true, data: ... }` (and `{ success: false, error, code }` on failure).
+- **Legacy endpoints** (payments, search, assignments, video progress *success bodies*) return raw objects and do **not** wrap successes in `success`. Their errors still carry structured `code` values.
+- Errors thrown through the global handler (`app.js`) always produce `{ success: false, error: <string>, code: <string> }`.
 
-**Response:**
+### Request size
 
-```json
-{
-  "token": "new_jwt_token_here"
-}
-```
-
-## Users
+- Body limit: `express.json({ limit: '512kb' })` → **413** for larger JSON bodies.
+- Quiz responses/images/upload bodies have their own limits (documented per endpoint).
 
-### Endpoints
+### Origin & CSRF guards (all routes)
 
-#### Get Current User
+- **Origin allowlist**: any request with an `Origin` header not in the allowlist (localhost `3000`/`127.0.0.1:3000`/`127.0.0.1:3002`, `FRONTEND_URL` comma-list, `*.vercel.app`) → **403** `{ success: false, error: 'Forbidden.', code: 'ORIGIN_NOT_ALLOWED' }`.
+- **CSRF guard**: on `POST`/`PUT`/`PATCH`/`DELETE`, an `Origin` (or `Referer` fallback) not allowlisted → **403** `code: 'CSRF_DENIED_ORIGIN'`. Requests with **no** `Origin`/`Referer` (curl, server-to-server, webhooks) pass through.
 
-```
-GET /users/me
-```
+### Rate limiting (express-rate-limit, keyed by IP → **429**)
 
-**Authentication Required:** Yes
+| Scope | Limit |
+|---|---|
+| Global | 1000 req / 15 min (health probes and the Bunny webhook excluded) |
+| `POST /auth/login` | 20 / 15 min |
+| `POST /auth/register` | 20 / 15 min |
+| `POST /auth/refresh-token` | 60 / 15 min |
+| `POST /webhooks/bunny/stream` | 600 / 5 min |
 
-**Response:**
+When `REQUIRE_REDIS_RATE_LIMIT=true` and the Redis store is down → **503** `{ success: false, error: 'Rate limiting is temporarily unavailable...', code: 'RATE_LIMIT_STORE_UNAVAILABLE' }`. Default (`false`) falls back to a per-instance in-memory counter.
 
-```json
-{
-  "id": 1,
-  "name": "User Name",
-  "email": "user@example.com",
-  "role": "STUDENT"
-}
-```
+### Standard status codes
 
-#### Update User
+`200` OK · `201` Created · `400` Validation · `401` Unauthenticated · `403` Forbidden / gate block · `404` Not found · `409` Conflict · `413` Too large · `415` Unsupported type · `422` Wrong state · `423` Locked · `429` Rate limited · `500` Internal · `502` Upstream (Bunny) · `503` Unavailable
 
-```
-PUT /users/:userId
-```
+---
 
-**Authentication Required:** Yes (User can only update their own data unless they are an admin)
+## 2. Authentication & Cookies
 
-**Request Body:**
+Token-based auth with **HttpOnly cookies only**. Tokens never appear in request/response bodies.
 
-```json
-{
-  "name": "Updated Name",
-  "email": "updated@example.com",
-  "password": "newpassword123"
-}
-```
+| Cookie | Lifetime | Path | Purpose |
+|---|---|---|---|
+| `accessToken` | 15 min | `/` | Bearer for all API calls |
+| `refreshToken` | 7 days | `/auth` | Exchanged for a new access token |
 
-**Response:**
+- **Refresh-token rotation**: each `/auth/refresh-token` call issues a new refresh token, persists it to the DB, and re-sets the cookie. The old token is invalidated immediately. Reuse of a rotated (dead) token revokes the whole `refreshTokenFamily`.
+- `refreshToken` carries a `jti` nonce so rotation can never produce a byte-identical token.
+- `SameSite=lax` in dev; `SameSite=None; Secure` in production.
+- The frontend determines login state from a successful `GET /user/me`, not from a body token.
+- **Session-preserving register**: `POST /auth/register` runs `optionalAuth` and only sets login cookies when the caller has no session. Registering while logged in (e.g. admin add-student) does not overwrite the caller's session.
 
-```json
-{
-  "message": "User data updated successfully",
-  "user": {
-    "id": 1,
-    "name": "Updated Name",
-    "email": "updated@example.com",
-    "role": "STUDENT"
-  }
-}
-```
-
-#### Get User by ID (Admin Only)
-
-```
-GET /users/:userId
-```
+---
 
-**Authentication Required:** Yes (Admin only)
+## 3. Auth (`/auth`)
 
-**Response:**
+### `POST /auth/login`
+Public. Rate limit 20/15min.
+- **Body**: `email` (string), `password` (string)
+- **200** `{ success, data: { user: { id, email, name, role } } }` + sets `accessToken` + `refreshToken` cookies
+- **400** missing fields · **401** `Invalid credentials.` · **423** `{ success:false, error, code:'ACCOUNT_LOCKED' }` + `Retry-After` (5 consecutive failures within 15 min, Redis `v1:authlock:{email}`; success clears; fail-open when Redis is down)
 
-```json
-{
-  "id": 1,
-  "name": "User Name",
-  "email": "user@example.com",
-  "role": "STUDENT"
-}
-```
-
-#### Get All Users (Admin Only)
-
-```
-GET /users
-```
-
-**Authentication Required:** Yes (Admin only)
-
-**Response:**
-
-```json
-[
-  {
-    "id": 1,
-    "name": "User Name",
-    "email": "user@example.com",
-    "role": "STUDENT"
-  },
-  {
-    "id": 2,
-    "name": "Admin User",
-    "email": "admin@example.com",
-    "role": "ADMIN"
-  }
-]
-```
-
-#### Delete User (Admin Only)
-
-```
-DELETE /users/:userId
-```
-
-**Authentication Required:** Yes (Admin only)
-
-**Response:**
-
-```json
-{
-  "message": "User deleted successfully"
-}
-```
-
-## Courses
-
-### Endpoints
-
-#### Get All Courses
-
-```
-GET /courses
-```
-
-**Authentication Required:** Yes
-
-**Response:**
-
-```json
-[
-  {
-    "id": 1,
-    "title": "Introduction to JavaScript",
-    "description": "Learn the basics of JavaScript programming",
-    "price": 49.99,
-    "thumbnailUrl": "/uploads/thumbnails/js-intro.jpg",
-    "createdAt": "2023-01-15T12:00:00Z"
-  },
-  {
-    "id": 2,
-    "title": "Advanced React",
-    "description": "Master React and Redux",
-    "price": 79.99,
-    "thumbnailUrl": "/uploads/thumbnails/react-advanced.jpg",
-    "createdAt": "2023-02-20T14:30:00Z"
-  }
-]
-```
-
-#### Get Enrolled Courses
-
-```
-GET /courses/enrolled
-```
-
-**Authentication Required:** Yes
-
-**Response:**
-
-```json
-[
-  {
-    "id": 1,
-    "title": "Introduction to JavaScript",
-    "description": "Learn the basics of JavaScript programming",
-    "thumbnailUrl": "/uploads/thumbnails/js-intro.jpg",
-    "progress": 45,
-    "enrolledAt": "2023-03-10T09:15:00Z"
-  }
-]
-```
-
-#### Get Course by ID
-
-```
-GET /courses/:id
-```
-
-**Authentication Required:** Yes
-
-**Response:**
-
-```json
-{
-  "id": 1,
-  "title": "Introduction to JavaScript",
-  "description": "Learn the basics of JavaScript programming",
-  "price": 49.99,
-  "thumbnailUrl": "/uploads/thumbnails/js-intro.jpg",
-  "createdAt": "2023-01-15T12:00:00Z",
-  "videos": [
-    {
-      "id": 1,
-      "title": "Variables and Data Types",
-      "description": "Understanding JavaScript variables",
-      "duration": 1200,
-      "order": 1
-    },
-    {
-      "id": 2,
-      "title": "Functions and Scope",
-      "description": "Working with functions",
-      "duration": 1500,
-      "order": 2
-    }
-  ]
-}
-```
-
-#### Create Course (Admin Only)
-
-```
-POST /courses
-```
-
-**Authentication Required:** Yes (Admin only)
-
-**Request Body:** Form data with the following fields:
-
-- `title`: Course title
-- `description`: Course description
-- `price`: Course price
-- `thumbnail`: Course thumbnail image file
-
-**Response:**
-
-```json
-{
-  "message": "Course created successfully",
-  "course": {
-    "id": 3,
-    "title": "Node.js Fundamentals",
-    "description": "Server-side JavaScript with Node.js",
-    "price": 59.99,
-    "thumbnailUrl": "/uploads/thumbnails/nodejs-fundamentals.jpg",
-    "createdAt": "2023-04-05T10:20:00Z"
-  }
-}
-```
-
-#### Update Course (Admin Only)
-
-```
-PUT /courses/:id
-```
-
-**Authentication Required:** Yes (Admin only)
-
-**Request Body:** Form data with the following fields (all optional):
-
-- `title`: Updated course title
-- `description`: Updated course description
-- `price`: Updated course price
-- `thumbnail`: Updated course thumbnail image file
-
-**Response:**
-
-```json
-{
-  "message": "Course updated successfully",
-  "course": {
-    "id": 1,
-    "title": "JavaScript Fundamentals",
-    "description": "Updated description for JS course",
-    "price": 54.99,
-    "thumbnailUrl": "/uploads/thumbnails/js-fundamentals.jpg",
-    "updatedAt": "2023-04-10T11:25:00Z"
-  }
-}
-```
-
-#### Delete Course (Admin Only)
-
-```
-DELETE /courses/:id
-```
-
-**Authentication Required:** Yes (Admin only)
-
-**Response:**
-
-```json
-{
-  "message": "Course deleted successfully"
-}
-```
-
-## Videos
-
-### Endpoints
-
-#### Get Videos by Course
-
-```
-GET /videos/course/:courseId
-```
-
-**Authentication Required:** Yes
-
-**Response:**
-
-```json
-[
-  {
-    "id": 1,
-    "title": "Variables and Data Types",
-    "description": "Understanding JavaScript variables",
-    "duration": 1200,
-    "order": 1,
-    "thumbnailUrl": "/uploads/thumbnails/video1.jpg"
-  },
-  {
-    "id": 2,
-    "title": "Functions and Scope",
-    "description": "Working with functions",
-    "duration": 1500,
-    "order": 2,
-    "thumbnailUrl": "/uploads/thumbnails/video2.jpg"
-  }
-]
-```
-
-#### Get Video by ID
-
-```
-GET /videos/:id
-```
-
-**Authentication Required:** Yes
-
-**Response:**
-
-```json
-{
-  "id": 1,
-  "title": "Variables and Data Types",
-  "description": "Understanding JavaScript variables",
-  "duration": 1200,
-  "order": 1,
-  "courseId": 1,
-  "thumbnailUrl": "/uploads/thumbnails/video1.jpg",
-  "createdAt": "2023-01-16T10:00:00Z"
-}
-```
-
-#### Upload Video (Admin Only)
-
-```
-POST /videos/course/:courseId
-```
-
-**Authentication Required:** Yes (Admin only)
-
-**Request Body:** Form data with the following fields:
-
-- `title`: Video title
-- `description`: Video description
-- `order`: Video order in the course
-- `video`: Video file
-
-**Response:**
-
-```json
-{
-  "message": "Video uploaded successfully",
-  "video": {
-    "id": 3,
-    "title": "Arrays and Objects",
-    "description": "Working with complex data structures",
-    "duration": 1800,
-    "order": 3,
-    "courseId": 1,
-    "videoUrl": "/uploads/videos/arrays-objects.mp4",
-    "thumbnailUrl": "/uploads/thumbnails/video3.jpg",
-    "createdAt": "2023-04-12T14:30:00Z"
-  }
-}
-```
-
-#### Update Video (Admin Only)
-
-```
-PUT /videos/:id
-```
-
-**Authentication Required:** Yes (Admin only)
-
-**Request Body:** Form data with the following fields (all optional):
-
-- `title`: Updated video title
-- `description`: Updated video description
-- `order`: Updated video order
-- `video`: Updated video file
-
-**Response:**
-
-```json
-{
-  "message": "Video updated successfully",
-  "video": {
-    "id": 1,
-    "title": "JavaScript Variables and Data Types",
-    "description": "Updated description for variables video",
-    "duration": 1200,
-    "order": 1,
-    "courseId": 1,
-    "videoUrl": "/uploads/videos/js-variables.mp4",
-    "thumbnailUrl": "/uploads/thumbnails/video1.jpg",
-    "updatedAt": "2023-04-15T09:45:00Z"
-  }
-}
-```
-
-#### Delete Video (Admin Only)
-
-```
-DELETE /videos/:id
-```
-
-**Authentication Required:** Yes (Admin only)
-
-**Response:**
-
-```json
-{
-  "message": "Video deleted successfully"
-}
-```
-
-## Enrollments
-
-### Endpoints
-
-#### Enroll in Course
-
-```
-POST /api/enroll
-```
-
-**Authentication Required:** Yes
-
-**Request Body:**
-
-```json
-{
-  "courseId": 1
-}
-```
-
-**Response:**
-
-```json
-{
-  "message": "Enrolled successfully",
-  "enrollment": {
-    "id": 1,
-    "userId": 1,
-    "courseId": 1,
-    "enrolledAt": "2023-04-20T11:30:00Z",
-    "progress": 0
-  }
-}
-```
-
-#### Check Enrollment Status
-
-```
-POST /api/enrollment-status
-```
-
-**Authentication Required:** Yes
-
-**Request Body:**
-
-```json
-{
-  "courseId": 1
-}
-```
-
-**Response:**
-
-```json
-{
-  "enrolled": true,
-  "enrollment": {
-    "id": 1,
-    "userId": 1,
-    "courseId": 1,
-    "enrolledAt": "2023-04-20T11:30:00Z",
-    "progress": 45
-  }
-}
-```
-
-## Payments
-
-### Endpoints
-
-#### Process Course Payment
-
-```
-POST /payment/course/:courseId
-```
-
-**Authentication Required:** Yes
-
-**Request Body:**
-
-```json
-{
-  "paymentMethod": "credit_card",
-  "cardDetails": {
-    "number": "4111111111111111",
-    "expMonth": 12,
-    "expYear": 2025,
-    "cvc": "123"
-  }
-}
-```
-
-**Response:**
-
-```json
-{
-  "message": "Payment processed successfully",
-  "payment": {
-    "id": 1,
-    "userId": 1,
-    "courseId": 1,
-    "amount": 49.99,
-    "status": "completed",
-    "paymentDate": "2023-04-20T11:25:00Z"
-  },
-  "enrollment": {
-    "id": 1,
-    "userId": 1,
-    "courseId": 1,
-    "enrolledAt": "2023-04-20T11:30:00Z"
-  }
-}
-```
-
-#### Get Payment History
-
-```
-GET /payment/history
-```
-
-**Authentication Required:** Yes
-
-**Response:**
-
-```json
-[
-  {
-    "id": 1,
-    "courseId": 1,
-    "courseTitle": "Introduction to JavaScript",
-    "amount": 49.99,
-    "status": "completed",
-    "paymentDate": "2023-04-20T11:25:00Z"
-  },
-  {
-    "id": 2,
-    "courseId": 2,
-    "courseTitle": "Advanced React",
-    "amount": 79.99,
-    "status": "completed",
-    "paymentDate": "2023-05-15T14:10:00Z"
-  }
-]
-```
-
-## YouTube Integration
-
-### Endpoints
-
-#### Import YouTube Playlist (Admin Only)
-
-```
-POST /youtube/import
-```
-
-**Authentication Required:** Yes (Admin only)
-
-**Request Body:**
-
-```json
-{
-  "playlistId": "PLillGF-RfqbbnEGy3ROiLWk7JMCuSyQtX",
-  "title": "MERN Stack Course",
-  "description": "Learn the MERN Stack - MongoDB, Express, React, Node",
-  "price": 69.99
-}
-```
-
-**Response:**
-
-```json
-{
-  "message": "YouTube playlist imported successfully",
-  "course": {
-    "id": 4,
-    "title": "MERN Stack Course",
-    "description": "Learn the MERN Stack - MongoDB, Express, React, Node",
-    "price": 69.99,
-    "thumbnailUrl": "https://i.ytimg.com/vi/7CqJlxBYj-M/maxresdefault.jpg",
-    "createdAt": "2023-05-20T09:00:00Z",
-    "videos": [
-      {
-        "id": 10,
-        "title": "Welcome To The MERN Stack Course",
-        "description": "In this video we will talk about what we will be learning in this course",
-        "youtubeId": "7CqJlxBYj-M",
-        "order": 1
-      },
-      // More videos...
-    ]
-  }
-}
-```
-
-#### Sync YouTube Course (Admin Only)
-
-```
-POST /youtube/sync/:id
-```
-
-**Authentication Required:** Yes (Admin only)
-
-**Response:**
-
-```json
-{
-  "message": "Course synced with YouTube playlist successfully",
-  "course": {
-    "id": 4,
-    "title": "MERN Stack Course",
-    "description": "Learn the MERN Stack - MongoDB, Express, React, Node",
-    "videos": [
-      // Updated video list
-    ]
-  }
-}
-```
-
-## Video Streaming
-
-### Endpoints
-
-#### Get Video Stream URL
-
-```
-GET /stream/video/:videoId/url
-```
-
-**Authentication Required:** Yes (User must be enrolled in the course)
-
-**Response:**
-
-```json
-{
-  "streamUrl": "/uploads/videos/js-variables.mp4",
-  "type": "mp4"
-}
-```
-
-#### Get Video Embed Code
-
-```
-GET /stream/video/:videoId/embed
-```
-
-**Authentication Required:** Yes (User must be enrolled in the course)
-
-**Response:**
-
-```json
-{
-  "embedCode": "<iframe src=\"/player/video/1\" width=\"100%\" height=\"400\" frameborder=\"0\" allowfullscreen></iframe>"
-}
-```
-
-#### Get Course Player
-
-```
-GET /stream/course/:courseId/player
-```
-
-**Authentication Required:** Yes (User must be enrolled in the course)
-
-**Response:**
-
-```json
-{
-  "courseId": 1,
-  "title": "Introduction to JavaScript",
-  "videos": [
-    {
-      "id": 1,
-      "title": "Variables and Data Types",
-      "duration": 1200,
-      "order": 1,
-      "watched": true
-    },
-    {
-      "id": 2,
-      "title": "Functions and Scope",
-      "duration": 1500,
-      "order": 2,
-      "watched": false
-    }
-  ],
-  "currentVideo": {
-    "id": 1,
-    "title": "Variables and Data Types",
-    "description": "Understanding JavaScript variables",
-    "streamUrl": "/uploads/videos/js-variables.mp4",
-    "duration": 1200
-  }
-}
-```
-
-## Search
-
-### Endpoints
-
-#### Search Content
-
-```
-GET /search/content?query=javascript&type=course
-```
-
-**Authentication Required:** Yes
-
-**Query Parameters:**
-
-- `query`: Search term
-- `type` (optional): Filter by content type ("course" or "video")
-- `category` (optional): Filter by category
-- `price_min` (optional): Minimum price
-- `price_max` (optional): Maximum price
-
-**Response:**
-
-```json
-{
-  "courses": [
-    {
-      "id": 1,
-      "title": "Introduction to JavaScript",
-      "description": "Learn the basics of JavaScript programming",
-      "price": 49.99,
-      "thumbnailUrl": "/uploads/thumbnails/js-intro.jpg"
-    }
-  ],
-  "videos": [
-    {
-      "id": 1,
-      "title": "Variables and Data Types",
-      "description": "Understanding JavaScript variables",
-      "courseId": 1,
-      "courseTitle": "Introduction to JavaScript"
-    }
-  ]
-}
-```
-
-#### Get Trending Courses
-
-```
-GET /search/trending
-```
-
-**Authentication Required:** Yes
-
-**Response:**
-
-```json
-[
-  {
-    "id": 2,
-    "title": "Advanced React",
-    "description": "Master React and Redux",
-    "price": 79.99,
-    "thumbnailUrl": "/uploads/thumbnails/react-advanced.jpg",
-    "enrollmentCount": 120
-  },
-  {
-    "id": 1,
-    "title": "Introduction to JavaScript",
-    "description": "Learn the basics of JavaScript programming",
-    "price": 49.99,
-    "thumbnailUrl": "/uploads/thumbnails/js-intro.jpg",
-    "enrollmentCount": 95
-  }
-]
-```
-
-#### Get Recommended Courses
-
-```
-GET /search/recommended
-```
-
-**Authentication Required:** Yes
-
-**Response:**
-
-```json
-[
-  {
-    "id": 3,
-    "title": "Node.js Fundamentals",
-    "description": "Server-side JavaScript with Node.js",
-    "price": 59.99,
-    "thumbnailUrl": "/uploads/thumbnails/nodejs-fundamentals.jpg",
-    "relevanceScore": 0.85
-  },
-  {
-    "id": 4,
-    "title": "MERN Stack Course",
-    "description": "Learn the MERN Stack - MongoDB, Express, React, Node",
-    "price": 69.99,
-    "thumbnailUrl": "https://i.ytimg.com/vi/7CqJlxBYj-M/maxresdefault.jpg",
-    "relevanceScore": 0.78
-  }
-]
-```
-
-## Video Progress
-
-### Endpoints
-
-#### Mark Video as Completed
-
-```
-POST /progress/complete
-```
-
-**Authentication Required:** Yes
-
-**Purpose:** Record when a user finishes watching a video
-
-**Request Body:**
-
-```json
-{
-  "videoId": 1
-}
-```
-
-**Response:**
-
-```json
-{
-  "message": "Video marked as completed",
-  "videoProgress": {
-    "id": 1,
-    "userId": 1,
-    "videoId": 1,
-    "completed": true,
-    "watchedAt": "2023-05-15T14:30:00Z",
-    "updatedAt": "2023-05-15T14:30:00Z"
-  }
-}
-```
-
-**Security Requirements:**
-
-**Security Requirements:**
-- User must be authenticated
-
-## Assignments
-
-### Endpoints
-
-#### Create Assignment (Admin Only)
-
-```
-POST /assignments
-```
-
-**Authentication Required:** Yes (Admin only)
-
-**Purpose:** Create a new assignment for a specific video
-
-**Request Body for Regular Assignment:**
-
-```json
-{
-  "title": "JavaScript DOM Manipulation",
-  "description": "Create a web page that demonstrates DOM manipulation techniques",
-  "videoId": 1,
-  "dueDate": "2023-07-15T23:59:59Z"
-}
-```
-
-**Request Body for MCQ Assignment:**
-
-```json
-{
-  "title": "JavaScript Fundamentals Quiz",
-  "description": "Test your knowledge of JavaScript fundamentals",
-  "videoId": 1,
-  "dueDate": "2023-07-15T23:59:59Z",
-  "isMCQ": true,
-  "passingScore": 70.0,
-  "questions": [
-    {
-      "text": "Which of the following is a primitive data type in JavaScript?",
-      "options": ["Array", "Object", "String", "Function"],
-      "correctOption": 2,
-      "explanation": "String is a primitive data type in JavaScript",
-      "points": 1
-    },
-    {
-      "text": "What does the '====' operator do in JavaScript?",
-      "options": ["Assigns a value", "Compares values and types", "Compares only values", "Logical AND"],
-      "correctOption": 1,
-      "explanation": "The strict equality operator (===) checks both value and type",
-      "points": 2
-    }
-  ]
-}
-```
-
-**Response for Regular Assignment:**
-
-```json
-{
-  "message": "Assignment created successfully",
-  "assignment": {
-    "id": 1,
-    "title": "JavaScript DOM Manipulation",
-    "description": "Create a web page that demonstrates DOM manipulation techniques",
-    "videoId": 1,
-    "dueDate": "2023-07-15T23:59:59Z",
-    "isMCQ": false,
-    "createdAt": "2023-06-01T10:00:00Z",
-    "updatedAt": "2023-06-01T10:00:00Z"
-  }
-}
-```
-
-**Response for MCQ Assignment:**
-
-```json
-{
-  "message": "MCQ assignment created successfully",
-  "assignment": {
-    "id": 2,
-    "title": "JavaScript Fundamentals Quiz",
-    "description": "Test your knowledge of JavaScript fundamentals",
-    "videoId": 1,
-    "dueDate": "2023-07-15T23:59:59Z",
-    "isMCQ": true,
-    "passingScore": 70.0,
-    "createdAt": "2023-06-01T10:00:00Z",
-    "updatedAt": "2023-06-01T10:00:00Z",
-    "questions": [
-      {
-        "id": 1,
-        "assignmentId": 2,
-        "text": "Which of the following is a primitive data type in JavaScript?",
-        "options": ["Array", "Object", "String", "Function"],
-        "correctOption": 2,
-        "explanation": "String is a primitive data type in JavaScript",
-        "points": 1
-      },
-      {
-        "id": 2,
-        "assignmentId": 2,
-        "text": "What does the '====' operator do in JavaScript?",
-        "options": ["Assigns a value", "Compares values and types", "Compares only values", "Logical AND"],
-        "correctOption": 1,
-        "explanation": "The strict equality operator (===) checks both value and type",
-        "points": 2
-      }
-    ]
-  }
-}
-```
-
-**Security Requirements:**
-- User must be authenticated
-- User must have admin role
-
-#### Get Assignment
-
-```
-GET /assignments/:id
-```
-
-**Authentication Required:** Yes
-
-**Purpose:** Get assignment details
-
-**Response for Regular Assignment:**
-
-```json
-{
-  "id": 1,
-  "title": "JavaScript DOM Manipulation",
-  "description": "Create a web page that demonstrates DOM manipulation techniques",
-  "videoId": 1,
-  "dueDate": "2023-07-15T23:59:59Z",
-  "isMCQ": false,
-  "createdAt": "2023-06-01T10:00:00Z",
-  "updatedAt": "2023-06-01T10:00:00Z",
-  "video": {
-    "id": 1,
-    "title": "Variables and Data Types",
-    "courseId": 1
-  },
-  "hasSubmitted": true,
-  "submission": {
-    "id": 3,
-    "status": "PENDING",
-    "submittedAt": "2023-06-10T14:30:00Z",
-    "grade": null,
-    "feedback": null
-  }
-}
-```
-
-**Response for MCQ Assignment:**
-
-```json
-{
-  "id": 2,
-  "title": "JavaScript Fundamentals Quiz",
-  "description": "Test your knowledge of JavaScript fundamentals",
-  "videoId": 1,
-  "dueDate": "2023-07-15T23:59:59Z",
-  "isMCQ": true,
-  "passingScore": 70.0,
-  "createdAt": "2023-06-01T10:00:00Z",
-  "updatedAt": "2023-06-01T10:00:00Z",
-  "video": {
-    "id": 1,
-    "title": "Variables and Data Types",
-    "courseId": 1
-  },
-  "AssignmentQuestion": [
-    {
-      "id": 1,
-      "text": "Which of the following is a primitive data type in JavaScript?",
-      "options": ["Array", "Object", "String", "Function"],
-      "correctOption": 2,
-      "explanation": "String is a primitive data type in JavaScript",
-      "points": 1,
-      "userAnswer": {
-        "selectedOption": 2,
-        "isCorrect": true
-      }
-    },
-    {
-      "id": 2,
-      "text": "What does the '====' operator do in JavaScript?",
-      "options": ["Assigns a value", "Compares values and types", "Compares only values", "Logical AND"],
-      "correctOption": 1,
-      "explanation": "The strict equality operator (===) checks both value and type",
-      "points": 2,
-      "userAnswer": null
-    }
-  ],
-  "hasSubmitted": true,
-  "submission": {
-    "id": 4,
-    "status": "GRADED",
-    "submittedAt": "2023-06-10T14:30:00Z",
-    "grade": 85.5,
-    "mcqScore": 85.5,
-    "gradedAt": "2023-06-10T14:30:00Z"
-  }
-}
-```
-
-**Security Requirements:**
-- User must be authenticated
-- User must be enrolled in the course or be an admin
-
-#### Get Video Assignments
-
-```
-GET /assignments/video/:videoId
-```
-
-**Authentication Required:** Yes
-
-**Purpose:** Get all assignments for a specific video
-
-**Response:**
-
-```json
-{
-  "assignments": [
-    {
-      "id": 1,
-      "title": "JavaScript DOM Manipulation",
-      "description": "Create a web page that demonstrates DOM manipulation techniques",
-      "videoId": 1,
-      "dueDate": "2023-07-15T23:59:59Z",
-      "isMCQ": false,
-      "createdAt": "2023-06-01T10:00:00Z",
-      "hasSubmitted": true,
-      "submission": {
-        "id": 3,
-        "status": "PENDING",
-        "submittedAt": "2023-06-10T14:30:00Z",
-        "grade": null
-      }
-    },
-    {
-      "id": 2,
-      "title": "JavaScript Fundamentals Quiz",
-      "description": "Test your knowledge of JavaScript fundamentals",
-      "videoId": 1,
-      "dueDate": "2023-07-15T23:59:59Z",
-      "isMCQ": true,
-      "passingScore": 70.0,
-      "createdAt": "2023-06-01T10:00:00Z",
-      "hasSubmitted": false,
-      "submission": null
-    }
-  ]
-}
-```
-
-**Security Requirements:**
-- User must be authenticated
-- User must be enrolled in the course or be an admin
-
-#### Submit Assignment
-
-```
-POST /assignments/submit
-```
-
-**Authentication Required:** Yes
-
-**Purpose:** Submit completed assignment (works for both regular and MCQ assignments)
-
-**Request Body for Regular Assignment:**
-
-```json
-{
-  "assignmentId": 1,
-  "content": "Here is my solution to the DOM manipulation assignment...",
-  "fileUrl": "/uploads/assignments/user1/assignment1/dom-manipulation.zip"
-}
-```
-
-**Request Body for MCQ Assignment:**
-
-```json
-{
-  "assignmentId": 2,
-  "answers": [
-    {
-      "questionId": 1,
-      "selectedOption": 2
-    },
-    {
-      "questionId": 2,
-      "selectedOption": 1
-    }
-  ]
-}
-```
-
-**Response for Regular Assignment:**
-
-```json
-{
-  "message": "Assignment submitted successfully",
-  "submission": {
-    "id": 3,
-    "userId": 1,
-    "assignmentId": 1,
-    "content": "Here is my solution to the DOM manipulation assignment...",
-    "fileUrl": "/uploads/assignments/user1/assignment1/dom-manipulation.zip",
-    "status": "PENDING",
-    "submittedAt": "2023-06-10T14:30:00Z"
-  }
-}
-```
-
-**Response for MCQ Assignment:**
-
-```json
-{
-  "message": "MCQ assignment passed",
-  "submission": {
-    "id": 4,
-    "userId": 1,
-    "assignmentId": 2,
-    "mcqScore": 85.5,
-    "status": "GRADED",
-    "grade": 85.5,
-    "submittedAt": "2023-06-10T14:30:00Z",
-    "gradedAt": "2023-06-10T14:30:00Z"
-  },
-  "mcqScore": 85.5,
-  "passed": true,
-  "passingScore": 70.0
-}
-```
-
-**Security Requirements:**
-- User must be authenticated
-- User must be enrolled in the course
-- Assignment must not be past due date (unless late submissions are allowed)
-
-#### Grade Assignment (Admin Only)
-
-```
-POST /assignments/submissions/:submissionId/grade
-```
-
-**Authentication Required:** Yes (Admin only)
-
-**Purpose:** Grade a student's assignment submission (for non-MCQ assignments)
-
-**Request Body:**
-
-```json
-{
-  "grade": 92,
-  "feedback": "Excellent work! Your DOM manipulation techniques were well implemented and clearly documented. For future assignments, consider adding error handling to your JavaScript functions.",
-  "status": "GRADED"
-}
-```
-
-**Response:**
-
-```json
-{
-  "message": "Submission graded successfully",
-  "submission": {
-    "id": 3,
-    "assignmentId": 1,
-    "userId": 1,
-    "status": "GRADED",
-    "submittedAt": "2023-06-10T14:30:00Z",
-    "gradedAt": "2023-06-12T09:45:00Z",
-    "grade": 92,
-    "feedback": "Excellent work! Your DOM manipulation techniques were well implemented and clearly documented. For future assignments, consider adding error handling to your JavaScript functions."
-  }
-}
-```
-
-**Security Requirements:**
-- User must be authenticated
-- User must have admin role
-
-#### Get Assignment Submissions (Admin Only)
-
-```
-GET /assignments/:assignmentId/submissions
-```
-
-**Authentication Required:** Yes (Admin only)
-
-**Purpose:** Get all submissions for a specific assignment
-
-**Response:**
-
-```json
-{
-  "assignmentId": 1,
-  "title": "JavaScript DOM Manipulation",
-  "submissionsCount": 2,
-  "submissions": [
-    {
-      "id": 3,
-      "assignmentId": 1,
-      "userId": 1,
-      "status": "GRADED",
-      "submittedAt": "2023-06-10T14:30:00Z",
-      "gradedAt": "2023-06-12T09:45:00Z",
-      "grade": 92,
-      "feedback": "Excellent work!",
-      "user": {
-        "id": 1,
-        "name": "John Doe",
-        "email": "john@example.com"
-      }
-    },
-    {
-      "id": 4,
-      "assignmentId": 1,
-      "userId": 2,
-      "status": "PENDING",
-      "submittedAt": "2023-06-11T10:15:00Z",
-      "gradedAt": null,
-      "grade": null,
-      "feedback": null,
-      "user": {
-        "id": 2,
-        "name": "Jane Smith",
-        "email": "jane@example.com"
-      }
-    }
-  ]
-}
-```
-
-**Security Requirements:**
-- User must be authenticated
-- User must have admin role
-
-#### Get User Submissions
-
-```
-GET /assignments/user/submissions
-```
-
-**Authentication Required:** Yes
-
-**Purpose:** Get all submissions by the current user
-
-**Response:**
-
-```json
-{
-  "submissionsCount": 2,
-  "submissions": [
-    {
-      "id": 3,
-      "assignmentId": 1,
-      "userId": 1,
-      "status": "GRADED",
-      "submittedAt": "2023-06-10T14:30:00Z",
-      "gradedAt": "2023-06-12T09:45:00Z",
-      "grade": 92,
-      "feedback": "Excellent work!",
-      "assignment": {
-        "id": 1,
-        "title": "JavaScript DOM Manipulation",
-        "description": "Create a web page that demonstrates DOM manipulation techniques",
-        "isMCQ": false,
-        "video": {
-          "id": 1,
-          "title": "Variables and Data Types",
-          "courseId": 1
-        }
-      }
-    },
-    {
-      "id": 4,
-      "assignmentId": 2,
-      "userId": 1,
-      "status": "GRADED",
-      "submittedAt": "2023-06-11T10:15:00Z",
-      "gradedAt": "2023-06-11T10:15:00Z",
-      "grade": 85.5,
-      "mcqScore": 85.5,
-      "assignment": {
-        "id": 2,
-        "title": "JavaScript Fundamentals Quiz",
-        "description": "Test your knowledge of JavaScript fundamentals",
-        "isMCQ": true,
-        "video": {
-          "id": 1,
-          "title": "Variables and Data Types",
-          "courseId": 1
-        }
-      }
-    }
-  ]
-}
-```
-
-**Security Requirements:**
-- User must be authenticated
-- User must have admin role
-
-#### Get User Assignment Submissions
-
-```
-GET /assignments/submissions
-```
-
-**Authentication Required:** Yes
-
-**Purpose:** Get all assignment submissions for the authenticated user
-
-**Response:**
-
-```json
-[
-  {
-    "id": 3,
-    "assignmentId": 1,
-    "assignmentTitle": "JavaScript DOM Manipulation",
-    "courseId": 1,
-    "courseTitle": "Introduction to JavaScript",
-    "status": "graded",
-    "submittedAt": "2023-06-10T14:30:00Z",
-    "gradedAt": "2023-06-12T09:45:00Z",
-    "grade": 92,
-    "totalPoints": 100,
-    "feedback": "Excellent work! Your DOM manipulation techniques were well implemented and clearly documented. For future assignments, consider adding error handling to your JavaScript functions."
-  },
-  {
-    "id": 5,
-    "assignmentId": 2,
-    "assignmentTitle": "Build a Calculator",
-    "courseId": 1,
-    "courseTitle": "Introduction to JavaScript",
-    "status": "submitted",
-    "submittedAt": "2023-06-20T16:15:00Z",
-    "gradedAt": null,
-    "grade": null,
-    "totalPoints": 150,
-    "feedback": null
-  }
-]
-```
-
-**Security Requirements:**
-- User must be authenticated
-
-## Quizzes
-
-### Endpoints
-
-#### Create Quiz (Admin Only)
-
-```
-POST /quizzes
-```
-
-**Authentication Required:** Yes (Admin only)
-
-**Purpose:** Create a new quiz for a course or video
-
-**Request Body:**
-
-```json
-{
-  "title": "JavaScript Basics Quiz",
-  "description": "Test your knowledge of JavaScript fundamentals",
-  "isFinal": false,
-  "videoId": 1,
-  "passingScore": 70,
-  "questions": [
-    {
-      "text": "Which of the following is a primitive data type in JavaScript?",
-      "options": ["Array", "Object", "String", "Function"],
-      "correctOption": 2,
-      "explanation": "String is a primitive data type in JavaScript",
-      "points": 1
-    },
-    {
-      "text": "What does the '===' operator do in JavaScript?",
-      "options": [
-        "Assigns a value", 
-        "Compares values and types", 
-        "Compares only values", 
-        "Logical AND"
-      ],
-      "correctOption": 1,
-      "explanation": "The strict equality operator (===) checks both value and type",
-      "points": 2
-    }
-  ]
-}
-```
-
-#### Get All User Quiz Results
-
-```
-GET /quizzes/user/results
-```
-
-**Authentication Required:** Yes
-
-**Purpose:** Retrieve all quiz results for the authenticated user
-
-**Response:**
-
-```json
-{
-  "message": "Quiz results retrieved successfully",
-  "count": 2,
-  "results": [
-    {
-      "quizId": 1,
-      "title": "JavaScript Basics Quiz",
-      "description": "Test your knowledge of JavaScript fundamentals",
-      "isFinal": false,
-      "passingScore": 70,
-      "courseId": 1,
-      "courseTitle": "Introduction to JavaScript",
-      "videoId": 1,
-      "videoTitle": "Variables and Data Types",
-      "submittedAt": "2023-06-15T14:30:00Z",
-      "correctAnswers": 2,
-      "totalQuestions": 2,
-      "earnedPoints": 3,
-      "totalPoints": 3,
-      "score": 100,
-      "passed": true,
-      "answers": [
-        {
-          "questionId": 1,
-          "questionText": "Which of the following is a primitive data type in JavaScript?",
-          "selectedOption": 2,
-          "correctOption": 2,
-          "isCorrect": true,
-          "points": 1,
-          "explanation": "String is a primitive data type in JavaScript"
-        },
-        {
-          "questionId": 2,
-          "questionText": "What does the '===' operator do in JavaScript?",
-          "selectedOption": 1,
-          "correctOption": 1,
-          "isCorrect": true,
-          "points": 2,
-          "explanation": "The strict equality operator (===) checks both value and type"
-        }
-      ]
-    },
-    {
-      "quizId": 2,
-      "title": "React Fundamentals Quiz",
-      "description": "Test your knowledge of React",
-      "isFinal": true,
-      "passingScore": 70,
-      "courseId": 2,
-      "courseTitle": "Advanced React",
-      "videoId": null,
-      "videoTitle": null,
-      "submittedAt": "2023-06-10T11:15:00Z",
-      "correctAnswers": 3,
-      "totalQuestions": 5,
-      "earnedPoints": 6,
-      "totalPoints": 10,
-      "score": 60,
-      "passed": false,
-      "answers": [
-        // Array of answer objects similar to above
-      ]
-    }
-  ]
-}
-```
-
-**Response:**
-
-```json
-{
-  "message": "Quiz created successfully",
-  "quiz": {
-    "id": 1,
-    "title": "JavaScript Basics Quiz",
-    "description": "Test your knowledge of JavaScript fundamentals",
-    "isFinal": false,
-    "passingScore": 70,
-    "videoId": 1,
-    "courseId": null,
-    "createdAt": "2023-05-20T09:00:00Z",
-    "updatedAt": "2023-05-20T09:00:00Z",
-    "questions": [
-      {
-        "id": 1,
-        "text": "Which of the following is a primitive data type in JavaScript?",
-        "options": ["Array", "Object", "String", "Function"],
-        "points": 1
-      },
-      {
-        "id": 2,
-        "text": "What does the '===' operator do in JavaScript?",
-        "options": [
-          "Assigns a value", 
-          "Compares values and types", 
-          "Compares only values", 
-          "Logical AND"
-        ],
-        "points": 2
-      }
-    ]
-  }
-}
-```
-
-**Security Requirements:**
-- User must be authenticated
-- User must have admin role
-
-#### Get Quiz
-
-```
-GET /quizzes/:id
-```
-
-**Authentication Required:** Yes
-
-**Purpose:** Get quiz details and questions (without correct answers)
-
-**Response:**
-
-```json
-{
-  "id": 1,
-  "title": "JavaScript Basics Quiz",
-  "description": "Test your knowledge of JavaScript fundamentals",
-  "isFinal": false,
-  "passingScore": 70,
-  "videoId": 1,
-  "courseId": null,
-  "video": {
-    "id": 1,
-    "title": "Variables and Data Types",
-    "courseId": 1
-  },
-  "questions": [
-    {
-      "id": 1,
-      "text": "Which of the following is a primitive data type in JavaScript?",
-      "options": ["Array", "Object", "String", "Function"],
-      "points": 1
-    },
-    {
-      "id": 2,
-      "text": "What does the '===' operator do in JavaScript?",
-      "options": [
-        "Assigns a value", 
-        "Compares values and types", 
-        "Compares only values", 
-        "Logical AND"
-      ],
-      "points": 2
-    }
-  ]
-}
-```
-
-**Security Requirements:**
-- User must be authenticated
-- For lecture quizzes, user must have completed the associated video
-- For final exams, user must have completed all videos in the course
-
-#### Submit Quiz Answers
-
-```
-POST /quizzes/submit
-```
-
-**Authentication Required:** Yes
-
-**Purpose:** Submit answers for a quiz and get results
-
-**Request Body:**
-
-```json
-{
-  "quizId": 1,
-  "answers": [
-    {
-      "questionId": 1,
-      "selectedOption": 2
-    },
-    {
-      "questionId": 2,
-      "selectedOption": 1
-    }
-  ]
-}
-```
-
-**Response:**
-
-```json
-{
-  "message": "Quiz answers submitted successfully",
-  "quizId": 1,
-  "correctAnswers": 2,
-  "totalQuestions": 2,
-  "score": 100,
-  "passingScore": 70,
-  "passed": true,
-  "results": [
-    {
-      "questionId": 1,
-      "selectedOption": 2,
-      "isCorrect": true
-    },
-    {
-      "questionId": 2,
-      "selectedOption": 1,
-      "isCorrect": true
-    }
-  ]
-}
-```
-
-**Security Requirements:**
-- User must be authenticated
-- User must be enrolled in the course
-- User must not have already taken the quiz
-
-#### Get Quiz Results
-
-```
-GET /quizzes/:quizId/results
-```
-
-**Authentication Required:** Yes
-
-**Purpose:** Get detailed results for a previously taken quiz
-
-**Response:**
-
-```json
-{
-  "quizId": 1,
-  "title": "JavaScript Basics Quiz",
-  "correctAnswers": 2,
-  "totalQuestions": 2,
-  "score": 100,
-  "passingScore": 70,
-  "passed": true,
-  "submittedAt": "2023-05-20T10:15:00Z",
-  "results": [
-    {
-      "questionId": 1,
-      "questionText": "Which of the following is a primitive data type in JavaScript?",
-      "selectedOption": 2,
-      "correctOption": 2,
-      "isCorrect": true,
-      "points": 1,
-      "explanation": "String is a primitive data type in JavaScript"
-    },
-    {
-      "questionId": 2,
-      "questionText": "What does the '===' operator do in JavaScript?",
-      "selectedOption": 1,
-      "correctOption": 1,
-      "isCorrect": true,
-      "points": 2,
-      "explanation": "The strict equality operator (===) checks both value and type"
-    }
-  ]
-}
-```
-
-**Security Requirements:**
-- User must be authenticated
-- User must have taken the quiz
-
-#### Get Course Quizzes
-
-```
-GET /quizzes/course/:courseId
-```
-
-**Authentication Required:** Yes
-
-**Purpose:** Get all quizzes for a course with user's completion status
-
-**Response:**
-
-```json
-[
-  {
-    "id": 1,
-    "title": "JavaScript Basics Quiz",
-    "description": "Test your knowledge of JavaScript fundamentals",
-    "isFinal": false,
-    "passingScore": 70,
-    "videoId": 1,
-    "videoTitle": "Variables and Data Types",
-    "questionCount": 2,
-    "createdAt": "2023-05-20T09:00:00Z",
-    "status": {
-      "taken": true,
-      "score": 100,
-      "passed": true,
-      "submittedAt": "2023-05-20T10:15:00Z"
-    }
-  },
-  {
-    "id": 2,
-    "title": "JavaScript Final Exam",
-    "description": "Comprehensive test of all JavaScript concepts",
-    "isFinal": true,
-    "passingScore": 75,
-    "videoId": null,
-    "videoTitle": null,
-    "questionCount": 10,
-    "createdAt": "2023-05-21T11:30:00Z",
-    "status": {
-      "taken": false,
-      "score": null,
-      "passed": null
-    }
-  }
-]
-```
-
-**Security Requirements:**
-- User must be authenticated
-
-## Error Responses
-
-All endpoints may return the following error responses:
-
-### 400 Bad Request
-
-```json
-{
-  "message": "Invalid request parameters",
-  "errors": [
-    "Email is required",
-    "Password must be at least 8 characters"
-  ]
-}
-```
-
-### 401 Unauthorized
-
-```json
-{
-  "message": "Authentication required"
-}
-```
-
-### 403 Forbidden
-
-```json
-{
-  "message": "You do not have permission to access this resource"
-}
-```
-
-### 404 Not Found
-
-```json
-{
-  "message": "Resource not found"
-}
-```
-
-### 500 Internal Server Error
-
-```json
-{
-  "message": "An unexpected error occurred"
-}
-```
+### `POST /auth/register`
+Public (session-preserving, see §2). Rate limit 20/15min.
+- **Body**: `email`, `password` (≥8), `name`, `phoneNumber`, `grade` (`FIRST_SECONDARY` | `SECOND_SECONDARY` | `THIRD_SECONDARY`)
+- **201** `{ success, message, data: { user: { id, email, name, phoneNumber, grade, role } } }` + login cookies only for unauthenticated callers
+- **400** per-field validation · **409** `An account with these details already exists.` (duplicate email **or** phone)
+
+### `POST /auth/logout`
+Public. Reads `refreshToken` cookie to null out the DB row.
+- **200** `{ success, message: 'Logged out successfully.' }` + clears both cookies
+
+### `POST /auth/refresh-token`
+Public. Rate limit 60/15min. **Cookie-only** — `req.body.refreshToken` is never accepted.
+- **200** `{ success, message: 'Token refreshed successfully.' }` + new `accessToken` + rotated `refreshToken` cookies
+- **401** `Refresh token not provided.` (no cookie) / `Invalid refresh token.` · **403** `Invalid or revoked refresh token.` (access-type token, unknown hash, or reuse detection)
+
+---
+
+## 4. Users (`/user`)
+
+### `GET /user/me`
+Any authenticated user.
+- **200** `{ success, data: { id, name, email, phoneNumber, grade, role, lastLoginAt, createdAt, features: { notifications, aiGrader } } }`
+- **404** `User not found.`
+
+### `GET /user/me/achievements`
+Any authenticated user.
+- **200** `{ success, data: { totals: { coursesEnrolled, coursesCompleted, videosWatched, videosTotal, examsTaken, examsPassed, averageScore }, courses: [{ course: { id, title, description, thumbnail, grade }, progress: { watched, total, percent, completed }, exams: [{ videoId, videoTitle, quizId, quizTitle, passingScore, timeLimitSec, maxAttempts, bestScore, passed, attemptsUsed }] }] } }`
+
+### `GET /user/` (list) — ADMIN
+- **Query**: `page` (≥1), `limit` (1..100, default 20), `role` (`STUDENT`|`ADMIN`), `grade`, `search` (name/email, case-insensitive), `sort` (`name`|`createdAt`, optional leading `-`)
+- **200** `{ success, data: [user...], meta: { total, page, limit, totalPages } }`
+
+### `GET /user/:userId` — ADMIN
+- **200** `{ success, data: { id, name, email, phoneNumber, grade, role, lastLoginAt, createdAt } }`
+- **400** `Invalid user ID.` (non-safe-int ≤ 0) · **404** `User not found.`
+
+### `PUT /user/:userId`
+Authenticated (self **or** ADMIN).
+- **Body** (all optional): `name`, `email`, `password` (≥8), `currentPassword` (required for self password/email change), `grade` (**admin-only**), `phoneNumber` (**admin-only**)
+- **200** `{ success, message, data: { id, name, email, phoneNumber, grade, role, lastLoginAt, createdAt } }`
+- **401** `Current password is required to change password or email.` / `Current password is incorrect.` · **403** `You do not have permission to update this user's data.` · **404** · **409** `Email or phone number already in use.`
+
+### `DELETE /user/:userId` — ADMIN
+- **200** `{ success, message: 'User deleted successfully.' }`
+- **400** `Invalid user ID.` / `Cannot delete your own admin account.` · **404** `User not found.` · **409** `User owns courses. Move or delete their courses before deleting the user.`
+
+---
+
+## 5. Courses (`/courses`)
+
+### `GET /courses/` — authenticated
+- **Query**: `page`, `limit` (1..100, default 20), `search` (title)
+- **200** `{ success, data: [{ id, title, description, price, grade, category, thumbnail, teacherId, teacher: { id, name, email }, videos: [{ id, title, duration }], _count: { videos, enrollments } }], meta: { total, page, limit, totalPages } }` (90s cache)
+
+### `GET /courses/enrolled` — authenticated
+- **200** `{ success, data: [{ id, createdAt, course: <full course row, absolute thumbnail> }] }`
+
+### `GET /courses/:id` — authenticated
+- **200** `{ success, data: { course: { id, title, description, price, grade, category, thumbnail, teacher, teacherId, createdAt, updatedAt }, videos: [{ id, title, thumbnail, duration, position }], enrollment: <Enrollment row or null>, progress: [{ videoId, completed, watchedAt }] } }` (60s per-user cache)
+- **400** `Invalid course ID` · **404** `Course not found`
+
+### `POST /courses/` — ADMIN
+- **Body**: `title`*, `description`*, `price`*, `grade`* (enum), `category?`, `thumbnail?`
+- **201** `{ success, message: 'Course created successfully', data: course }` (attributes to `req.user.id`; falls back to first ADMIN for script invocation)
+- **400** `Title, description, price, and grade are required` / `Invalid price value` / `Invalid grade value`
+
+### `PUT /courses/:id` — ADMIN
+- **Body**: any subset of `title`, `description`, `price`, `grade`, `category`, `thumbnail`
+- **200** `{ success, message: 'Course updated successfully', data: course }`
+- **400** / **404** `Course not found`
+
+### `DELETE /courses/:id` — ADMIN
+- Cascades videos/enrollments/certificates, disconnects learning paths, best-effort **remote Bunny video + Supabase image cleanup**, invalidates gate caches.
+- **200** `{ success, message: 'Course deleted successfully' }` · **400** invalid ID · **404**
+### `PUT /courses/:courseId/reorder` — ADMIN
+
+Reorder Bunny videos in the course. See §11.
+
+---
+
+## 6. Enrollments (`/enroll`, `/admin/enrollments`)
+
+Payment is disabled — every enrollment is auto-paid (`isPaid: true`).
+
+### `POST /enroll/` — authenticated
+- **Body**: `courseId` (int; string form accepted)
+- **201** `{ success, message: 'Enrollment successful!', data: { enrollment: { id, userId, courseId, isPaid: true, paymentDate, startedAt, lastAccess, createdAt } } }`
+- **200** existing unpaid row upgraded to active · **409** `Already enrolled in this course.` (pre-check + P2002 race backstop) · **404** `Course not found.`
+
+### `POST /enroll/status` — authenticated
+- **Body**: `courseId`
+- **200** `{ success, data: { enrolled: boolean, enrollment: <row or null> } }`
+
+### `POST /admin/enrollments` — ADMIN
+- **Body**: `userId`, `courseId`
+- **201** `{ success, message: 'Student enrolled successfully.', data: { enrollment } }` (auto-paid)
+- **400** `userId and courseId are required.` · **404** `User not found.` / `Course not found.` · **409** `Student is already enrolled in this course.`
+
+### `DELETE /admin/enrollments/:id` — ADMIN
+- **200** `{ success, message: 'Enrollment removed successfully.' }` (FK-safe; invalidates gate + course caches) · **400** · **404**
+
+### `GET /admin/enrollments` — ADMIN
+- **Query**: `page`, `limit` (1..100, default 20), `userId`, `courseId`, `isPaid`, `isCompleted`, `search` (student name/email or course title)
+- **200** `{ success, data: [{ id, student: { id, name, email, grade }, course: { id, title, grade }, isPaid, paymentDate, progress, isCompleted, completedAt, startedAt, lastAccess, createdAt }], meta: { total, page, limit, totalPages } }`
+
+---
+
+## 7. Payments (`/payments`) — disabled
+
+Legacy raw envelope. **Disabled in production.**
+
+### `POST /payments/course/:courseId` — authenticated
+- **Production**: **403** `{ success: false, error: 'Payment processing is not available. Please contact support.' }`
+- **Otherwise**: **200** raw `{ message: 'Payment processed successfully', payment, enrollment }` or `{ message: 'Course was already paid for', enrollment }`
+- **400** / **404** / **500** raw `{ error }`
+
+### `GET /payments/history` — authenticated
+- **200** raw `{ payments: [...], paidCourses: [{ ...enrollment, course: { id, title, thumbnail, price } }] }`
+
+---
+
+## 8. Video Progress (`/progress`)
+
+Operates on **`BunnyVideo`** IDs (the modern video system). Success bodies use the legacy raw shape; errors carry structured codes.
+
+### `POST /progress/complete` — authenticated
+- **Body**: `videoId` (BunnyVideo id)
+- **200** raw `{ message: 'Video marked as completed', videoProgress: { userId, bunnyVideoId, completed: true, watchedAt } }` — upserts progress, syncs `Enrollment.progress` %/`isCompleted`, invalidates course/gate/meta caches
+- **Gate**: video must be the current unlocked index (first in course, or previous completed + quiz passed + assignment submitted). See §17.
+- **400** `Invalid video ID format` · **403** `{ error, code: 'NOT_ENROLLED' }` / `{ error, code: 'VIDEO_NOT_UNLOCKED', previousVideoId }` · **404** `{ error, code: 'VIDEO_NOT_FOUND' }`
+
+### `GET /progress/course/:courseId` — authenticated
+- **200** raw `{ courseId, totalVideos, completedVideos, videos: [{ id, title, duration, completed, watchedAt }] }` (enrollment-gated for students)
+- **403** `{ error, code: 'NOT_ENROLLED' }` for non-enrolled students
+
+### `GET /progress/:videoId` — authenticated
+- **200** raw `{ videoId, completed: boolean, watchedAt: <date|null> }`
+- **403** `{ error, code: 'NOT_ENROLLED' }` when not enrolled
+
+---
+
+## 9. Assignments (`/assignments`)
+
+Legacy raw envelope on successes. Assignment gate fields are stripped for students who have not submitted (answer-key protection).
+
+### `POST /assignments/` — ADMIN
+- **Body**: `title`*, `videoId`* (legacy `Video` id), `description?`, `dueDate?` (date string), `isMCQ?` (bool), `passingScore?` (MCQ), `questions?` (MCQ: `[{ text, options, correctOption, explanation, points }]`)
+- **201** MCQ: `{ message: 'MCQ assignment created successfully', assignment }`; text: `{ message: 'Assignment created successfully', assignment }`
+- **400** / **404** `Video not found`
+
+### `POST /assignments/submit` — authenticated
+- **Body**: `assignmentId`*, and either `content` (text), `fileUrl` (http(s), ≤2048 chars), or `answers` (MCQ: `[{ questionId, selectedOption }]`)
+- **200** MCQ: `{ message: 'MCQ assignment passed|failed', submission, mcqScore, passed, passingScore }` (auto-graded → `GRADED`); text: `{ message: 'Assignment submitted successfully', submission }` (→ `PENDING`)
+- **400** due-date passed / already graded → not resubmittable · **403** `You must be enrolled in this course to submit assignments` · **404**
+
+### `POST /assignments/submissions/:submissionId/grade` — ADMIN
+- **Body**: `grade`* (0–100), `feedback?`, `status?` (default `GRADED`)
+- **200** `{ message: 'Submission graded successfully', submission }`
+
+### `GET /assignments/user/submissions` — authenticated
+- **200** `{ submissionsCount, submissions: [{ ...submission, assignment: { ... , video: { id, title, courseId } } }] }`
+
+### `GET /assignments/video/:videoId` — authenticated (legacy videos only)
+- **200** `{ assignments: [{ ...assignment, hasSubmitted, submission: { id, status, grade, submittedAt } | null }] }` · **403** plain enrollment message
+
+### `GET /assignments/course/:courseId` — authenticated
+- **200** `{ course: { id, title }, assignments: [{ ...assignment, video: { id, title } }] }`
+
+### `GET /assignments/:assignmentId/submissions` — ADMIN
+- **200** `{ assignmentId, title, submissionsCount, submissions: [{ ...submission, user: { id, name, email } }] }`
+
+### `GET /assignments/:assignmentId/status` — authenticated
+- **200** not-submitted: `{ assignmentId, title, submitted: false, status: 'NOT_SUBMITTED', message, dueDate, isPastDue }`
+- **200** submitted: `{ assignmentId, title, submitted: true, submittedAt, status, grade, feedback, isMCQ, mcq: { score, passingScore, passed } | null, gradedAt, dueDate, isPastDue }`
+
+### `GET /assignments/:id` — authenticated
+- **200** raw `{ ...assignment, hasSubmitted, submission }`. **`correctOption`/`explanation` are stripped** for students who have not submitted (ADMIN and post-submit see full). MCQs include per-question `userAnswer: { selectedOption, isCorrect }`.
+
+---
+
+## 10. Quizzes (`/quizzes`)
+
+SurveyJS lifecycle, modern `{ success, data }` envelope. `maxAttempts` default **3** (validated 1–10). Attempt statuses: `IN_PROGRESS | SUBMITTED | GRADING | GRADED | EXPIRED`. **EXPIRED attempts never consume a retake.**
+
+### `GET /quizzes/videos/:videoId/meta` — authenticated
+- **200 (no quiz)** `{ success, data: { exists: false, videoId, videoTitle } }`
+- **200 (quiz)** `{ success, data: { exists: true, quizId, videoId, videoTitle, title, timeLimitSec, passingScore, maxAttempts, attemptsUsed, atMaxAttempts, unlocked, attempted, totalAttempts, passed, bestScore, totalQuestions, totalPoints, inProgressAttempt: { id, attemptNumber, deadlineAt } | null } }` (30s per-user cache)
+- **403** `You are not enrolled in this course` · **404** `Video not found`
+
+### `POST /quizzes/videos/:videoId/start` — authenticated
+- **200** `{ success, data: { attemptId, attemptNumber, status: 'IN_PROGRESS', startedAt, deadlineAt, resumed: boolean, responses: <saved or null>, quiz: { id, videoId, title, timeLimitSec, passingScore, maxAttempts, surveyJson } } }` — `answerKey` stripped. Resumes `IN_PROGRESS`, expires past-deadline attempts (+10s grace), auto-submits stale untimed attempts (>30 min).
+- **409** `{ ..., code: 'ALREADY_PASSED' }` / `{ ..., code: 'MAX_ATTEMPTS_REACHED' }` · **403** not enrolled / `You must complete the video before taking the quiz` · **404** `No quiz found for this video`
+
+### `PATCH /quizzes/attempts/:id/save` — authenticated
+- **Body**: `responses` (object map, ≤256KB serialized)
+- **200** `{ success, data: { attemptId, saved: true } }`
+- **409** `Attempt is already <status>` (not re-saveable after submit)
+
+### `POST /quizzes/attempts/:id/submit` — authenticated
+- **Body**: `answers` (object map), `autoSubmitted?` (bool)
+- **200** `{ success, data: { attemptId, status: 'GRADED' | 'GRADING', earnedPoints, totalPoints, scorePercent, hasEssays, perQuestion: [{ qName, isCorrect, earned, max }] } }` — MCQs auto-graded at submit; essays → `GRADING` (+ AI-grader enqueue if enabled, notification via `notifyGradedSafe`).
+- **403** `Submission deadline has passed. Attempt expired.` · **409** already-submitted
+
+### `GET /quizzes/attempts/:id/result` — owner or ADMIN
+- **200** `{ success, data: { attemptId, attemptNumber, status, startedAt, submittedAt, autoSubmitted, earnedPoints, totalPoints, scorePercent, passed, passingScore, questions: [{ name, type: 'radiogroup'|'comment', studentAnswer, correctAnswer | null, isCorrect, earnedPoints, maxPoints, feedback, status: 'GRADED'|'PENDING_REVIEW', gradedBy, confidence, gradedModel }] } }` — **model answers hidden until the attempt is GRADED and passed** (ADMIN always sees them).
+- **400** `Quiz attempt is still in progress` · **403** `Forbidden`
+
+### `GET /quizzes/videos/:videoId/attempts` — authenticated
+- **200** `{ success, data: { quizId, title, passingScore, attempts: [{ id, attemptNumber, status, startedAt, submittedAt, scorePercent, earnedPoints, totalPoints, autoSubmitted }] } }`
+
+### `POST /quizzes/videos/:videoId` — ADMIN (upsert by `bunnyVideoId`)
+- **Body**: `title`*, `surveyJson`* (≤256KB; `pages[].elements`, types `radiogroup|comment|html|image`, unique names), `answerKey`* (`{ qName: { type, correctValue?, modelAnswer?, points, rubric?, ai: { enabled? } } }`), `timeLimitSec?`, `passingScore?` (0–100, default 50), `maxAttempts?` (1–10, default 3)
+- **200** `{ success, message: 'Quiz saved successfully', data: quiz }` (sanitized — no `answerKey`)
+- **400** `Invalid surveyJson definition` / `Invalid answerKey` etc. · **404** `Video not found`
+
+### `POST /quizzes/images` — ADMIN
+- **Body**: `multipart/form-data` field `image` (JPEG/PNG/WebP/GIF, ≤5MB) via busboy (no body-parser).
+- **201** `{ success, data: { url: <public storage URL> } }`
+- **413** `Image too large (max 5MB)` · **415** unsupported type · **501** `Image upload is not configured` (missing Supabase, dev only) · **502** `Image upload failed`
+
+### `DELETE /quizzes/:quizId` — ADMIN
+- Cascades attempts, best-effort storage cleanup. **200** `{ success, message: 'Quiz deleted successfully' }`.
+
+### `GET /quizzes/:quizId/attempts` — ADMIN
+- **Query**: `status?` (`IN_PROGRESS|SUBMITTED|GRADING|GRADED|EXPIRED`)
+- **200** `{ success, data: [{ id, quizId, userId, attemptNumber, status, startedAt, deadlineAt, submittedAt, autoSubmitted, mcqEarned, essayEarned, earnedPoints, totalPoints, scorePercent, essayFeedback, essayGradedBy, essayGradedAt, user: { id, name, email } }] }` — no per-question responses leaked.
+
+### `PUT /quizzes/attempts/:id/grade` — ADMIN
+- **Body**: `essayScores`* (`{ qName: number 0..max }`), `essayFeedback?` (`{ qName: string }`) — must score **every** essay.
+- **200** `{ success, message: 'Attempt graded successfully', data: updatedAttempt }` (finalizes `GRADED`, clamps to max points)
+- **409** `Attempt status is "<status>", expected GRADING` / `Missing scores for essay questions: ...` · **422** non-numeric score
+
+### `POST /quizzes/attempts/:id/reset` — ADMIN
+- Deletes the attempt row, invalidates meta + gate caches. **200** `{ success, message: 'Attempt reset successfully' }`.
+
+### `POST /quizzes/videos/:videoId/exemptions` — ADMIN
+- **Body**: `userId`*, `reason?`
+- **200** `{ success, message: 'Gate exemption granted successfully', data: gateExemption }` (upsert by `userId` + `bunnyVideoId`) · **404** video/user not found
+
+### `DELETE /quizzes/exemptions/:exemptionId` — ADMIN
+- **200** `{ success, message: 'Exemption revoked successfully' }` · **404** `Exemption not found`
+
+---
+
+## 11. Bunny Videos (`/courses`, `/videos`)
+
+Modern video system on Bunny.net Stream, `{ success, data }` envelope with AppError codes. **State machine**: `PENDING → UPLOADING → PROCESSING → READY | FAILED`. Re-upload only from `PENDING|FAILED`.
+
+### `POST /courses/:courseId/videos` — ADMIN
+- **Body**: `title`*
+- **201** `{ success, data: { id, courseId, title, bunnyVideoId, status: 'PENDING', createdAt } }`
+- **400** `{ error, code: 'COURSE_NOT_FOUND' }` / `{ error, code: 'VALIDATION_ERROR' }` · **502** `{ error, code: 'BUNNY_API_ERROR' }`
+
+### `GET /courses/:courseId/bunny-videos` — authenticated
+- **ADMIN** sees all statuses + `failureReason` + `processingProgress`; **students see only `READY`** videos.
+- **200** `{ success, data: [{ id, courseId, title, position, bunnyVideoId, status, duration, width, height, thumbnailUrl, createdAt, quiz: { id } | null, failureReason?, processingProgress? }] }` (60s cache)
+
+### `PUT /courses/:courseId/reorder` — ADMIN
+- **Body**: `videoIds` (number array — exactly the course's BunnyVideo ids, each once)
+- **200** `{ success, data: [{ id, title, position }] }` (1-based positions; enrolled students' gate caches invalidated)
+- **400** `{ error, code: 'INVALID_VIDEO_IDS' }` / `{ error, code: 'COURSE_NOT_FOUND' }`
+
+### `POST /videos/:videoId/upload` — ADMIN
+- **Body**: `multipart/form-data` field `video` (mp4/mov/mkv/avi/webm, default max 5GB via `BUNNY_VIDEO_MAX_BYTES`) via busboy, streamed straight to Bunny (no temp files).
+- **200** `{ success, data: { videoId, status: 'PROCESSING', message } }`
+- **400** `{ code: 'VIDEO_NOT_FOUND' }` / `{ code: 'INVALID_VIDEO_FILE' }` · **413** `{ code: 'VIDEO_TOO_LARGE' }` · **415** `{ code: 'INVALID_VIDEO_FILE' }` · **422** `{ code: 'INVALID_VIDEO_STATE' }` (must be PENDING/FAILED) · **502** `{ code: 'VIDEO_UPLOAD_FAILED' }`
+
+### `GET /videos/:videoId/playback` — authenticated (+ sequential gate; ADMIN bypasses)
+- **200** `{ success, data: { videoId, playbackUrl: <HMAC-signed iframe.mediadelivery.net embed>, expiresAt } }` (6h TTL)
+- **403** `{ message, code: 'NOT_ENROLLED' }` / `{ message, code: 'SEQUENTIAL_GATE', previousVideoId, quizId?, yourScore?, requiredScore? }` · **404** `{ code: 'VIDEO_NOT_FOUND' }` · **422** `{ code: 'VIDEO_NOT_READY' }`
+
+### `DELETE /videos/bunny/:videoId` — ADMIN
+- Deletes remote Bunny video first (404 remote tolerated), then DB row.
+- **200** `{ success, data: { id, bunnyVideoId, message: 'Video successfully deleted from Bunny Stream and database.' } }` · **404** `{ code: 'VIDEO_NOT_FOUND' }` · **502** `{ code: 'BUNNY_API_ERROR' }`
+
+---
+
+## 12. Bunny Webhook (`/webhooks/bunny/stream`)
+
+**Not part of the browser API** — Bunny.net calls this. Mounted **before** `express.json()` (needs raw body for HMAC). No `Origin` → unaffected by CORS/CSRF guards.
+
+- **Auth**: `X-BunnyStream-Signature`, `X-BunnyStream-Signature-Version: v1`, `X-BunnyStream-Signature-Algorithm: hmac-sha256`
+- **Body** (raw JSON, 2MB limit): `{ VideoGuid: string, Status: number }`
+- **Status mapping**: 0–2 → `PROCESSING`, 3–4 → `READY`, 5 → `FAILED`, 6–10 → ignored
+- **200** empty body (idempotent; unknown video logged and ignored) · **400** empty (malformed JSON / missing VideoGuid / non-numeric Status) · **401** empty (bad signature) · **429** (600/5min)
+- On `READY`: `notifyReadySafe` triggers student notifications (feature-gated).
+
+---
+
+## 13. Notifications (`/notifications`)
+
+Optional module — mounted only when `NOTIFICATIONS_ENABLED !== false`. Modern envelope. DB is the source of truth (one row per recipient; no Redis/WS in V1).
+
+### `GET /notifications/` — authenticated
+- **Query**: `page`, `limit` (1..100, default 20), `unreadOnly` (`true`/`1`)
+- **200** `{ success, data: { items: [{ id, userId, type, title, body, linkUrl, metadata, read, batchId, createdAt }], total, page, limit } }`
+
+### `GET /notifications/unread-count` — authenticated
+- **200** `{ success, data: { count } }`
+
+### `PATCH /notifications/read-all` — authenticated
+- **200** `{ success, data: { updated } }`
+
+### `PATCH /notifications/:id/read` — authenticated
+- Scoped to the caller's own rows. **200** `{ success, data: { updated: 0|1 } }`
+
+### `POST /notifications/broadcast` — ADMIN
+- **Body**: `title`* (≤200), `body?` (≤5000), `linkUrl?` (internal path starting with `/`, ≤500), `metadata?` (object), `audience`* — `{ kind: 'all' }`, `{ kind: 'course', courseId }`, or `{ kind: 'grade', grade }`
+- **201** `{ success, data: { count, batchId } }` (one row per student; chunked fan-out)
+- **400** validation (title required/too long, bad linkUrl, invalid audience/course/grade) · **404** `Course not found`
+
+---
+
+## 14. Search (`/search`)
+
+Legacy raw envelope on successes.
+
+### `GET /search/content` — authenticated
+- **Query**: at least one of `query`, `category`, `grade` required. Also `type?` (`courses`|`videos`), `minPrice?`, `maxPrice?`, `sortBy?` (`relevance|price_low|price_high|newest|popularity`), `limit?` (1..100, default 20)
+- **200** raw `{ query, filters: { category, grade, minPrice, maxPrice, sortBy }, totalResults, availableCategories, availableGrades, courses: [...], videos: [...] }` (60s cache)
+- **400** `Either search query, category, or grade filter must be provided` / invalid type/grade/price
+
+### `GET /search/trending` — authenticated
+- **Query**: `limit?` (1..100, default 10), `category?`, `grade?`
+- **200** raw `{ trending: [{ id, title, description, price, category, grade, thumbnail, teacherId, teacher, enrollmentCount, videoCount }] }` (10min cache, by enrollment desc)
+
+### `GET /search/recommended` — authenticated
+- **200** raw `{ recommendations: [{ id, title, description, price, category, grade, thumbnail, teacherId, teacher, videoCount }] }` (top 10 by user's enrolled categories/grades, excluding enrolled)
+
+---
+
+## 15. Admin (`/admin`)
+
+Every route behind `authenticateToken` + `authorizeAdmin()` at the router level. Serializers never leak `answerKey`, `answers`, `password`, or `refreshToken`.
+
+### `GET /admin/dashboard` — ADMIN
+- **200** `{ success, data: { counts: { students, admins, courses, enrollments, quizzes, newStudentsLast7d, attempts: { status: count }, videos: { total, ...status counts }, submissionsPending }, alerts: { failedVideos, stuckProcessingVideos, essaysPendingGrading, hasIssues }, recent: { users[5], enrollments[5], attempts[5] }, features: { notifications, aiGrader } } }` (30s cache)
+
+### `GET /admin/quizzes` — ADMIN
+- **Query**: `page`, `limit` (1..100, default 20), `search?` (quiz/video/course title)
+- **200** `{ success, data: [{ id, title, videoId, videoTitle, courseId, courseTitle, timeLimitSec, passingScore, maxAttempts, totalAttempts, pendingGrading, updatedAt }], meta: { total, page, limit, totalPages } }`
+
+### `GET /admin/attempts` — ADMIN
+- **Query**: `status?`, `page`, `limit`, `search?` (student name/email or quiz title)
+- **200** `{ success, data: [{ id, quizId, quizTitle, videoId, videoTitle, courseId, courseTitle, student: { id, name, email, grade }, attemptNumber, status, startedAt, submittedAt, mcqEarned, essayEarned, scorePercent, passingScore, passed, essayGradedAt }], meta }`
+
+### `GET /admin/ai-grading/jobs` — ADMIN (module present only when `AI_GRADER_ENABLED`)
+- **Query**: `status?` (`PENDING|DONE|FAILED`, default `FAILED`), `page`, `limit`, `search?`
+- **200** `{ success, data: [{ id, attemptId, questionName, status, tries, maxTries, confidence, applied, error, claimedAt, createdAt, updatedAt, attemptStatus, attemptNumber, submittedAt, student, quizId, quizTitle, videoId, videoTitle, courseId, courseTitle }], meta: { total, page, limit, totalPages, status } }`
+
+### `POST /admin/ai-grading/retry` — ADMIN
+- **Body**: `attemptIds?` (array of ints; absent = all `FAILED` attempts)
+- **200** `{ success, data: { attempts, jobsEnqueued, cleared, perAttempt: [{ attemptId, jobsEnqueued, cleared }] } }`
+
+### (`GET /admin/enrollments`, `POST /admin/enrollments`, `DELETE /admin/enrollments/:id` — see §6)
+
+---
+
+## 16. Health Probes (`/healthz`, `/readyz`, `/health`)
+
+Mounted **before** the global rate limiter — never throttled, no auth.
+
+### `GET /healthz`
+- **200** `{ status: 'ok', uptime: <sec> }` — liveness, zero I/O.
+
+### `GET /readyz`
+- **200** `{ status: 'ok', db: 'up', uptime, ms }` · **503** `{ status: 'error', db: 'down', ms }` — DB ping (3s timeout). Redis never gates readiness.
+
+### `GET /health`
+- **200** `{ status: 'ok', db: 'up', uptime, ms }` · **503** — legacy DB-ping healthcheck (test harness / CI compatible).
+
+---
+
+## 17. Sequential Access Gate
+
+`quizService.evaluateGate()` (in `src/services/quizService.js`) is the **single source of truth**. Redis-cached 5 min per user+video. ADMIN always bypasses.
+
+For a student to access a **non-first** Bunny video in a course, **all** of the following must hold:
+
+1. **Enrollment**: the student is enrolled in the course → else `NOT_ENROLLED`.
+2. **Previous video**: the immediately preceding video (by `position`, or in-app ordering) is:
+   - A `BunnyVideoProgress` row with `completed: true` → else `SEQUENTIAL_GATE` + `previousVideoId`; or
+   - Covered by a `GateExemption` (admin-granted).
+3. **Previous quiz**: if the previous video has a quiz, at least one attempt is `GRADED` with `scorePercent >= passingScore` (best score counts) → else `SEQUENTIAL_GATE` + `quizId`, `bestScore`, `required`.
+
+Gate codes surfaced to clients: `NOT_ENROLLED`, `SEQUENTIAL_GATE`, `VIDEO_NOT_UNLOCKED` (on progress-complete), `VIDEO_NOT_FOUND`. `POST /progress/complete` and `GET /videos/:videoId/playback` both enforce it.
+
+**Gate exemptions**: granted per `(userId, bunnyVideoId)` via `POST /quizzes/videos/:videoId/exemptions` (ADMIN); removed via `DELETE /quizzes/exemptions/:exemptionId`.
+
+---
+
+## 18. Error Codes
+
+Structured `code` values returned by the global handler (in addition to the HTTP status):
+
+| Code | Status | Meaning |
+|---|---|---|
+| `ACCOUNT_LOCKED` | 423 | Login lockout after N consecutive failures |
+| `RATE_LIMIT_STORE_UNAVAILABLE` | 503 | Redis rate-limit store down in fail-closed mode |
+| `ORIGIN_NOT_ALLOWED` | 403 | Origin not in allowlist |
+| `CSRF_DENIED_ORIGIN` | 403 | CSRF origin/referer check failed |
+| `NOT_ENROLLED` | 403 | User not enrolled in the course |
+| `SEQUENTIAL_GATE` | 403 | Previous video not completed / quiz not passed |
+| `VIDEO_NOT_UNLOCKED` | 403 | Attempted to complete a video not at the current index |
+| `VIDEO_NOT_FOUND` | 404 | Bunny/video not found (gate path) |
+| `COURSE_NOT_FOUND` | 400/404 | Course lookup failed |
+| `VIDEO_NOT_READY` | 422 | Video not yet `READY` for playback |
+| `INVALID_VIDEO_STATE` | 422 | Upload on a video not `PENDING`/`FAILED`, etc. |
+| `INVALID_VIDEO_IDS` | 400 | Reorder payload not the exact video id set |
+| `INVALID_VIDEO_FILE` | 400/415 | Missing/malformed/mis-typed upload field |
+| `VIDEO_TOO_LARGE` | 413 | Upload exceeds `BUNNY_VIDEO_MAX_BYTES` |
+| `VIDEO_UPLOAD_FAILED` | 502 | Bunny upload failed |
+| `BUNNY_API_ERROR` | 502 | Bunny API call failed |
+| `BUNNY_WEBHOOK_INVALID_SIGNATURE` | 401 | Webhook HMAC mismatch |
+| `VALIDATION_ERROR` | 400 | Payload validation failed |
+| `ALREADY_PASSED` | 409 | Quiz start while a passed attempt exists |
+| `MAX_ATTEMPTS_REACHED` | 409 | Quiz attempt budget exhausted |

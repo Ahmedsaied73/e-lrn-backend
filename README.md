@@ -22,7 +22,7 @@ Backend API for an e-learning platform built for Egyptian secondary school stude
 
 ### Prerequisites
 
-- Node.js 18+
+- Node.js 20+
 - A Supabase project (Postgres + Storage) — see Environment variables below
 
 ### Installation
@@ -99,18 +99,25 @@ npx prisma generate
 
 ## API
 
+**Full endpoint reference:** [`API-DOCUMENTATION.md`](API-DOCUMENTATION.md) — the single consolidated API doc covering auth, users, courses, enrollments, payments, progress, assignments, quizzes, Bunny videos, the webhook, notifications, search, and the admin console. Design/implementation history for individual domains lives in [`docs/`](docs/).
+
 Registered route mount points in `app.js`:
 
 - `/auth` — login, register, refresh
-- `/courses` — course CRUD, `GET /courses/:id/bunny-videos`, `PUT /courses/:id/reorder`
-- `/videos` — legacy video CRUD + `/stream`, Bunny upload/playback/delete
-- `/quizzes` — meta, start, save, submit, result, admin upsert/grade
+- `/user` — profile, achievements, admin user management
+- `/courses` — course CRUD, `GET /courses/:id/bunny-videos`, `PUT /courses/:id/reorder`, `POST /courses/:id/videos`
+- `/enroll` — enroll, enrollment status
+- `/payments` — legacy payment stubs (disabled in production)
+- `/progress` — Bunny video progress tracking
 - `/assignments` — assignment CRUD + submissions
-- `/progress` — video progress (legacy + Bunny)
-- `/enrollments`, `/payments`, `/users`, `/search`
+- `/quizzes` — meta, start, save, submit, result, admin upsert/grade/exemptions
+- `/videos` — Bunny upload/playback/delete
+- `/notifications` — student inbox, admin broadcast (optional module)
+- `/search` — content, trending, recommended
+- `/admin` — dashboard, quizzes, attempts, enrollments, AI-grading jobs
 - `/webhooks/bunny/stream` — Bunny status webhook (HMAC-verified, mounted **before** `express.json()`)
 
-Response envelope for newer endpoints: `{ success: true, data }`. Legacy endpoints return raw objects.
+Response envelope for newer endpoints: `{ success: true, data }`. Legacy endpoints return raw objects (documented per endpoint).
 
 ## Reconcile Job
 

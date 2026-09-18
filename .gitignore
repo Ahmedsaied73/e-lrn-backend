@@ -18,3 +18,14 @@ be-*.log
 
 # uploads-to-Supabase migration manifest (never commit; host-local)
 uploads-migration-manifest.json
+
+# agent/dev tooling (keep on dev machine, never commit)
+.agents/
+.opencode/
+.trae/
+plans/
+tasks/
+AGENTS.md
+*.patch
+skills-lock.json
+upload-typescript-*.txt
