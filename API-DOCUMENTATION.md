@@ -491,7 +491,7 @@ Mounted **before** the global rate limiter — never throttled, no auth.
 
 ### `GET /metrics`
 - **200** Prometheus text format (a scrape target, not an API — no auth, no envelope). Exposes process-lifetime counters: `http_requests_total{status="..."}` and `http_errors_5xx_total`. Counters are **per-instance since process boot** (they reset on restart; a single scrape yields totals, not a rate).
-- The `uptime-probe` GitHub Action (`.github/workflows/uptime.yml`) polls `/readyz` every 15 minutes and fails the run (→ notification email to repo watchers) on a non-200 readiness response or when lifetime 5xx errors exceed 5% of total requests. On failure it attaches the raw metrics snapshot as a `metrics-snapshot` artifact for debugging. Requires the `PROD_BASE_URL` repo secret (base URL without trailing slash).
+- The `uptime-probe` GitHub Action (`.github/workflows/uptime.yml`) polls `/readyz` every 15 minutes and fails the run (→ notification email to repo watchers) on a non-200 readiness response or when lifetime 5xx errors exceed 5% of total requests. When the metrics-scrape step itself fails, it attaches the raw metrics snapshot as a `metrics-snapshot` artifact for debugging (no artifact on a bare readiness failure, since the scrape never ran). Requires the `PROD_BASE_URL` repo secret (base URL without trailing slash).
 
 ---
 
