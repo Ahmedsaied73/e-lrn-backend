@@ -1,9 +1,5 @@
 FROM node:22-alpine
 
-# OpenSSL 1.1 compat for Prisma 5 engines
-RUN apk add --no-cache openssl1.1-compat
-
-
 # Prisma engines need OpenSSL at runtime on Alpine (musl)
 RUN apk add --no-cache openssl libc6-compat
 
