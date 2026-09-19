@@ -170,7 +170,59 @@ function resolveAiGrader() {
 // ── Optional feature modules (building blocks) ─────────────────────────────
 // Each module reads enabled here; absence means the approved default (true =
 // current behavior preserved). Restart to change. See plans/ai-grader-plan.md
-// and the notifications plan for the per-module contract.
+// and the notifications plan for the per-module contract. Payments is the
+// exception: PAYMENTS_ENABLED defaults to FALSE (see resolvePaymob below).
+
+// ── Paymob payments (course purchases, D3/D16) ─────────────────────────────
+// Feature-gated by PAYMENTS_ENABLED (default FALSE — today's free-enrollment
+// behavior is preserved until keys are provisioned). When enabled, ALL four
+// credentials are required AND non-placeholder: missing keys are fatal in
+// production and self-disable (with a warning) in development. The secret/HMAC
+// keys never leave the server — only `publicKey` is ever safe to expose.
+const PAYMOB_PLACEHOLDER_RE = /your_|placeholder|change_me|example|TODO|\[.*\]/i;
+function resolvePaymob() {
+  const enabled = resolveFlag(process.env.PAYMENTS_ENABLED, false);
+  const secretKey = process.env.PAYMOB_SECRET_KEY || null;
+  const publicKey = process.env.PAYMOB_PUBLIC_KEY || null;
+  const hmacSecret = process.env.PAYMOB_HMAC_SECRET || null;
+  const looksPlaceholder = (v) => Boolean(v) && PAYMOB_PLACEHOLDER_RE.test(v);
+  // Comma-separated payment-integration IDs (card, wallet) — must be positive ints.
+  // Test/Live IDs must match the key environment (secret key) or Paymob rejects.
+  const integrationIds = String(process.env.PAYMOB_INTEGRATION_IDS || '')
+    .split(',')
+    .map((s) => parseInt(s.trim(), 10))
+    .filter((n) => Number.isSafeInteger(n) && n > 0);
+
+  if (!enabled) return { enabled: false, configured: false };
+
+  const missing = [];
+  if (!secretKey || looksPlaceholder(secretKey)) missing.push('PAYMOB_SECRET_KEY');
+  if (!publicKey || looksPlaceholder(publicKey)) missing.push('PAYMOB_PUBLIC_KEY');
+  if (!hmacSecret || looksPlaceholder(hmacSecret)) missing.push('PAYMOB_HMAC_SECRET');
+  if (integrationIds.length === 0) missing.push('PAYMOB_INTEGRATION_IDS');
+
+  if (missing.length > 0) {
+    if (process.env.NODE_ENV === 'production') {
+      console.error(`[FATAL] PAYMENTS_ENABLED=true but missing/invalid: ${missing.join(', ')}. Server will not start.`);
+      process.exit(1);
+    }
+    console.warn(`[WARN] PAYMENTS_ENABLED=true but missing/invalid: ${missing.join(', ')} — payments stay OFF.`);
+    return { enabled: false, configured: false };
+  }
+
+  return {
+    enabled: true,
+    configured: true,
+    baseUrl: (process.env.PAYMOB_BASE_URL || 'https://accept.paymob.com').replace(/\/+$/, ''),
+    secretKey,
+    publicKey,
+    hmacSecret,
+    integrationIds,
+    currency: process.env.PAYMOB_CURRENCY || 'EGP',
+    // Hosted-checkout-session TTL (D4). Keep short: reuse rule (D5) only applies to a live session.
+    intentionExpirySeconds: Number(process.env.PAYMOB_INTENTION_EXPIRY_SECONDS) || 3600,
+  };
+}
 function resolveFlag(rawValue, defaultValue) {
   if (rawValue === undefined || rawValue === null || String(rawValue).trim() === '') return defaultValue;
   return ['true', '1', 'yes', 'on'].includes(String(rawValue).trim().toLowerCase());
@@ -197,7 +249,9 @@ const config = {
   features: {
     notifications: resolveFlag(process.env.NOTIFICATIONS_ENABLED, true),
     aiGrader: resolveFlag(process.env.AI_GRADER_ENABLED, true),
+    payments: resolveFlag(process.env.PAYMENTS_ENABLED, false),
   },
+  paymob: resolvePaymob(),
   admin: {
     // [C-2] Credentials come from env only — no hardcoded fallbacks
     email: process.env.ADMIN_EMAIL || 'admin@elearning.com',
