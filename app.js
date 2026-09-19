@@ -164,10 +164,17 @@ if (config.features && config.features.payments) {
     // HMAC arrives as ?hmac= and is verified inside the provider before any
     // state change. Handler policy (D10): 5xx on transient failure (Paymob
     // retries); 200 for handled events and confirmed forgeries.
+    //
+    // The scoped parser wrapper turns an unparseable body into a deliberate
+    // 400: a garbage body can never be correlated to a payment, 400 is not a
+    // retry signal (no retry storm), and attacker noise must not land in the
+    // 5xx/Sentry stream. Genuine loss cases are covered by reconciliation.
     app.post(
       '/webhooks/paymob',
       webhookLimiter,
-      express.json({ limit: '256kb' }),
+      (req, res, next) => express.json({ limit: '256kb' })(req, res, (err) => (
+        err ? res.status(400).json({ received: false, error: 'Invalid JSON body.' }) : next()
+      )),
       handlePaymobWebhook
     );
   } catch (err) {
@@ -403,6 +410,18 @@ const server = app.listen(port, () => {
     // handle so shutdown can stop it.
     reconciliationTask = startReconciliationJob();
 
+    // Payments reconciliation (D11 backstop) — only when the module is enabled.
+    // Lazy require + guarded start: a payments problem must never break boot.
+    if (config.features && config.features.payments) {
+      try {
+        const { startPaymentReconciliationJob } = require('./src/jobs/reconcilePayments');
+        paymentReconciliationTask = startPaymentReconciliationJob();
+        console.log('[INFO] payment.reconcile.job_started', JSON.stringify({ schedule: 'every 10 minutes' }));
+      } catch (err) {
+        console.warn('[WARN] Payment reconciliation job failed to start:', err.message);
+      }
+    }
+
     // Crash recovery: uploads interrupted by a previous shutdown can never
     // resume (their process is gone) — mark them FAILED so re-upload works.
     // Best-effort and boot-non-blocking: a DB outage here must not kill boot.
@@ -437,6 +456,7 @@ const server = app.listen(port, () => {
 // instead of the platform SIGKILL-ing mid-transaction. Force-exit after 10s
 // so a hung connection can't keep the instance "up" after detach.
 let reconciliationTask = null; // node-cron task handle (stopped on shutdown)
+let paymentReconciliationTask = null; // payments cron handle (only when enabled)
 
 function shutdown(signal) {
   console.log(`[SHUTDOWN] ${signal} received — draining connections...`);
@@ -447,6 +467,16 @@ function shutdown(signal) {
     reconciliationTask = null;
   } catch (err) {
     console.warn('[WARN] Reconciliation cron stop failed:', err.message);
+  }
+
+  // Payments cron is only present when the module was enabled at boot.
+  try {
+    if (paymentReconciliationTask) {
+      require('./src/jobs/reconcilePayments').stopPaymentReconciliationJob(paymentReconciliationTask);
+      paymentReconciliationTask = null;
+    }
+  } catch (err) {
+    console.warn('[WARN] Payment reconciliation cron stop failed:', err.message);
   }
 
   // Close BullMQ worker + queue so their dedicated Redis connections are

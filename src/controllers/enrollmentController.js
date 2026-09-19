@@ -1,7 +1,17 @@
 const prisma = require('../config/db');
 const cache = require('../integrations/redis/cache');
 const audit = require('../services/auditLog');
+const config = require('../config/env');
 const { isValidSlug } = require('../utils/slugs');
+
+/**
+ * Paywall flag (D6). Read from config only — core never imports the payments
+ * module, so deleting src/services/payments leaves this file working.
+ * Default OFF preserves today's free-enrollment behavior exactly.
+ */
+function paymentsOn() {
+  return Boolean(config && config.features && config.features.payments && config.paymob && config.paymob.enabled);
+}
 
 // Strip numeric course/user references from Enrollment rows — the public
 // surface identifies those resources by slug.
@@ -35,6 +45,20 @@ const enrollUserInCourse = async (req, res) => {
     }
 
     const courseId = course.id;
+
+    // ── Paywall (D6): with payments enabled, a PRICED course can only be
+    // entered through a verified payment (the webhook creates the enrollment).
+    // Checked BEFORE the existing-enrollment branch so an unpaid row can never
+    // be flipped to paid without a payment. Free courses (price <= 0) still
+    // enroll directly, and this whole branch is inert while the flag is off.
+    if (paymentsOn() && Number(course.price) > 0) {
+      return res.status(402).json({
+        success: false,
+        error: 'This course requires payment.',
+        code: 'PAYMENT_REQUIRED',
+        data: { courseSlug: course.slug },
+      });
+    }
 
     // Check if already enrolled
     const existingEnrollment = await prisma.enrollment.findFirst({

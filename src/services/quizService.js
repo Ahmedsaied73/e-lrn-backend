@@ -9,6 +9,7 @@
  */
 
 const prisma = require('../config/db');
+const config = require('../config/env');
 const { ALLOWED_QUESTION_TYPES, MAX_SURVEY_JSON_BYTES, GRACE_SEC, DEFAULT_MAX_ATTEMPTS, STALE_ATTEMPT_MS, STATUS } = require('../config/quizConfig');
 const bunny = require('../integrations/bunny/bunnyStreamClient');
 
@@ -244,6 +245,50 @@ const { resolveAttemptKey, resolveAttemptSurvey } = require('../utils/quizKeyRes
 // ─── Gate Evaluation ─────────────────────────────────────────────────────────
 
 /**
+ * Paid-access policy (D2/D6a, matrix 16).
+ *
+ * With payments ENABLED, an enrollment ROW alone never grants access: it must
+ * be paid AND unexpired. `expiresAt === null` means permanent (grandfathered
+ * rows created before the paywall + admin grants) and stays valid.
+ *
+ * With payments DISABLED this reports ok for any row, so the pre-paywall
+ * behavior is byte-identical (and the existing suites stay green).
+ *
+ * The payments FLAG is read from config only — core never imports the payments
+ * module (deleting src/services/payments must not affect this file).
+ *
+ * @param {object|null} enrollment - row with { id, isPaid, expiresAt }
+ * @returns {{ ok: boolean, code?: string, reason?: string }}
+ */
+function checkEnrollmentAccess(enrollment) {
+  if (!enrollment) {
+    return {
+      ok: false,
+      code: 'NOT_ENROLLED',
+      reason: 'You must be enrolled in this course to access this video',
+    };
+  }
+  const flagOn = Boolean(config && config.features && config.features.payments);
+  if (!flagOn) return { ok: true };
+
+  if (!enrollment.isPaid) {
+    return {
+      ok: false,
+      code: 'PAYMENT_REQUIRED',
+      reason: 'This course requires a completed payment',
+    };
+  }
+  if (enrollment.expiresAt && enrollment.expiresAt <= new Date()) {
+    return {
+      ok: false,
+      code: 'ACCESS_EXPIRED',
+      reason: 'Your access to this course has expired — purchase again to continue',
+    };
+  }
+  return { ok: true };
+}
+
+/**
  * SINGLE source of truth for sequential video access — used by BOTH the
  * playback gate (GET /videos/:videoId/playback) and markVideoCompleted
  * (POST /progress/complete). BunnyVideo is the only video system.
@@ -305,7 +350,8 @@ async function evaluateGate(userId, videoId, userRole) {
     const [enrollment, courseVideos] = await Promise.all([
       prisma.enrollment.findFirst({
         where: { userId, courseId: video.courseId },
-        select: { id: true },
+        // isPaid/expiresAt feed the paywall policy below (D6a).
+        select: { id: true, isPaid: true, expiresAt: true },
       }),
       prisma.bunnyVideo.findMany({
         where: { courseId: video.courseId, status: 'READY' },
@@ -314,12 +360,11 @@ async function evaluateGate(userId, videoId, userRole) {
       }),
     ]);
 
-    if (!enrollment) {
-      return {
-        allowed: false,
-        reason: 'You must be enrolled in this course to access this video',
-        code: 'NOT_ENROLLED',
-      };
+    // Enrollment + paywall: with payments on, the row must be paid AND
+    // unexpired; with payments off this is the previous NOT_ENROLLED check.
+    const access = checkEnrollmentAccess(enrollment);
+    if (!access.ok) {
+      return { allowed: false, reason: access.reason, code: access.code };
     }
 
     const currentIndex = courseVideos.findIndex(v => v.id === video.id);
@@ -1020,6 +1065,7 @@ module.exports = {
   computeTotalPoints,
   computeScorePercent,
   evaluateGate,
+  checkEnrollmentAccess,
   startAttempt,
   submitAttempt,
   saveAttempt,

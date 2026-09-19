@@ -1,7 +1,7 @@
 const prisma = require('../config/db');
 const cache = require('../integrations/redis/cache');
 const { isAdmin } = require('../middlewares');
-const { evaluateGate, invalidateQuizMeta, invalidateGateForUser } = require('../services/quizService');
+const { evaluateGate, invalidateQuizMeta, invalidateGateForUser, checkEnrollmentAccess } = require('../services/quizService');
 const { isValidSlug } = require('../utils/slugs');
 
 // ─── Public helper used by middleware/routes to point at progress rows ────────
@@ -32,6 +32,12 @@ const markVideoCompleted = async (req, res) => {
       }
       if (gate.code === 'NOT_ENROLLED') {
         return res.status(403).json({ error: gate.reason, code: 'NOT_ENROLLED' });
+      }
+      // Paywall denials keep their own codes (matrix 16) — never relabel them
+      // as a sequential-gate problem, or the frontend would prompt the student
+      // to "complete the previous video" when they actually owe a payment.
+      if (gate.code === 'PAYMENT_REQUIRED' || gate.code === 'ACCESS_EXPIRED') {
+        return res.status(403).json({ error: gate.reason, code: gate.code });
       }
       return res.status(403).json({
         error: gate.reason,
@@ -131,13 +137,13 @@ const checkVideoCompletion = async (req, res) => {
     if (!(await isAdmin(req))) {
       const enrollment = await prisma.enrollment.findFirst({
         where: { userId: req.user.id, courseId: video.courseId },
-        select: { id: true },
+        select: { id: true, isPaid: true, expiresAt: true },
       });
-      if (!enrollment) {
-        return res.status(403).json({
-          error: 'You must be enrolled in this course to access this video',
-          code: 'NOT_ENROLLED',
-        });
+      // Paywall-aware (matrix 16): an unpaid or expired row must not expose
+      // progress either — same policy the gate applies to playback.
+      const access = checkEnrollmentAccess(enrollment);
+      if (!access.ok) {
+        return res.status(403).json({ error: access.reason, code: access.code });
       }
     }
 
@@ -178,17 +184,16 @@ const getCourseVideoProgress = async (req, res) => {
 
     const courseId = course.id;
 
-    // Enrollment gate — mirrors markVideoCompleted/evaluateGate.
+    // Enrollment gate — mirrors markVideoCompleted/evaluateGate, including the
+    // paywall policy (matrix 16): unpaid/expired rows see no progress.
     if (!(await isAdmin(req))) {
       const enrollment = await prisma.enrollment.findFirst({
         where: { userId: req.user.id, courseId },
-        select: { id: true },
+        select: { id: true, isPaid: true, expiresAt: true },
       });
-      if (!enrollment) {
-        return res.status(403).json({
-          error: 'You must be enrolled in this course to view progress',
-          code: 'NOT_ENROLLED',
-        });
+      const access = checkEnrollmentAccess(enrollment);
+      if (!access.ok) {
+        return res.status(403).json({ error: access.reason, code: access.code });
       }
     }
 
