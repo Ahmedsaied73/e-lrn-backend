@@ -10,6 +10,9 @@ RUN npm install
 # Bundle app source
 COPY . .
 
+# Generate Prisma client (postinstall runs before schema is copied, so generate explicitly)
+RUN npx prisma generate
+
 # Create uploads directory
 RUN mkdir -p uploads
 
