@@ -40,7 +40,7 @@ model Course {
   title         String
   slug          String            @unique // Public URL identifier — replaces numeric id in URLs
   description   String
-  price         Float
+  price         Int   // Whole EGP (no fractions). Paymob conversion (*100) lives in the provider.
   thumbnail     String
   // Relations
   teacher       User           @relation("AdminCourses", fields: [teacherId], references: [id])
@@ -48,6 +48,7 @@ model Course {
   videos        Video[]
   bunnyVideos   BunnyVideo[] // Bunny Stream videos (separate from local Video)
   enrollments   Enrollment[]
+  payments      Payment[]
   certificates  Certificate[]
   learningPaths LearningPath[] @relation("CoursesInPath")
   prerequisite  LearningPath[] @relation("Prerequisites")
@@ -83,8 +84,9 @@ model Enrollment {
   userId      Int
   course      Course    @relation(fields: [courseId], references: [id])
   courseId    Int
-  isPaid      Boolean   @default(false) // Track if the user has paid for this course
+  isPaid      Boolean   @default(false) // True only after a verified payment (or a free/admin grant)
   paymentDate DateTime? // Date when payment was processed
+  expiresAt   DateTime? // Paid access expiry (paidAt + 365d). null = permanent — grandfathered/admin-granted rows.
   progress    Float     @default(0) // Overall progress percentage
   startedAt   DateTime  @default(now())
   completedAt DateTime? // When the course was completed
@@ -122,14 +124,29 @@ model LearningPath {
 }
 
 model Payment {
-  id        Int           @id @default(autoincrement())
-  user      User          @relation(fields: [userId], references: [id])
-  userId    Int
-  amount    Float
-  status    PaymentStatus
-  createdAt DateTime      @default(now())
+  id                 Int            @id @default(autoincrement())
+  user               User           @relation(fields: [userId], references: [id])
+  userId             Int
+  course             Course?        @relation(fields: [courseId], references: [id])
+  courseId           Int?
+  amount             Int            // Whole EGP (never piasters) — *100 conversion lives in the provider only
+  currency           String         @default("EGP")
+  status             PaymentStatus
+  provider           String         @default("paymob")
+  providerReference  String?        @unique // Our correlation id, sent to the provider and echoed back
+  providerTxnId      String?        @unique // Provider transaction id — double fulfilment impossible by construction
+  providerCheckoutUrl String?       // Hosted checkout URL, reused while PENDING (D5)
+  intentionExpiresAt DateTime?      // Hosted-session expiry — lazy flip to EXPIRED (D4)
+  failureReason      String?
+  rawEvent           Json?          @db.JsonB // Last verified event (redacted) — debug/reconciliation
+  paidAt             DateTime?
+  refundedAt         DateTime?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
 
   @@index([userId])
+  @@index([courseId])
+  @@index([status])
 }
 
 enum Role {
@@ -149,6 +166,8 @@ enum PaymentStatus {
   PENDING
   COMPLETED
   FAILED
+  EXPIRED // hosted checkout session timed out unused (lazy flip on read)
+  REFUNDED
 }
 
 enum Grade {
