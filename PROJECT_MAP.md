@@ -23,6 +23,11 @@
 - Plans: `plans/*.md`. Audit record: `tasks/db-audit-*.md`.
 
 ## [ORPHANS & PENDING]
+- **Payments module SHIPPED (2026-09-19)** — all T0–T8 committed on `Dev` and pushed to `Dev` + `master` (backend HEAD `6f2c399`, frontend HEAD `05ae4ee`). Live sandbox intention verified end-to-end; full E2E 24/24; suite 38/38. See `plans/payments-plan.md` (gitignored, local).
+- **USER ACTION required for production enable:** set real Paymob creds + `PAYMENTS_ENABLED=true` in prod env (test keys are currently in local `.env` only); confirm `PUBLIC_API_URL` (webhook URL) + `FRONTEND_URL` (result redirect) point at the deployed hosts; run `prisma migrate deploy` on production (the two payments migrations apply cleanly — the RLS lockdown migration is already recorded).
+- T9 deferred by user request: no live sandbox PURCHASE was run (only a test intention + full forged-callback E2E). A manual real-sandbox purchase with a test card is the last acceptance step before flipping prod on.
+- Stale temp artifacts (`boot-*.txt`, `t3-*`, `e2e-server.txt`) are untracked and locked by other processes — safe to delete after those processes exit.
+- Load-test cohort cleanup (`%loadtest.local` users) on staging — awaits user sign-off.
 - **P2 hardening plan COMPLETE (2026-09-19)** — all 5 tasks delivered on `Dev`: `plans/p2-hardening-plan.md`. Commits: 08abacf+b2fcb89 (/metrics), 640e88b+88d4742+5830578 (uptime probe + docs), 92db23b (login semaphore + threadpool), 8d63dc4 (RLS lockdown, applied to staging), ae235bf (3 test suites). `npm test` 25/25, lint clean.
 - USER ACTION required to activate Task 5: add `PROD_BASE_URL` repo secret, push `Dev`, trigger `uptime-probe` once via workflow_dispatch. Restart the local dev server (3005) to expose `/metrics`.
 - USER ACTION: production must run the RLS migration (`prisma migrate deploy`, or the documented `db execute` + `migrate resolve --applied` procedure) at deploy time.
