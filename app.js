@@ -9,7 +9,6 @@ const Authrouter = require('./src/routes/auth');
 const Userrouter = require('./src/routes/users');
 const Courserouter = require('./src/routes/courses');
 const SearchRouter = require('./src/routes/searchRoutes');
-const PaymentRouter = require('./src/routes/paymentRoutes');
 const enrollmentRoutes = require('./src/routes/enrollmentRoutes');
 const videoProgressRoutes = require('./src/routes/videoProgressRoutes');
 const assignmentRoutes = require('./src/routes/assignmentRoutes');
@@ -153,6 +152,29 @@ app.post(
   handleBunnyWebhook
 );
 
+// ── Paymob payment callback (D13: mounted ONLY when payments are enabled) ───
+// Same mounting rules as the Bunny webhook: pre-global-parser (Paymob signs
+// field VALUES, not the raw body, so a scoped express.json() is safe) and
+// pre-CSRF (server-to-server POST carries no Origin). The lazy require keeps
+// core import-free of the payments module — deleting src/services/payments
+// must never crash startup (removal test).
+if (config.features && config.features.payments) {
+  try {
+    const { handlePaymobWebhook } = require('./src/controllers/paymobWebhookController');
+    // HMAC arrives as ?hmac= and is verified inside the provider before any
+    // state change. Handler policy (D10): 5xx on transient failure (Paymob
+    // retries); 200 for handled events and confirmed forgeries.
+    app.post(
+      '/webhooks/paymob',
+      webhookLimiter,
+      express.json({ limit: '256kb' }),
+      handlePaymobWebhook
+    );
+  } catch (err) {
+    console.warn('[WARN] Paymob webhook failed to mount:', err.message);
+  }
+}
+
 // Body cap 512kb: quiz payloads validate up to 256KB server-side, so the
 // parser must accept that range (default 100kb would 413 legit admin saves).
 app.use(express.json({ limit: '512kb' }));
@@ -258,7 +280,6 @@ app.use('/enroll',enrollmentRoutes);
 app.use('/auth', Authrouter);
 app.use('/courses', Courserouter);
 app.use('/search', SearchRouter);
-app.use('/payments', PaymentRouter);
 app.use('/progress', videoProgressRoutes);
 app.use('/assignments', assignmentRoutes);
 app.use('/quizzes', quizRoutes);
@@ -281,6 +302,18 @@ if (enabledFeatures.notifications !== false) {
     app.use('/notifications', require('./src/routes/notificationRoutes'));
   } catch (err) {
     console.warn('[WARN] Notifications router failed to mount:', err.message);
+  }
+}
+
+// Student payments (D13): mounted ONLY when the module is enabled — disabled
+// means no /payments routes at all (never stubs). The lazy require keeps core
+// import-free of the module, so deleting src/services/payments + its routes
+// leaves boot green (the repo's removal test).
+if (enabledFeatures.payments) {
+  try {
+    app.use('/payments', require('./src/routes/paymentRoutes'));
+  } catch (err) {
+    console.warn('[WARN] Payments router failed to mount:', err.message);
   }
 }
 

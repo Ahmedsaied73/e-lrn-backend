@@ -1,156 +1,82 @@
-const prisma = require('../config/db');
+'use strict';
 
 /**
- * Process a payment for a course
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
+ * Payment HTTP controllers — thin adapters over paymentService (D15).
+ *
+ * They do input shaping + response envelopes ONLY: no money math, no provider
+ * calls, no state transitions. AppError from the service carries {statusCode,
+ * code} into the global handler's envelope.
+ *
+ * Checkout URLs (returnUrl/webhookUrl) are BUILT HERE from server config —
+ * never accepted from the client (matrix 11).
  */
-const processCoursePayment = async (req, res) => {
-  // [C-9] Payment gateway is a stub. Block in production until a real gateway is integrated.
-  if (process.env.NODE_ENV === 'production') {
-    return res.status(403).json({
-      success: false,
-      error: 'Payment processing is not available. Please contact support.'
-    });
-  }
+const paymentService = require('../services/payments/paymentService');
 
+/** Absolute server URL for the Paymob notification (webhook) endpoint. */
+function publicApiBase() {
+  const configured = String(process.env.PUBLIC_API_URL || '').trim();
+  if (configured) return configured.replace(/\/+$/, '');
+  return `http://localhost:${process.env.PORT || 3005}`;
+}
+
+/** First configured frontend origin — the browser redirect target. */
+function frontendBase() {
+  const first = String(process.env.FRONTEND_URL || 'http://localhost:3000').split(',')[0].trim();
+  return first.replace(/\/+$/, '');
+}
+
+/**
+ * POST /payments/checkout — body: { courseSlug }.
+ * 201 + { checkoutUrl, providerReference, amountMajor, currency, expiresAt, reused }
+ * 400 COURSE_IS_FREE · 404 · 409 ALREADY_PAID · 503 PAYMENTS_DISABLED
+ */
+async function createCheckout(req, res, next) {
   try {
-    const { courseId } = req.params;
-    const userId = req.user.id;
-
-    const parsedCourseId = parseInt(courseId, 10);
-    if (!Number.isSafeInteger(parsedCourseId) || parsedCourseId <= 0) {
-      return res.status(400).json({ error: 'Invalid course ID' });
-    }
-
-    // Find the course
-    const course = await prisma.course.findUnique({
-      where: { id: parsedCourseId }
+    const { courseSlug } = req.body || {};
+    const out = await paymentService.createCourseCheckout(req.user.id, courseSlug, {
+      returnUrl: `${frontendBase()}/payment/result`,
+      webhookUrl: `${publicApiBase()}/webhooks/paymob`,
     });
-    
-    if (!course) {
-      return res.status(404).json({ error: 'Course not found' });
-    }
-    
-    // Check if the user is already enrolled
-    let enrollment = await prisma.enrollment.findFirst({
-      where: {
-        userId: userId,
-        courseId: parsedCourseId
-      }
-    });
-    
-    // If already paid, return success but indicate it was already paid
-    if (enrollment && enrollment.isPaid) {
-      return res.json({
-        message: 'Course was already paid for',
-        enrollment
-      });
-    }
-    
-    // Process payment (in a real app, you would integrate with a payment gateway)
-    // This is a simplified example
-    const paymentStatus = 'COMPLETED'; // Simulating successful payment
-    
-    // Create payment record
-    const payment = await prisma.payment.create({
+    // The student polls with expiresAt even when the provider call succeeded.
+    return res.status(201).json({
+      success: true,
       data: {
-        userId: userId,
-        amount: course.price,
-        status: paymentStatus
-      }
+        paymentId: out.paymentId,
+        providerReference: out.providerReference,
+        amountMajor: out.amountMajor,
+        currency: out.currency,
+        checkoutUrl: out.checkoutUrl,
+        expiresAt: out.expiresAt,
+        reused: out.reused,
+      },
     });
-    
-    // Update or create enrollment with payment info
-    if (enrollment) {
-      // Update existing enrollment
-      enrollment = await prisma.enrollment.update({
-        where: { id: enrollment.id },
-        data: {
-          isPaid: true,
-          paymentDate: new Date()
-        }
-      });
-    } else {
-      // Create new enrollment with payment
-      enrollment = await prisma.enrollment.create({
-        data: {
-          userId: userId,
-          courseId: parsedCourseId,
-          isPaid: true,
-          paymentDate: new Date()
-        }
-      });
-    }
-    
-    res.json({
-      message: 'Payment processed successfully',
-      payment,
-      enrollment
-    });
-  } catch (error) {
-    console.error('Error processing payment:', error);
-    res.status(500).json({ error: 'Failed to process payment' });
+  } catch (err) {
+    return next(err);
   }
-};
+}
 
 /**
- * Get payment history for a user
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
+ * GET /payments/status/:providerReference — result-page polling.
+ * Ownership is enforced inside the service (matrix 17).
  */
-const getPaymentHistory = async (req, res) => {
+async function getStatus(req, res, next) {
   try {
-    const userId = req.user.id;
-    
-    // Get all payments for the user
-    const payments = await prisma.payment.findMany({
-      where: { userId: userId },
-      orderBy: { createdAt: 'desc' }
-    });
-    
-    // Get all paid enrollments with course details
-    const paidEnrollments = await prisma.enrollment.findMany({
-      where: {
-        userId: userId,
-        isPaid: true
-      },
-      include: {
-        course: {
-          select: {
-            id: true,
-            title: true,
-            thumbnail: true,
-            price: true
-          }
-        }
-      },
-      orderBy: { paymentDate: 'desc' }
-    });
-    
-    // Add full URLs for thumbnails
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
-    const formattedEnrollments = paidEnrollments.map(enrollment => ({
-      ...enrollment,
-      course: {
-        ...enrollment.course,
-        thumbnail: enrollment.course.thumbnail && !enrollment.course.thumbnail.startsWith('http')
-          ? `${baseUrl}/${enrollment.course.thumbnail}`
-          : enrollment.course.thumbnail
-      }
-    }));
-    
-    res.json({
-      payments,
-      paidCourses: formattedEnrollments
-    });
-  } catch (error) {
-    console.error('Error fetching payment history:', error);
-    res.status(500).json({ error: 'Failed to fetch payment history' });
+    const { providerReference } = req.params;
+    const status = await paymentService.getPaymentStatus(req.user.id, providerReference);
+    return res.status(200).json({ success: true, data: status });
+  } catch (err) {
+    return next(err);
   }
-};
+}
 
-module.exports = {
-  processCoursePayment,
-  getPaymentHistory
-}; 
+/** GET /payments/history — the student's own payments. */
+async function getHistory(req, res, next) {
+  try {
+    const history = await paymentService.getPaymentHistory(req.user.id);
+    return res.status(200).json({ success: true, data: history });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+module.exports = { createCheckout, getStatus, getHistory };
