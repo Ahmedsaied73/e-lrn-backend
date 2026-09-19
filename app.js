@@ -318,6 +318,9 @@ if (enabledFeatures.notifications !== false) {
 // leaves boot green (the repo's removal test).
 if (enabledFeatures.payments) {
   try {
+    // Per-user limiter lives INSIDE the module's route file (it must run after
+    // authenticateToken to key on the user id, and it keeps the module
+    // self-contained so deleting the folder leaves no dangling dependency).
     app.use('/payments', require('./src/routes/paymentRoutes'));
   } catch (err) {
     console.warn('[WARN] Payments router failed to mount:', err.message);

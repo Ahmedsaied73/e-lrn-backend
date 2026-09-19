@@ -14,7 +14,11 @@
  * optional-modules block. It is never required at boot otherwise.
  */
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const { authenticateToken } = require('../middlewares/index');
+const { createRateLimitStore } = require('../integrations/redis/rateLimitStore');
+const { isRedisEnabled } = require('../integrations/redis/redisClient');
+const config = require('../config/env');
 const {
   createCheckout,
   getStatus,
@@ -23,8 +27,23 @@ const {
 
 const router = express.Router();
 
+// Per-USER checkout limiter. Each call can create a Paymob intention, so it
+// must be bounded (approved plan item) — and keyed on the authenticated user
+// id, not the IP, so one student behind a shared NAT cannot starve others.
+// Mounted AFTER authenticateToken for that reason. `PAYMENTS_CHECKOUT_LIMIT`
+// is env-tunable; 15/15min is far above any legitimate flow because the
+// one-open-checkout rule (D5) reuses an existing session instead of creating
+// a new one.
+const checkoutLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: Number(process.env.PAYMENTS_CHECKOUT_LIMIT) || 15,
+  message: 'Too many payment attempts, please try again later.',
+  keyGenerator: (req) => (req.user && req.user.id ? `u:${req.user.id}` : `ip:${req.ip}`),
+  ...(isRedisEnabled() ? { store: createRateLimitStore('rl:checkout:', { failClosed: config.rateLimit.requireRedis }) } : {}),
+});
+
 // Start (or resume) a Paymob checkout for a course. Body: { courseSlug }.
-router.post('/checkout', authenticateToken, createCheckout);
+router.post('/checkout', authenticateToken, checkoutLimiter, createCheckout);
 
 // Poll a payment's status from the result page. Path: our providerReference.
 router.get('/status/:providerReference', authenticateToken, getStatus);

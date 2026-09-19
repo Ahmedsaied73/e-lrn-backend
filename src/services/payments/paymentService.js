@@ -144,12 +144,43 @@ async function createCourseCheckout(userId, courseSlug, urls = {}) {
   }
 
   // The PENDING row is created first so its id anchors the provider reference.
-  let payment = await prisma.payment.create({
-    data: {
-      userId, courseId: course.id, amount: priceMajor,
-      currency: config.paymob.currency, status: 'PENDING', provider: 'paymob',
-    },
-  });
+  // A partial unique index (20260919150000) allows only ONE open checkout per
+  // student+course, so two concurrent requests cannot both create one — the
+  // loser gets P2002 and falls back to the winner's checkout URL (D5, race-safe).
+  let payment;
+  try {
+    payment = await prisma.payment.create({
+      data: {
+        userId, courseId: course.id, amount: priceMajor,
+        currency: config.paymob.currency, status: 'PENDING', provider: 'paymob',
+      },
+    });
+  } catch (err) {
+    if (err && err.code === 'P2002') {
+      // The winner writes its checkout URL in a SECOND update, so a brief
+      // bounded poll avoids returning an empty URL to a racing client.
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const winner = await prisma.payment.findFirst({
+          where: { userId, courseId: course.id, status: 'PENDING', provider: 'paymob' },
+          orderBy: { createdAt: 'desc' },
+        });
+        if (winner && winner.providerCheckoutUrl) {
+          return {
+            paymentId: winner.id,
+            providerReference: winner.providerReference,
+            amountMajor: winner.amount,
+            currency: winner.currency,
+            checkoutUrl: winner.providerCheckoutUrl,
+            expiresAt: winner.intentionExpiresAt,
+            reused: true,
+          };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+      throw new AppError('A checkout is already being prepared. Please retry.', 409, 'CHECKOUT_IN_PROGRESS');
+    }
+    throw err;
+  }
   const providerReference = buildProviderReference(payment.id);
 
   let checkout;
@@ -289,33 +320,76 @@ async function processProviderEvent({ event }) {
   // a racing duplicate loses the CAS and becomes an idempotent no-op). The
   // providerTxnId UNIQUE constraint is the structural backstop (D12).
   const now = new Date();
-  const result = await prisma.$transaction(async (tx) => {
-    const claimed = await tx.payment.updateMany({
-      where: { id: payment.id, status: { in: ['PENDING', 'FAILED', 'EXPIRED'] } },
-      data: {
-        status: 'COMPLETED',
-        paidAt: now,
-        failureReason: null,
-        providerTxnId: event.providerTxnId,
-        rawEvent: redactEvent(event.raw),
-      },
-    });
-    if (claimed.count === 0) return { claimed: false };
+  let result;
+  try {
+    result = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.payment.updateMany({
+        where: { id: payment.id, status: { in: ['PENDING', 'FAILED', 'EXPIRED'] } },
+        data: {
+          status: 'COMPLETED',
+          paidAt: now,
+          failureReason: null,
+          providerTxnId: event.providerTxnId,
+          rawEvent: redactEvent(event.raw),
+        },
+      });
+      if (claimed.count === 0) return { claimed: false };
 
-    const expiresAt = new Date(now.getTime() + ACCESS_WINDOW_DAYS * 24 * 60 * 60 * 1000);
-    await tx.enrollment.upsert({
-      where: { userId_courseId: { userId: payment.userId, courseId: payment.courseId } },
-      create: {
-        userId: payment.userId, courseId: payment.courseId, isPaid: true,
-        paymentDate: now, expiresAt, startedAt: now, lastAccess: now,
-      },
-      update: { isPaid: true, paymentDate: now, expiresAt },
+      const expiresAt = new Date(now.getTime() + ACCESS_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+      await tx.enrollment.upsert({
+        where: { userId_courseId: { userId: payment.userId, courseId: payment.courseId } },
+        create: {
+          userId: payment.userId, courseId: payment.courseId, isPaid: true,
+          paymentDate: now, expiresAt, startedAt: now, lastAccess: now,
+        },
+        update: { isPaid: true, paymentDate: now, expiresAt },
+      });
+      return { claimed: true, expiresAt };
     });
-    return { claimed: true, expiresAt };
-  });
+  } catch (err) {
+    // This transaction id is already bound to a DIFFERENT payment row. That is
+    // a provider/account-side anomaly, not a transient fault: retrying can
+    // never succeed, so acknowledge (200) and surface it for manual review
+    // instead of letting Paymob retry forever.
+    if (err && err.code === 'P2002') {
+      log.error('payments.event.txn_conflict', { paymentId: payment.id, providerTxnId: event.providerTxnId });
+      await audit.record(null, {
+        action: 'PAYMENT_TXN_CONFLICT',
+        targetType: 'payment', targetId: payment.id,
+        metadata: { userId: payment.userId, courseId: payment.courseId, providerTxnId: event.providerTxnId },
+      });
+      return { handled: false, reason: 'transaction_id_conflict', status: 200 };
+    }
+    throw err;
+  }
 
   if (!result.claimed) {
     return { handled: true, reason: 'already_processed', status: 200 };
+  }
+
+  // Duplicate-charge detection: a student who paid an older session AND the
+  // current one has now been charged twice for the same course. Access is
+  // still correct (one enrollment, latest expiry), but the extra charge needs
+  // a human — surface it loudly for the manual refund path (D8/D9).
+  try {
+    const otherCompleted = await prisma.payment.count({
+      where: {
+        userId: payment.userId,
+        courseId: payment.courseId,
+        status: 'COMPLETED',
+        id: { not: payment.id },
+      },
+    });
+    if (otherCompleted > 0) {
+      log.error('payments.event.duplicate_charge', { paymentId: payment.id, userId: payment.userId, courseId: payment.courseId });
+      await audit.record(null, {
+        action: 'PAYMENT_DUPLICATE_CHARGE',
+        targetType: 'payment', targetId: payment.id,
+        metadata: { userId: payment.userId, courseId: payment.courseId, amount: payment.amount, otherCompleted },
+      });
+    }
+  } catch {
+    log.warn('payments.event.duplicate_charge_check_failed', { paymentId: payment.id });
   }
 
   // Post-commit side effects are best-effort — the 200 is already safe to send.

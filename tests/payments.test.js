@@ -93,6 +93,13 @@ async function deliver(obj) {
 }
 
 async function freshPayment(userId, courseId, amount = 500, status = 'PENDING') {
+  // The one-open-checkout unique index allows a single PENDING row per
+  // student+course. Expire any leftover open session first — exactly what
+  // happens in production when a student starts a fresh checkout.
+  await prisma.payment.updateMany({
+    where: { userId, courseId, status: 'PENDING' },
+    data: { status: 'EXPIRED' },
+  });
   return prisma.payment.create({
     data: {
       userId, courseId, amount, currency: 'EGP', status, provider: 'paymob',
