@@ -158,7 +158,7 @@ app.post(
 // pre-CSRF (server-to-server POST carries no Origin). The lazy require keeps
 // core import-free of the payments module — deleting src/services/payments
 // must never crash startup (removal test).
-if (config.features && config.features.payments) {
+if (config.features && config.features.payments && config.paymob && config.paymob.enabled) {
   try {
     const { handlePaymobWebhook } = require('./src/controllers/paymobWebhookController');
     // HMAC arrives as ?hmac= and is verified inside the provider before any
@@ -415,7 +415,7 @@ const server = app.listen(port, () => {
 
     // Payments reconciliation (D11 backstop) — only when the module is enabled.
     // Lazy require + guarded start: a payments problem must never break boot.
-    if (config.features && config.features.payments) {
+    if (config.features && config.features.payments && config.paymob && config.paymob.enabled) {
       try {
         const { startPaymentReconciliationJob } = require('./src/jobs/reconcilePayments');
         paymentReconciliationTask = startPaymentReconciliationJob();

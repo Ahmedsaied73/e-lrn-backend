@@ -268,7 +268,14 @@ function checkEnrollmentAccess(enrollment) {
       reason: 'You must be enrolled in this course to access this video',
     };
   }
-  const flagOn = Boolean(config && config.features && config.features.payments);
+  // Strict predicate (D6a): BOTH the feature flag AND a fully-configured
+  // Paymob provider. `PAYMENTS_ENABLED=true` with missing/placeholder keys
+  // (paymob.enabled=false) must fail CLOSED here — a free auto-paid enrollment
+  // is the bypass this check exists to stop.
+  const flagOn = Boolean(
+    config && config.features && config.features.payments &&
+    config.paymob && config.paymob.enabled
+  );
   if (!flagOn) return { ok: true };
 
   if (!enrollment.isPaid) {
