@@ -8,16 +8,39 @@
  */
 
 const prisma = require('../config/db');
+const cache = require('../integrations/redis/cache');
 
 /**
  * GET /user/me/achievements
  * Returns enrolled courses with per-course progress + quiz results summary,
  * plus overall totals (courses, videos, exams taken/passed, average score).
+ *
+ * Cache-aside, 60s TTL — per-user key (`achievements:{userId}`) because the
+ * payload embeds that user's progress + quiz scores. Invalidated by
+ * invalidateAchievementsForUser() on every mutation that flips it:
+ * video completion, quiz grade, enroll/unenroll.
  */
 async function getAchievements(req, res) {
   try {
     const userId = req.user.id;
+    const cacheKey = cache.buildKey('achievements', String(userId));
 
+    const payload = await cache.withCache(cacheKey, 60, async () => {
+      return buildAchievements(userId);
+    });
+
+    return res.status(200).json({ success: true, data: payload });
+  } catch (error) {
+    console.error('[AchievementsController] getAchievements error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
+/**
+ * The Prisma aggregate (enrolled courses + progress + quiz best scores).
+ * Split out of the handler so it can sit behind the cache loader.
+ */
+async function buildAchievements(userId) {
     // Enrolled courses with their READY Bunny videos
     const enrollments = await prisma.enrollment.findMany({
       where: { userId },
@@ -135,25 +158,18 @@ async function getAchievements(req, res) {
       ? parseFloat((totals.sumBestScores / totals.gradedExams).toFixed(2))
       : null;
 
-    return res.status(200).json({
-      success: true,
-      data: {
-        totals: {
-          coursesEnrolled: totals.coursesEnrolled,
-          coursesCompleted: totals.coursesCompleted,
-          videosWatched: totals.videosWatched,
-          videosTotal: totals.videosTotal,
-          examsTaken: totals.examsTaken,
-          examsPassed: totals.examsPassed,
-          averageScore,
-        },
-        courses,
+    return {
+      totals: {
+        coursesEnrolled: totals.coursesEnrolled,
+        coursesCompleted: totals.coursesCompleted,
+        videosWatched: totals.videosWatched,
+        videosTotal: totals.videosTotal,
+        examsTaken: totals.examsTaken,
+        examsPassed: totals.examsPassed,
+        averageScore,
       },
-    });
-  } catch (error) {
-    console.error('[AchievementsController] getAchievements error:', error);
-    return res.status(500).json({ success: false, error: 'Internal server error' });
-  }
+      courses,
+    };
 }
 
 module.exports = { getAchievements };

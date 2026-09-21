@@ -1,7 +1,7 @@
 const prisma = require('../config/db');
 const cache = require('../integrations/redis/cache');
 const { isAdmin } = require('../middlewares');
-const { evaluateGate, invalidateQuizMeta, invalidateGateForUser, checkEnrollmentAccess } = require('../services/quizService');
+const { evaluateGate, invalidateQuizMeta, invalidateGateForUser, invalidateAchievementsForUser, checkEnrollmentAccess } = require('../services/quizService');
 const { isValidSlug } = require('../utils/slugs');
 
 // ─── Public helper used by middleware/routes to point at progress rows ────────
@@ -104,6 +104,9 @@ const markVideoCompleted = async (req, res) => {
     await Promise.all([
       invalidateQuizMeta(req.user.id, videoId),
       invalidateGateForUser(req.user.id),
+      // Achievements aggregate embeds per-video progress — drop it too
+      // (invalidateAchievementsForUser never throws by contract).
+      invalidateAchievementsForUser(req.user.id),
     ]);
 
     return res.json({

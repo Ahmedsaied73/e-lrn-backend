@@ -24,7 +24,7 @@
 
 ## [ORPHANS & PENDING]
 - **Payments module SHIPPED (2026-09-19)** — all T0–T8 committed on `Dev` and pushed to `Dev` + `master` (backend HEAD `6f2c399`, frontend HEAD `05ae4ee`). Live sandbox intention verified end-to-end; full E2E 24/24; suite 38/38. See `plans/payments-plan.md` (gitignored, local).
-- **USER ACTION required for production enable:** set real Paymob creds + `PAYMENTS_ENABLED=true` in prod env (test keys are currently in local `.env` only); confirm `PUBLIC_API_URL` (webhook URL) + `FRONTEND_URL` (result redirect) point at the deployed hosts; run `prisma migrate deploy` on production (the two payments migrations apply cleanly — the RLS lockdown migration is already recorded).
+- **USER ACTION required for production enable:** follow `plans/prod-config-checklist.md` §5b (full go-live procedure: migrations → live PAYMOB_* creds → `PUBLIC_API_URL` + `FRONTEND_URL` → T9 sandbox purchase → flip `PAYMENTS_ENABLED=true` last). Test keys are currently in local `.env` only; run `prisma migrate deploy` on production (the two payments migrations apply cleanly — the RLS lockdown migration is already recorded).
 - T9 deferred by user request: no live sandbox PURCHASE was run (only a test intention + full forged-callback E2E). A manual real-sandbox purchase with a test card is the last acceptance step before flipping prod on.
 - Stale temp artifacts (`boot-*.txt`, `t3-*`, `e2e-server.txt`) are untracked and locked by other processes — safe to delete after those processes exit.
 - Load-test cohort cleanup (`%loadtest.local` users) on staging — awaits user sign-off.

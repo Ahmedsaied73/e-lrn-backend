@@ -686,6 +686,20 @@ async function invalidateGateForUser(userId) {
 }
 
 /**
+ * Drop the cached achievements aggregate (GET /user/me/achievements) for a
+ * user. Call after any write that flips it: video completion, quiz
+ * submission/grading (human or AI), enroll/unenroll. Best-effort — never throws.
+ */
+async function invalidateAchievementsForUser(userId) {
+  try {
+    const cache = require('../integrations/redis/cache');
+    await cache.del(cache.buildKey('achievements', String(userId)));
+  } catch {
+    // Cache failure must never break request flows.
+  }
+}
+
+/**
  * Best-effort "result ready" notification. Never throws and never blocks the
  * quiz flow — a notification failure just means silence, not corruption.
  * Lazy require keeps quizService importable without the notifications module.
@@ -815,6 +829,8 @@ async function submitAttempt(userId, attemptId, responses, autoSubmitted = false
   // Gate depends on GRADED attempt scores — invalidate so downstream video
   // gates reflect the new grade immediately (within the cache TTL at worst).
   await invalidateGateForUser(userId);
+  // Achievements aggregate embeds best scores — drop it too.
+  await invalidateAchievementsForUser(userId);
 
   return { attempt: updated, perQuestion, hasEssays };
 }
@@ -944,6 +960,8 @@ async function gradeEssayAttempt(adminId, attemptId, essayScores, essayFeedbackM
   await invalidateQuizMetaForAttempt(updated.id);
   // Essay grade changes the scorePercent that gates downstream videos.
   await invalidateGateForUser(updated.userId);
+  // Achievements aggregate embeds best scores — drop it too.
+  await invalidateAchievementsForUser(updated.userId);
   return updated;
 }
 
@@ -1038,7 +1056,11 @@ async function applyAiVerdict(attemptId, qName, verdict) {
   // changed nothing and skip invalidation.
   if (out.finalized) {
     await invalidateQuizMetaForAttempt(attemptId);
-    if (out.userId) await invalidateGateForUser(out.userId);
+    if (out.userId) {
+      await invalidateGateForUser(out.userId);
+      // Achievements aggregate embeds best scores — drop it too.
+      await invalidateAchievementsForUser(out.userId);
+    }
   }
   return out;
 }
@@ -1082,6 +1104,7 @@ module.exports = {
   invalidateQuizMetaForAttempt,
   invalidateQuizMetaForUser,
   invalidateGateForUser,
+  invalidateAchievementsForUser,
   resolveAttemptKey,
   resolveAttemptSurvey,
   uploadQuestionImage,

@@ -97,6 +97,8 @@ const enrollUserInCourse = async (req, res) => {
     // New enrollment clears any cached NOT_ENROLLED gate verdict for this user.
     const quizService = require('../services/quizService');
     await quizService.invalidateGateForUser(userId);
+    // Achievements aggregate embeds enrolled courses — drop it (never throws).
+    await quizService.invalidateAchievementsForUser(userId);
     // Per-user course page cache (courses/controllers getCourseById) — the
     // student's payload carries `enrollment`; drop it so the course page shows
     // their new enrollment on next load.
@@ -306,6 +308,8 @@ const adminEnroll = async (req, res) => {
     // New enrollment clears any cached NOT_ENROLLED gate verdict for the student.
     const quizService = require('../services/quizService');
     await quizService.invalidateGateForUser(parsedUserId);
+    // Achievements aggregate embeds enrolled courses — drop it (never throws).
+    await quizService.invalidateAchievementsForUser(parsedUserId);
     await cache.del(cache.buildKey('courses', 'byid', parsedCourseId, `u${parsedUserId}`));
 
     await audit.record(req, {
@@ -354,6 +358,8 @@ const unenroll = async (req, res) => {
     // Removing enrollment revokes video access — invalidate the user's gate cache.
     const quizService = require('../services/quizService');
     await quizService.invalidateGateForUser(enrollment.userId);
+    // Achievements aggregate embeds enrolled courses — drop it (never throws).
+    await quizService.invalidateAchievementsForUser(enrollment.userId);
     // Per-user course page cache — drop it so the course page stops showing the
     // removed enrollment immediately.
     await cache.del(cache.buildKey('courses', 'byid', enrollment.courseId, `u${enrollment.userId}`));
