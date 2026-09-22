@@ -629,11 +629,13 @@ async function finalizeStaleAttempt(attempt, quiz, db = prisma) {
  * Invalidate cached quiz meta for a user+video. Call after anything that can
  * change the meta response: attempt start/submit, essay grade, attempt reset,
  * video completion, exemption grant/revoke. Best-effort (never throws).
+ * Key layout is videoId-first (v1:quiz:meta:{videoId}:{userId}) — must match
+ * the read path in quizController.getQuizMeta.
  */
 async function invalidateQuizMeta(userId, videoId) {
   try {
     const cache = require('../integrations/redis/cache');
-    await cache.del(cache.buildKey('quiz', 'meta', userId, videoId));
+    await cache.del(cache.buildKey('quiz', 'meta', videoId, userId));
   } catch {
     // Cache failure must never break quiz flows.
   }
@@ -658,12 +660,14 @@ async function invalidateQuizMetaForAttempt(attemptId) {
 /**
  * Drop ALL cached meta for a user (exemption changes can flip `unlocked` on
  * any downstream video — precise per-video invalidation would need course
- * enumeration; the per-user namespace is small and bounded).
+ * enumeration). Meta keys are videoId-first (v1:quiz:meta:{videoId}:{userId}),
+ * so a per-user prefix can't be scanned directly; drop the whole namespace
+ * instead (rare admin op, bounded scan, entries self-heal in 30s).
  */
-async function invalidateQuizMetaForUser(userId) {
+async function invalidateQuizMetaForUser(_userId) {
   try {
     const cache = require('../integrations/redis/cache');
-    await cache.delPrefix(`v1:quiz:meta:${userId}:`);
+    await cache.delPrefix('v1:quiz:meta:');
   } catch {
     // Never break flows.
   }

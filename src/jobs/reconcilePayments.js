@@ -24,7 +24,7 @@
 const cron = require('node-cron');
 const prisma = require('../config/db');
 const config = require('../config/env');
-const { getRedis } = require('../integrations/redis/redisClient');
+const { acquireLock, releaseLock } = require('../integrations/redis/distributedLock');
 
 const STALE_MINUTES = 30;      // only consider rows older than this
 const MAX_BATCH = 50;          // bounded work per run
@@ -38,35 +38,6 @@ const log = {
   warn: (event, ctx = {}) => console.warn(`[WARN] ${event}`, JSON.stringify(ctx)),
   error: (event, ctx = {}) => console.error(`[ERROR] ${event}`, JSON.stringify(ctx)),
 };
-
-async function acquireDistributedLock() {
-  const client = getRedis();
-  if (!client || client.status !== 'ready') return true; // Redis off — process-local guard only
-  try {
-    const result = await Promise.race([
-      client.set(LOCK_KEY, process.pid.toString(), 'EX', LOCK_TTL_SECONDS, 'NX'),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('lock acquire timeout')), 3000)),
-    ]);
-    return result === 'OK';
-  } catch (err) {
-    // Commitment boundary: a Redis hiccup must never disable the safety net.
-    log.warn('payment.reconcile.lock_failed', { error: err.message });
-    return true;
-  }
-}
-
-async function releaseDistributedLock() {
-  const client = getRedis();
-  if (!client || client.status !== 'ready') return;
-  try {
-    await Promise.race([
-      client.del(LOCK_KEY),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('lock release timeout')), 3000)),
-    ]);
-  } catch (err) {
-    log.warn('payment.reconcile.lock_release_failed', { error: err.message });
-  }
-}
 
 /** Reconciliation is only meaningful (and safe) with payments on. */
 function paymentsOn() {
@@ -83,8 +54,15 @@ async function reconcilePayments() {
     log.warn('payment.reconcile.skip_overlap');
     return { expired: 0, checked: 0, settled: 0, skipped: true };
   }
-  const lockAcquired = await acquireDistributedLock();
-  if (!lockAcquired) {
+  let lock;
+  try {
+    lock = await acquireLock(LOCK_KEY, LOCK_TTL_SECONDS);
+  } catch (err) {
+    // Commitment boundary: a Redis hiccup must never disable the safety net.
+    log.warn('payment.reconcile.lock_failed', { error: err.message });
+    lock = { acquired: true, token: null }; // fail-open: process-local guard only
+  }
+  if (!lock.acquired) {
     log.warn('payment.reconcile.skip_lock_held');
     return { expired: 0, checked: 0, settled: 0, skipped: true };
   }
@@ -154,7 +132,11 @@ async function reconcilePayments() {
     return { expired, checked, settled, skipped: false };
   } finally {
     isRunning = false;
-    await releaseDistributedLock();
+    try {
+      await releaseLock(LOCK_KEY, lock.token);
+    } catch (err) {
+      log.warn('payment.reconcile.lock_release_failed', { error: err.message });
+    }
   }
 }
 

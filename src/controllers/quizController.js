@@ -45,10 +45,11 @@ async function getQuizMeta(req, res) {
     }
     const videoId = video.id;
 
-    // Per-user 30s cache (key includes userId — no cross-user leakage).
+    // Per-user 30s cache (key includes userId — no cross-user leakage); videoId
+    // leads the key so quiz edit/delete can drop one video's namespace only.
     // Invalidated on start/submit/grade/reset/complete/exemption change.
     // Cached bodies are wire-identical to fresh ones (same res.json path).
-    const metaKey = cache.buildKey('quiz', 'meta', userId, videoId);
+    const metaKey = cache.buildKey('quiz', 'meta', videoId, userId);
     const cachedMeta = await cache.get(metaKey);
     if (cachedMeta) {
       return res.status(200).json({ success: true, data: cachedMeta });
@@ -597,8 +598,9 @@ const hasPassingScore = passingScore !== undefined && passingScore !== null && p
     }
 
     // Quiz definition changed (title/passingScore/questions feed cached meta
-    // for every user) — drop the namespace (rare admin op, bounded scan).
-    await cache.delPrefix('v1:quiz:meta:');
+    // for every user) — drop this video's meta namespace (rare admin op,
+    // bounded scan; other videos' entries stay warm).
+    await cache.delPrefix(`v1:quiz:meta:${quiz.bunnyVideoId}:`);
 
     await audit.record(req, {
       action: existingQuiz ? 'QUIZ_UPDATE' : 'QUIZ_CREATE',
@@ -655,9 +657,9 @@ async function deleteQuiz(req, res) {
         select: { courseId: true },
       });
       if (video) await invalidateVideoCaches(video.courseId);
-      await cache.delPrefix('v1:quiz:meta:');
+      await cache.delPrefix(`v1:quiz:meta:${quiz.bunnyVideoId}:`);
     } catch {
-      // Stale cache self-heals in 60s; never fail the delete for it.
+      // Stale cache self-heals in 30s; never fail the delete for it.
     }
 
     await audit.record(req, {

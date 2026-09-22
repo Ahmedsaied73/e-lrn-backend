@@ -51,6 +51,18 @@ function budgetKey(date = new Date()) {
   return `ai:budget:${date.toISOString().slice(0, 10)}`;
 }
 
+// Atomic reserve: INCRBY in one round trip, then heal the TTL whenever the
+// key has none (pttl == -1): covers both the first hit and legacy TTL-less
+// leftovers from the pre-Lua GET → INCRBY → conditional EXPIRE sequence,
+// whose 3 round trips could skip the EXPIRE under a race. Returns the count.
+const BUDGET_RESERVE_LUA = `
+local count = redis.call('incrby', KEYS[1], ARGV[1])
+if redis.call('pttl', KEYS[1]) == -1 then
+  redis.call('expire', KEYS[1], 86400)
+end
+return count
+`;
+
 /**
  * Cost guard: at most N paid model calls per UTC day (Redis counter, 24h TTL).
  * Counts RESERVED worst-case calls, not actuals: one job may invoke the model
@@ -71,16 +83,16 @@ async function checkBudget(cost = 1) {
     const client = getRedis();
     if (!client || client.status !== 'ready') return true; // fail-open: no Redis, no budget tracking
     const key = budgetKey();
-    const used = Number(await client.get(key)) || 0;
+    // Reserve first, then compare: count - n is the pre-increment value the
+    // old GET saw, so the tripwire decision boundary is unchanged. Rejected
+    // calls keep incrementing (the counter may overshoot the budget) —
+    // harmless: the key is a 24h tripwire, not an exact meter.
+    const count = Number(await client.eval(BUDGET_RESERVE_LUA, 1, key, n));
+    const used = count - n;
     if (used >= dailyBudget()) {
       logWarn('ai.budget.exhausted', { used, budget: dailyBudget() });
       return false;
     }
-    const count = await client.incrby(key, n);
-    if (used === 0) {
-      await client.expire(key, 86400).catch(() => {});
-    }
-    void count;
     return true;
   } catch (err) {
     logWarn('ai.budget.check_failed', { error: err.message });
