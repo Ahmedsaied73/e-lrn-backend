@@ -8,8 +8,14 @@
  * Fail-open design: Redis is a cache/accelerator, never a hard dependency.
  * - Commands never buffer while disconnected (`enableOfflineQueue: false`),
  *   so a dead Redis fails fast instead of hanging requests.
- * - The client keeps reconnecting in the background; live traffic falls back
- *   to the source of truth meanwhile (see cache.js).
+ * - The client reconnects with capped exponential backoff + jitter; after
+ *   REDIS_MAX_RECONNECT_ATTEMPTS (default 50) it gives up and the process
+ *   stays in fail-open mode (traffic falls back to the source of truth —
+ *   see cache.js). A later `ensureConnected()` re-arms the retry budget,
+ *   but only after REDIS_RECONNECT_COOLDOWN_MS (default 60s) so a dead
+ *   Redis isn't hammered by per-request re-arm cycles.
+ * - BullMQ connections (maxRetriesPerRequest: null) are exempt from the
+ *   give-up: a dead worker/queue is worse than endless reconnects.
  * - `error` events are swallowed into sampled logs — an unhandled ioredis
  *   'error' event would crash the process.
  *
@@ -24,6 +30,18 @@ let cached = null;
 let connectPromise = null;
 let errorLogCount = 0;
 
+// Read here (not env.js): this module is the single owner of Redis access.
+function envPositiveInt(rawValue, fallback) {
+  const n = Number(rawValue);
+  return Number.isSafeInteger(n) && n > 0 ? n : fallback;
+}
+const MAX_RECONNECT_ATTEMPTS = envPositiveInt(process.env.REDIS_MAX_RECONNECT_ATTEMPTS, 50);
+const RECONNECT_COOLDOWN_MS = envPositiveInt(process.env.REDIS_RECONNECT_COOLDOWN_MS, 60000);
+
+// Timestamp of the last give-up — scopes the cooldown to the shared client's
+// episode. BullMQ connections never give up, so they never touch this.
+let lastGiveUpAt = 0;
+
 function isRedisEnabled() {
   return Boolean(config.redis && config.redis.enabled && config.redis.configured);
 }
@@ -32,14 +50,35 @@ function createRedisConnection(overrides = {}) {
   // Lazy require: keeps `require('./redisClient')` side-effect free when Redis
   // is disabled or ioredis is absent.
   const { Redis } = require('ioredis');
+  // BullMQ callers identify themselves via maxRetriesPerRequest: null (blocking
+  // semantics) — those connections must NEVER give up reconnecting, or a Redis
+  // blip would silently kill the queue/worker for the rest of the process.
+  const isBullMq = overrides.maxRetriesPerRequest === null;
   const client = new Redis(config.redis.url, {
     lazyConnect: true,
     enableOfflineQueue: false,
     maxRetriesPerRequest: 1,
     connectTimeout: 5000,
+    // TCP keepalive so idle connections (BullMQ queue conn, cron locks between
+    // 10-min ticks) survive provider-side idle eviction.
+    keepAlive: 10000,
     retryStrategy(times) {
-      return Math.min(times * 100, 3000);
+      if (!isBullMq && times > MAX_RECONNECT_ATTEMPTS) {
+        // One clear line, then stop: a permanently-dead Redis flips the
+        // process to fail-open mode instead of retrying (and logging) forever.
+        lastGiveUpAt = Date.now();
+        console.error(`[ERROR] Redis unreachable after ${MAX_RECONNECT_ATTEMPTS} reconnect attempts — giving up (fail-open). A later cache access re-arms retries after a ${RECONNECT_COOLDOWN_MS}ms cooldown.`);
+        return null;
+      }
+      // Exponential backoff capped at 30s with 50% jitter (avoids a reconnect
+      // thundering herd after a provider-wide outage).
+      const backoff = Math.min(100 * 2 ** (times - 1), 30000);
+      return Math.round(backoff / 2 + Math.random() * (backoff / 2));
     },
+    // reconnectOnError intentionally left at the ioredis default (reconnect
+    // only on READONLY failover errors): the attempt cap above already bounds
+    // any error-driven reconnect loop, and BullMQ needs that default to
+    // survive managed-Redis failovers.
     // Callers with different semantics override here — e.g. BullMQ mandates
     // maxRetriesPerRequest: null on its connections.
     ...overrides,
@@ -74,6 +113,10 @@ async function ensureConnected(timeoutMs = 5000) {
   const client = getRedis();
   if (!client) return false;
   if (client.status === 'ready') return true;
+  // Give-up cooldown: after the retry budget is exhausted the shared client
+  // sits in 'end' — don't re-arm a fresh retry cycle until the cooldown
+  // elapses, then re-arm normally (self-healing preserved).
+  if (client.status === 'end' && Date.now() - lastGiveUpAt < RECONNECT_COOLDOWN_MS) return false;
   if (!connectPromise) {
     connectPromise = (async () => {
       try {
