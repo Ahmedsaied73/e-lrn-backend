@@ -23,6 +23,7 @@ const TITLE_MAX = 200;
 const BODY_MAX = 5000;
 const LINK_MAX = 500;
 const FANOUT_CHUNK = 500;
+const UNREAD_COUNT_TTL_SEC = 30;
 const VALID_GRADES = ['FIRST_SECONDARY', 'SECOND_SECONDARY', 'THIRD_SECONDARY'];
 
 function badRequest(message) {
@@ -112,6 +113,7 @@ async function createForUsers({ userIds, type, title, body = null, linkUrl = nul
     const created = await prisma.notification.createMany({ data: chunk });
     count += created.count;
   }
+  await invalidateUnreadCount(ids);
   return { count, batchId: finalBatchId };
 }
 
@@ -137,8 +139,31 @@ async function listForUser(userId, { page = 1, limit = 20, unreadOnly = false } 
   return { items, total, page: pageNum, limit: take };
 }
 
+/**
+ * Drop cached unread counts for the given user id(s). Never throws — a Redis
+ * failure merely leaves a stale badge until the short TTL expires. Chunked
+ * like the fan-out (a broadcast can touch thousands of recipients).
+ */
+async function invalidateUnreadCount(userIds) {
+  try {
+    const cache = require('../../integrations/redis/cache');
+    const ids = (Array.isArray(userIds) ? userIds : [userIds]).filter((id) => Number.isSafeInteger(id) && id > 0);
+    for (let i = 0; i < ids.length; i += FANOUT_CHUNK) {
+      await cache.del(ids.slice(i, i + FANOUT_CHUNK).map((id) => cache.buildKey('notif', 'unread', String(id))));
+    }
+  } catch {
+    /* best-effort: a stale count self-heals on TTL */
+  }
+}
+
 async function unreadCount(userId) {
-  return prisma.notification.count({ where: { userId, read: false } });
+  // Cache-aside (TTL 30s): the FE polls this for the inbox badge on every
+  // navigation. Lazy require + withCache fall through to the DB transparently
+  // when Redis is off — Redis never breaks a request.
+  const cache = require('../../integrations/redis/cache');
+  return cache.withCache(cache.buildKey('notif', 'unread', String(userId)), UNREAD_COUNT_TTL_SEC, () =>
+    prisma.notification.count({ where: { userId, read: false } })
+  );
 }
 
 async function markRead(userId, id) {
@@ -151,6 +176,7 @@ async function markRead(userId, id) {
     where: { id: notificationId, userId },
     data: { read: true },
   });
+  if (updated.count > 0) await invalidateUnreadCount(userId);
   return { updated: updated.count };
 }
 
@@ -159,6 +185,7 @@ async function markAllRead(userId) {
     where: { userId, read: false },
     data: { read: true },
   });
+  if (updated.count > 0) await invalidateUnreadCount(userId);
   return { updated: updated.count };
 }
 

@@ -3,6 +3,7 @@ const bcrypt = require('bcrypt');
 const config = require('../config/env');
 const quizService = require('../services/quizService');
 const audit = require('../services/auditLog');
+const cache = require('../integrations/redis/cache');
 const { isValidSlug } = require('../utils/slugs');
 
 const selectWithoutPassword = {
@@ -27,6 +28,17 @@ async function resolveUserIdBySlug(slug) {
   return user ? user.id : null;
 }
 
+// GET /user/me payload cache (v1:me:{userId}, TTL 60s). Never-throw
+// invalidation — a Redis failure merely serves a stale profile until TTL.
+const ME_TTL_SEC = 60;
+async function invalidateMeCache(userId) {
+  try {
+    await cache.del(cache.buildKey('me', String(userId)));
+  } catch {
+    /* best-effort: stale copy expires on its TTL */
+  }
+}
+
 // Helper function to handle errors
 const handleError = (res, error, message) => {
   console.error(message, error);
@@ -36,10 +48,17 @@ const handleError = (res, error, message) => {
 // get my data as a user
 const getUser = async (req, res) => {
   try {
-    const user = await prisma.user.findUnique({
-      where: { id: req.user.id },
-      select: selectWithoutPassword
-    });
+    // Cache-aside (TTL 60s): /user/me is the FE's session-truth poll. Only the
+    // DB row is cached — feature flags are merged after the read so a flag
+    // flip applies on restart without waiting out the TTL. A missing user is
+    // never cached (withCache skips null → 404 path unchanged). Date fields
+    // round-trip through JSON to the same ISO strings res.json would emit.
+    const user = await cache.withCache(cache.buildKey('me', String(req.user.id)), ME_TTL_SEC, () =>
+      prisma.user.findUnique({
+        where: { id: req.user.id },
+        select: selectWithoutPassword
+      })
+    );
 
     if (!user) {
       return res.status(404).json({ success: false, error: 'User not found.' });
@@ -107,6 +126,7 @@ const deleteUser = async (req, res) => {
     // Drop the namespace so the next gate evaluation fails closed from the DB.
     // never-throw by contract (invalidateGateForUser swallows cache errors).
     await quizService.invalidateGateForUser(userIdNum);
+    await invalidateMeCache(userIdNum);
 
     await audit.record(req, {
       action: 'USER_DELETE',
@@ -195,6 +215,9 @@ const updateUser = async (req, res) => {
       data: updateData,
       select: selectWithoutPassword
     });
+
+    // The cached /user/me payload (v1:me:{id}) now holds pre-write fields.
+    await invalidateMeCache(parsedUserId);
 
     await audit.record(req, {
       action: 'USER_UPDATE',

@@ -79,7 +79,7 @@ async function reconcilePayments() {
         where: { status: 'PENDING', createdAt: { lt: cutoff } },
         orderBy: { createdAt: 'asc' },
         take: MAX_BATCH,
-        select: { id: true, providerReference: true, providerTxnId: true, intentionExpiresAt: true },
+        select: { id: true, userId: true, providerReference: true, providerTxnId: true, intentionExpiresAt: true },
       });
     } catch (err) {
       log.error('payment.reconcile.db_read_failed', { error: err.message });
@@ -100,7 +100,12 @@ async function reconcilePayments() {
           where: { id: row.id, status: 'PENDING' },
           data: { status: 'EXPIRED', failureReason: 'Checkout session expired before payment.' },
         });
-        if (flipped.count > 0) expired += 1;
+        if (flipped.count > 0) {
+          expired += 1;
+          // This direct CAS bypasses paymentService.expireIfStale, so drop
+          // the cached status poll here too (R8). Never throws.
+          await paymentService.invalidateStatusCache(row);
+        }
         continue;
       }
 

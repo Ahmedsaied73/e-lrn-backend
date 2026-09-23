@@ -376,22 +376,28 @@ async function applyBunnyStatus(bunnyVideoId, bunnyStatusCode) {
  *
  * @param {number} videoId - Local BunnyVideo.id
  * @param {number} userId - Authenticated user ID from JWT (never from request body)
+ * @param {{ video?: object }} [options] - `video`: a BunnyVideo row the caller
+ *   already loaded (playback controller's slug lookup). Trusted only when its
+ *   id matches videoId; otherwise the authoritative fetch runs.
  * @returns {Promise<{videoSlug, playbackUrl, expiresAt}>}
  */
-async function getPlaybackAccess(videoId, userId) {
-  // Load video — this is the authoritative courseId; we never trust client-supplied courseId
-  const video = await prisma.bunnyVideo.findUnique({
-    where: { id: videoId },
-    select: {
-      id: true,
-      slug: true,
-      courseId: true,
-      bunnyVideoId: true,
-      bunnyLibraryId: true,
-      status: true,
-      title: true,
-    },
-  });
+async function getPlaybackAccess(videoId, userId, { video: preloadedVideo } = {}) {
+  // Load video — this is the authoritative courseId; we never trust client-supplied courseId.
+  // A caller-supplied preloaded row skips the redundant re-fetch (R6).
+  const video = preloadedVideo && preloadedVideo.id === videoId
+    ? preloadedVideo
+    : await prisma.bunnyVideo.findUnique({
+        where: { id: videoId },
+        select: {
+          id: true,
+          slug: true,
+          courseId: true,
+          bunnyVideoId: true,
+          bunnyLibraryId: true,
+          status: true,
+          title: true,
+        },
+      });
 
   if (!video) {
     throw new AppError('Video not found', 404, ErrorCodes.VIDEO_NOT_FOUND);

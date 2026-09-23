@@ -75,6 +75,15 @@ async function login(req, res) {
       }
     });
 
+    // lastLoginAt is part of the cached /user/me payload (v1:me:{id}) — drop it.
+    // Never-throw: a Redis failure leaves a ≤60s-stale lastLoginAt, nothing worse.
+    try {
+      const cache = require('../integrations/redis/cache');
+      await cache.del(cache.buildKey('me', String(user.id)));
+    } catch {
+      /* best-effort */
+    }
+
     // Set HttpOnly Cookies on Response. Tokens are NEVER returned in the body —
     // the browser holds them in cookies (cookie-only auth model).
     res.cookie('accessToken', token, accessTokenCookieOptions);

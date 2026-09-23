@@ -332,7 +332,9 @@ const getBunnyVideoPlayback = async (req, res, next) => {
       return next(new AppError('Video not found', 404, ErrorCodes.VIDEO_NOT_FOUND));
     }
 
-    const result = await bunnyVideoService.getPlaybackAccess(video.id, userId);
+    // Pass the row we just loaded — getPlaybackAccess skips its redundant
+    // re-fetch (id match guard inside); enrollment check stays authoritative.
+    const result = await bunnyVideoService.getPlaybackAccess(video.id, userId, { video });
 
     return res.json({ success: true, data: result });
   } catch (err) {

@@ -48,7 +48,10 @@ function dailyBudget() {
 }
 
 function budgetKey(date = new Date()) {
-  return `ai:budget:${date.toISOString().slice(0, 10)}`;
+  // Manual 'v1:' prefix matches the cache.js buildKey convention, but this key
+  // deliberately bypasses buildKey — it's written by the raw Lua INCRBY below,
+  // not the JSON cache API. (The Lua also heals TTL-less legacy keys.)
+  return `v1:ai:budget:${date.toISOString().slice(0, 10)}`;
 }
 
 // Atomic reserve: INCRBY in one round trip, then heal the TTL whenever the

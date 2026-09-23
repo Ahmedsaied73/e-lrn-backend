@@ -32,6 +32,19 @@ function getGradingQueue() {
     const { createRedisConnection } = require('../../integrations/redis/redisClient');
     queue = new Queue(QUEUE_NAME, {
       connection: createRedisConnection({ maxRetriesPerRequest: null }),
+      // Queue-level defaults so every add path (submit, admin retry, future
+      // callers) gets the same retry + retention policy. Retention is
+      // count-AND-age bounded: terminal jobs self-prune, keeping Redis memory
+      // flat; the AiGradingJob DB row remains the durable audit trail.
+      defaultJobOptions: {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 30000 },
+        removeOnComplete: { count: 200, age: 86400 }, // keep last 200, never longer than 24h
+        // Failed jobs linger (last 1000, up to 7 days): BullMQ dedupes a
+        // re-add by jobId while the previous failed job still sits in the
+        // failed set — see the freshJobIds note in enqueueAiGrading.
+        removeOnFail: { count: 1000, age: 604800 },
+      },
     });
   }
   return queue;
@@ -71,10 +84,11 @@ function isAiQueueAvailable() {
  *
  * `options.freshJobIds == true` (manual admin retry only) appends a nonce to
  * each BullMQ jobId so a replay is genuinely re-scheduled even while the
- * previous failed job still sits in BullMQ's failed set (removeOnFail: 5000
- * would otherwise dedupe the re-add for ~5s). The DB row upsert still guards
- * idempotency (FAILED→PENDING once), and processGradingJob re-validates every
- * guard before writing, so double-processing is impossible either way.
+ * previous failed job still sits in BullMQ's failed set (removeOnFail keeps
+ * the last 1000 failed jobs for up to 7 days, and BullMQ would otherwise
+ * dedupe the re-add by jobId). The DB row upsert still guards idempotency
+ * (FAILED→PENDING once), and processGradingJob re-validates every guard
+ * before writing, so double-processing is impossible either way.
  */
 async function enqueueAiGrading(attemptId, options = {}) {
   try {
@@ -92,7 +106,8 @@ async function enqueueAiGrading(attemptId, options = {}) {
     const { shortHash } = require('../../integrations/redis/cache');
     // Nonce for fresh re-schedule: a single timestamp-suffix per invocation so
     // a manual retry never collides with the original (or a recent) failed job
-    // still in BullMQ's removeOnFail window (5s). On normal submit-path calls
+    // still retained by removeOnFail (count 1000 / age 7d — a job-count/age
+    // retention bound, not a time window). On normal submit-path calls
     // (freshJobIds unset) this stays empty — jobId replay-protection intact.
     const retryNonce = options.freshJobIds ? `-${Date.now().toString(36)}` : '';
     for (const [qName, entry] of Object.entries(answerKey)) {
@@ -117,11 +132,9 @@ async function enqueueAiGrading(attemptId, options = {}) {
           // A shortHash suffix keeps distinct question names that sanitize to
           // the same string from colliding on the same BullMQ jobId (BullMQ
           // dedupes by jobId, so a collision would silently drop a job).
+          // Retry + retention options live in the Queue's defaultJobOptions;
+          // only the dedupe-anchoring jobId is per-add.
           jobId: `ai-${attemptId}-${qName.replace(/[^a-zA-Z0-9_-]/g, '_')}-${shortHash(qName)}${retryNonce}`,
-          attempts: 3,
-          backoff: { type: 'exponential', delay: 30000 },
-          removeOnComplete: 1000,
-          removeOnFail: 5000,
         }
       );
       enqueued += 1;

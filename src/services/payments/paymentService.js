@@ -25,6 +25,13 @@ const { isValidSlug } = require('../../utils/slugs');
 // 1-year access window from purchase (D2). No cron: the gate compares dates.
 const ACCESS_WINDOW_DAYS = 365;
 
+// Status-poll cache (R8): the result page polls GET /payments/status/:ref
+// while PENDING. PENDING entries live 15s (the page is polling live anyway);
+// terminal entries live 1h — every status transition below invalidates the
+// key, so FAILED/EXPIRED healing to COMPLETED can never serve a stale truth.
+const STATUS_CACHE_TTL_PENDING_SEC = 15;
+const STATUS_CACHE_TTL_TERMINAL_SEC = 3600;
+
 const log = {
   info: (event, ctx = {}) => console.log(`[INFO] ${event}`, JSON.stringify(ctx)),
   warn: (event, ctx = {}) => console.warn(`[WARN] ${event}`, JSON.stringify(ctx)),
@@ -65,6 +72,29 @@ function redactEvent(raw) {
   return copy;
 }
 
+// Key includes the caller's userId so a cache hit can never cross the
+// ownership boundary: a wrong-user poll misses the cache and still hits the
+// 404 check below.
+function statusCacheKey(providerReference, userId) {
+  try {
+    return cache.buildKey('payments', 'status', providerReference, `u${userId}`);
+  } catch {
+    return null; // unusable key parts (e.g. oversize ref) — skip caching, never break the read
+  }
+}
+
+/**
+ * Best-effort invalidation of the cached status payload. Called after EVERY
+ * status transition (lazy expiry, fulfilment CAS incl. healing, failure,
+ * refund, reconcile) so a cached PENDING/FAILED/EXPIRED never outlives the
+ * row's truth. Never throws.
+ */
+async function invalidateStatusCache(payment) {
+  if (!payment || !payment.providerReference || payment.userId === undefined) return;
+  const key = statusCacheKey(payment.providerReference, payment.userId);
+  if (key) await cache.del(key); // cache.del is fail-open
+}
+
 /**
  * Lazy expiry flip (D4): a PENDING payment whose hosted session outlived
  * intentionExpiresAt becomes EXPIRED. Called on every customer-visible read
@@ -82,7 +112,10 @@ async function expireIfStale(payment) {
     return prisma.payment.findUnique({ where: { id: payment.id } });
   }
   log.info('payments.expired', { paymentId: payment.id });
-  return prisma.payment.findUnique({ where: { id: payment.id } });
+  const fresh = await prisma.payment.findUnique({ where: { id: payment.id } });
+  // PENDING→EXPIRED flip: a cached PENDING status must not outlive it.
+  await invalidateStatusCache(fresh);
+  return fresh;
 }
 
 /**
@@ -295,6 +328,7 @@ async function processProviderEvent({ event }) {
       return { handled: true, reason: 'failure_after_terminal', status: 200 };
     }
     log.info('payments.event.failed', { paymentId: payment.id, providerTxnId: event.providerTxnId });
+    await invalidateStatusCache(payment); // PENDING→FAILED
     return { handled: true, reason: 'payment_failed', status: 200 };
   }
 
@@ -404,6 +438,9 @@ async function processProviderEvent({ event }) {
   } catch {
     log.warn('payments.event.cache_invalidate_failed', { paymentId: payment.id });
   }
+  // PENDING/FAILED/EXPIRED → COMPLETED (late-settlement healing included):
+  // the cached status poll must converge immediately, not at TTL.
+  await invalidateStatusCache(payment);
   await audit.record(null, {
     action: 'PAYMENT_COMPLETED',
     targetType: 'payment', targetId: payment.id,
@@ -444,6 +481,8 @@ async function refundPayment(payment, { providerTxnId, raw } = {}) {
     return { handled: true, reason: 'refund_no_completed_payment', status: 200 };
   }
 
+  await invalidateStatusCache(payment); // COMPLETED→REFUNDED (access revoked)
+
   try {
     const quizService = require('../quizService');
     await quizService.invalidateGateForUser(payment.userId);
@@ -465,6 +504,14 @@ async function refundPayment(payment, { providerTxnId, raw } = {}) {
  * the result page converges without a cron (D4).
  */
 async function getPaymentStatus(userId, providerReference) {
+  // Manual get/set rather than withCache: the TTL depends on the LOADED status
+  // (15s PENDING vs 1h terminal), which withCache's fixed-ttl signature cannot
+  // express. cache.* never throws — a Redis hiccup degrades to a plain miss.
+  const key = statusCacheKey(providerReference, userId);
+  if (key) {
+    const cached = await cache.get(key);
+    if (cached) return cached;
+  }
   const found = await prisma.payment.findUnique({
     where: { providerReference },
     select: { id: true, userId: true, courseId: true, status: true, amount: true, currency: true, paidAt: true, intentionExpiresAt: true, course: { select: { slug: true, title: true } } },
@@ -481,7 +528,7 @@ async function getPaymentStatus(userId, providerReference) {
     });
     enrolled = Boolean(enrollment && (!enrollment.expiresAt || enrollment.expiresAt > new Date()));
   }
-  return {
+  const response = {
     status: payment.status,
     paid: payment.status === 'COMPLETED',
     enrolled,
@@ -490,6 +537,11 @@ async function getPaymentStatus(userId, providerReference) {
     paidAt: payment.paidAt,
     course: payment.course,
   };
+  // Only reachable past the ownership check, so 404s are never cached.
+  if (key) {
+    await cache.set(key, response, response.status === 'PENDING' ? STATUS_CACHE_TTL_PENDING_SEC : STATUS_CACHE_TTL_TERMINAL_SEC);
+  }
+  return response;
 }
 
 /** User-facing payment history — no provider internals, no other user's rows. */
@@ -517,6 +569,7 @@ module.exports = {
   expireIfStale,
   getPaymentStatus,
   getPaymentHistory,
+  invalidateStatusCache, // reconcilePayments expires rows via its own CAS
   ACCESS_WINDOW_DAYS,
 };
 
