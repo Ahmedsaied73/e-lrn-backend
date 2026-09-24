@@ -17,6 +17,13 @@ const prisma = require('../../config/db');
 const QUEUE_NAME = 'ai-grading';
 
 let queue = null;
+// The ioredis instance we inject as the queue's connection. BullMQ treats a
+// caller-provided connection as EXTERNALLY OWNED and does not quit it in
+// Queue.close() — so we keep the reference and close it ourselves. Without
+// this the socket stays open after close and a node:test child process never
+// exits (verified: `node --test tests/redis-caches-p45.test.js` hung with all
+// assertions green until this was fixed).
+let queueConnection = null;
 
 function logInfo(event, ctx = {}) {
   console.log(`[INFO] ${event}`, JSON.stringify(ctx));
@@ -30,8 +37,9 @@ function getGradingQueue() {
   if (!queue) {
     const { Queue } = require('bullmq');
     const { createRedisConnection } = require('../../integrations/redis/redisClient');
+    queueConnection = createRedisConnection({ maxRetriesPerRequest: null });
     queue = new Queue(QUEUE_NAME, {
-      connection: createRedisConnection({ maxRetriesPerRequest: null }),
+      connection: queueConnection,
       // Queue-level defaults so every add path (submit, admin retry, future
       // callers) gets the same retry + retention policy. Retention is
       // count-AND-age bounded: terminal jobs self-prune, keeping Redis memory
@@ -57,11 +65,23 @@ function getGradingQueue() {
 async function closeGradingQueue() {
   if (!queue) return;
   const toClose = queue;
+  const toCloseConn = queueConnection;
   queue = null;
+  queueConnection = null;
   try {
     await toClose.close();
   } catch (err) {
     logWarn('ai.queue.close_failed', { error: err.message });
+  }
+  // BullMQ does not own an injected connection, so Queue.close() alone leaves
+  // the socket open. Quit it here — otherwise SIGTERM drain (app.js) and
+  // node:test child processes both keep a live handle forever.
+  if (toCloseConn) {
+    try {
+      await toCloseConn.quit();
+    } catch {
+      try { toCloseConn.disconnect(); } catch { /* already gone */ }
+    }
   }
 }
 

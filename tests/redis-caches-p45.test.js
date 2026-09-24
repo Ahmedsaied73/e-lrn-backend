@@ -100,6 +100,15 @@ describe('P4–P5 Redis caches', () => {
       );
     }
     await prisma.$disconnect();
+    // The notification write above goes through the app's SHARED prisma
+    // singleton (src/config/db.js), which this suite opens indirectly via
+    // notificationService.createForUsers. Disconnect it too, or its pool keeps
+    // the test subprocess alive after the suite ends and `node --test` hangs on
+    // an idle child. (Only reproduces when Redis is UP: with the store down the
+    // BullMQ test skips and the notification service never runs.)
+    try {
+      await require('../src/config/db').$disconnect();
+    } catch { /* already gone */ }
     // Drop the shared client so a dead Redis's reconnect loop can't pin the
     // test subprocess open after the suite finishes.
     await disconnectRedis().catch(() => {});
