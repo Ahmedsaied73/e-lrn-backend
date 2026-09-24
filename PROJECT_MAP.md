@@ -18,6 +18,7 @@
 ## [ARCHITECTURE]
 - `app.js` — entry; middleware order: trust proxy → CORS/origin-403 → CSRF → helmet(CSP) → webhook(raw) → json → limiters → routes → probes → global error handler. Crash-safe async patch loaded first.
 - `src/routes/` + `src/controllers/` + `src/services/` (business logic) + `src/middlewares/` (auth/role/sequential/csrf/logger) + `src/config/` (env fail-fast, db, cors single-source) + `src/integrations/` (bunny, redis) + `src/jobs/` + `src/utils/` (slugs, AppError).
+- `src/services/agent/` — AI admin agent (phases 0–2 shipped, NOT mounted yet): `tools/` (28 read + 12 HITL-gated mutation tools, all Prisma-only, row-capped/cached/redacted), `pii.js`, `router.js` (28-intent deterministic Arabic catalogue), `templates.js` (Arabic Markdown renderers), `engine.js` (read-only fast path — no LLM, no SSE in this tier).
 - Tests: `tests/*.test.js` via `scripts/run-tests.js` (spawns server, waits `/health`, net-zero against staging DB).
 - CI: `.github/workflows/ci.yml` (Redis service, lint + suite + prisma validate/status).
 - Plans: `plans/*.md`. Audit record: `tasks/db-audit-*.md`.
@@ -32,6 +33,8 @@
 - USER ACTION required to activate Task 5: add `PROD_BASE_URL` repo secret, push `Dev`, trigger `uptime-probe` once via workflow_dispatch. Restart the local dev server (3005) to expose `/metrics`.
 - USER ACTION: production must run the RLS migration (`prisma migrate deploy`, or the documented `db execute` + `migrate resolve --applied` procedure) at deploy time.
 - Deferred (documented, non-blocking): `/metrics` auth token option; AGENTS.md note that public.* is RLS default-deny (zero policies); `tests/` not covered by `npm run lint` (script is `eslint src app.js`); cold-cache gate tail + dashboard 16-query fanout.
+- **AI admin agent — Phases 0–2 COMPLETE (local)**: kill switch `AI_AGENT_ENABLED` (default false) + `AI_AGENT_ALLOW_MUTATIONS` (default false); 40 Prisma-only tools (28 analytics + 12 mutations that refuse to run without an approved admin id and always write an AuditLog row); deterministic fast path answers 28 recurring Arabic questions offline (router + Arabic templates, **no LLM**). Tests: `tests/agent-*.test.js` (Phase 1: 30, Phase 2: 34). Nothing is mounted on any route yet. Next: Phase 3 (LangGraph graph + Groq/Gemini failover + conversation persistence) then Phase 4 (REST + socket.io HITL approvals + frontend chat).
+- USER ACTION: test files run sequentially now (`scripts/run-tests.js` passes `--test-concurrency=1`) — a deliberate trade of wall-clock time for deterministic runs against the single shared staging DB/Redis.
 - Housekeeping: one locked temp file `anon-probe.txt` could not be deleted (held by another process) — untracked, safe to remove after that process exits.
 - PAYMOB WIP (not ours, untouched): `prisma/schema.prisma`, `.env.example`, `src/config/env.js`, `app.js` working diff, payment/enrollment/notification controllers, `src/controllers/paymobWebhookController.js`, `src/integrations/paymob/`, `src/services/paymentService.js`, `tests/paymob.test.js`, `prisma/migrations/20260919120000_paymob_payments/` (migration deliberately left UNAPPLIED), `test-out.txt`.
 - Load-test cohort cleanup (`%loadtest.local` users) on staging — awaits user sign-off (tasks/db-audit-todo.md last checkbox).
