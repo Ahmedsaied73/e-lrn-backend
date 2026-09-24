@@ -167,11 +167,88 @@ function resolveAiGrader() {
   };
 }
 
+// ── AI Admin Agent (admin copilot: analytics + guarded, approved mutations) ──
+// NEVER boot-critical (same doctrine as resolveAiGrader above): a missing
+// GROQ_API_KEY only removes the primary provider (Gemini remains available),
+// and a missing key on both leaves the module `configured: false` so the routes
+// can answer with a clear Arabic configuration error instead of crashing boot.
+//
+// Two INDEPENDENT switches, deliberately:
+//   AI_AGENT_ENABLED         (default FALSE) — kill switch, checked at mount
+//                            time. Disabled means NO routes/SSE/LLM calls at
+//                            all — absent, never stubbed (module-removal test).
+//   AI_AGENT_ALLOW_MUTATIONS (default FALSE) — read-only is the shipped
+//                            default even when the agent is on. While false the
+//                            mutating tools are not registered with the model,
+//                            so no prompt (or prompt injection) can reach them.
+// `allowMutations` can NEVER be true while `enabled` is false.
+const AGENT_PLACEHOLDER_RE = /your_|placeholder|change_me|example|TODO|\[.*\]/i;
+function agentSecret(name) {
+  const raw = process.env[name];
+  // '' and undefined both mean "unset" — and because dotenv never overrides an
+  // already-present key, '' also shields a test/boot from a developer's .env.
+  if (!raw || AGENT_PLACEHOLDER_RE.test(raw)) return null;
+  return raw;
+}
+function clampAgentInt(rawValue, fallback, min, max) {
+  // '' / null / undefined are "unset" — NOT zero. Number('') is 0, which is a
+  // safe integer and would silently clamp every cap to its minimum (a
+  // maxToolCalls of 1 instead of 6), so an absent env var must short-circuit to
+  // the fallback before any numeric coercion.
+  if (rawValue === undefined || rawValue === null || String(rawValue).trim() === '') return fallback;
+  const n = Number(rawValue);
+  if (!Number.isSafeInteger(n)) return fallback;
+  return Math.min(Math.max(n, min), max);
+}
+function resolveAiAgent() {
+  const enabled = resolveFlag(process.env.AI_AGENT_ENABLED, false);
+  const groqApiKey = agentSecret('GROQ_API_KEY');
+  const geminiApiKey = agentSecret('GEMINI_API_KEY');
+
+  const providers = {
+    groq: { configured: Boolean(groqApiKey) },
+    gemini: { configured: Boolean(geminiApiKey) },
+  };
+  // Primary = first configured provider in preference order. The Phase 3
+  // failover wrapper walks this list on 429/5xx, so adding a provider later is
+  // a one-line change here — never a change inside the agent graph.
+  const primary = providers.groq.configured ? 'groq' : (providers.gemini.configured ? 'gemini' : null);
+  const configured = primary !== null;
+
+  if (enabled && !configured) {
+    console.warn('[WARN] AI_AGENT_ENABLED=true but neither GROQ_API_KEY nor GEMINI_API_KEY is set — the agent will answer with a configuration error (no boot failure).');
+  }
+
+  return {
+    enabled,
+    // Kill switch dominates: mutations can never outlive the agent switch.
+    allowMutations: enabled && resolveFlag(process.env.AI_AGENT_ALLOW_MUTATIONS, false),
+    configured,
+    primary,
+    providers,
+    groqApiKey,
+    geminiApiKey,
+    primaryModel: process.env.AI_AGENT_MODEL_PRIMARY || 'llama-3.3-70b-versatile',
+    // Defaults to the model the AI grader already runs here (proven in prod).
+    fallbackModel: process.env.AI_AGENT_MODEL_FALLBACK || 'gemini-3.6-flash',
+    // Budgets/caps — every one CLAMPED, because a typo in an env var must never
+    // be able to turn one admin question into unbounded LLM/DB spend.
+    maxToolCalls: clampAgentInt(process.env.AI_AGENT_MAX_TOOL_CALLS, 6, 1, 10),
+    maxToolResultRows: clampAgentInt(process.env.AI_AGENT_MAX_TOOL_RESULT_ROWS, 50, 1, 200),
+    maxAnswerTokens: clampAgentInt(process.env.AI_AGENT_MAX_ANSWER_TOKENS, 700, 128, 4000),
+    turnTimeoutMs: clampAgentInt(process.env.AI_AGENT_TURN_TIMEOUT_MS, 45000, 5000, 120000),
+    approvalTtlMs: clampAgentInt(process.env.AI_AGENT_APPROVAL_TTL_MS, 5 * 60 * 1000, 30 * 1000, 30 * 60 * 1000),
+    dailyTurnBudget: clampAgentInt(process.env.AI_AGENT_DAILY_TURN_BUDGET, 500, 1, 100000),
+    conversationRetentionDays: clampAgentInt(process.env.AI_AGENT_CONVERSATION_RETENTION_DAYS, 90, 7, 3650),
+  };
+}
+
 // ── Optional feature modules (building blocks) ─────────────────────────────
 // Each module reads enabled here; absence means the approved default (true =
 // current behavior preserved). Restart to change. See plans/ai-grader-plan.md
 // and the notifications plan for the per-module contract. Payments is the
-// exception: PAYMENTS_ENABLED defaults to FALSE (see resolvePaymob below).
+// exceptions: PAYMENTS_ENABLED and AI_AGENT_ENABLED default to FALSE (see
+// resolvePaymob / resolveAiAgent below).
 
 // ── Paymob payments (course purchases, D3/D16) ─────────────────────────────
 // Feature-gated by PAYMENTS_ENABLED (default FALSE — today's free-enrollment
@@ -228,6 +305,10 @@ function resolveFlag(rawValue, defaultValue) {
   return ['true', '1', 'yes', 'on'].includes(String(rawValue).trim().toLowerCase());
 }
 
+// Resolved once at boot: every consumer (routes, SSE handler, graph) reads this
+// same frozen snapshot, so a mid-request env change can never split behaviour.
+const aiAgent = resolveAiAgent();
+
 const config = {
   jwt: {
     secret: process.env.JWTSECRET,
@@ -241,6 +322,7 @@ const config = {
     requireRedis: resolveRateLimitRequireRedis(),
   },
   aiGrader: resolveAiGrader(),
+  aiAgent,
   sentry: {
     // Optional. Present → backend errors go to Sentry (src/config/sentry.js);
     // absent → that module no-ops. Never boot-critical.
@@ -250,6 +332,9 @@ const config = {
     notifications: resolveFlag(process.env.NOTIFICATIONS_ENABLED, true),
     aiGrader: resolveFlag(process.env.AI_GRADER_ENABLED, true),
     payments: resolveFlag(process.env.PAYMENTS_ENABLED, false),
+    // Second exception (default FALSE). Read at MOUNT time (app.js): while it is
+    // false there is no agent router, no SSE endpoint and no LLM call at all.
+    aiAgent: aiAgent.enabled,
   },
   paymob: resolvePaymob(),
   admin: {
