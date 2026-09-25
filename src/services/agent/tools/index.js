@@ -82,15 +82,21 @@ function getDefinition(name) {
 }
 
 /**
- * Convert definitions to LangChain tools. `resolveContext(args)` supplies the
+ * Convert definitions to LangChain tools. `resolveContext(args, def)` supplies the
  * per-invocation context (at minimum { approved, adminId } for actions) — the
  * graph passes the approval it just received, which is exactly why the approval
  * gate cannot be bypassed by the model: it is not part of the tool's arguments.
+ *
+ * `def` is passed as the second argument so a resolver can bind a decision to a
+ * SPECIFIC tool (an approval for one action must not authorise another).
  */
 function toLangChainTools(defs = listDefinitions(), resolveContext = () => ({})) {
   const { tool } = require('@langchain/core/tools');
   return defs.map((def) =>
-    tool(async (args) => execute(def, args, resolveContext(args)), {
+    // `await` on purpose: an authority check may need to hit the database (consuming
+    // a single-use approval), and a sync-only resolver would force that check to
+    // happen somewhere less safe. A non-promise return is awaited harmlessly.
+    tool(async (args) => execute(def, args, await resolveContext(args, def)), {
       name: def.name,
       description: def.description,
       schema: def.schema,
