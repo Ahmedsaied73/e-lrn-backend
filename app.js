@@ -327,6 +327,18 @@ if (enabledFeatures.payments) {
   }
 }
 
+// ── AI admin agent (Phase 4) — REST routes mounted BEFORE global error handler ──
+// Disabled means no /admin/agent routes at all (never stubs), the same doctrine as
+// the payments and notifications modules above.
+if (config.aiAgent && config.aiAgent.enabled) {
+  try {
+    app.use('/admin/agent', require('./src/routes/agentRoutes'));
+    console.log('[INFO] Agent REST mounted: /admin/agent');
+  } catch (err) {
+    console.warn('[WARN] Agent router failed to mount:', err.message);
+  }
+}
+
 // ── Bunny Stream routes ────────────────────────────────────────────────────────
 // /courses prefix: handles POST /courses/:courseId/videos (create)
 // /videos prefix:  handles POST /videos/:videoId/upload and GET /videos/:videoId/playback
@@ -408,6 +420,19 @@ process.on('unhandledRejection', (reason) => {
 const server = app.listen(port, () => {
     console.log(`Example app listening at http://localhost:${port}`);
     console.log('CORS enabled for configured origins');
+
+    // The agent's WebSocket needs the listening HTTP server, so it is attached
+    // here rather than at require time: unit tests that import app.js without
+    // listening never create a socket server (or its timers) by accident.
+    if (config.aiAgent && config.aiAgent.enabled) {
+      try {
+        const { initAgentSocket, SOCKET_PATH } = require('./src/services/agent/socketHandler');
+        initAgentSocket(server);
+        console.log(`[INFO] Agent WebSocket mounted at ${SOCKET_PATH}`);
+      } catch (err) {
+        console.warn('[WARN] Agent WebSocket failed to mount:', err.message);
+      }
+    }
 
     // Start Bunny video reconciliation job (every 10 minutes). Keep the task
     // handle so shutdown can stop it.
