@@ -238,6 +238,10 @@ async function getOrCreateConversation({ prisma, adminId, conversationId } = {})
     const conversation = await requireOwnedConversation(prisma, adminId, conversationId);
     return {
       id: conversation.id,
+      // `adminId` is returned so a caller that already passed the ownership gate can
+      // hand the row straight back to recordTurn() as `validated` and save a second
+      // round trip — the check is then done against the row in hand, not a fresh read.
+      adminId: conversation.adminId,
       title: conversation.title ?? null,
       createdAt: toIso(conversation.createdAt),
       updatedAt: toIso(conversation.updatedAt),
@@ -251,6 +255,7 @@ async function getOrCreateConversation({ prisma, adminId, conversationId } = {})
 
   return {
     id: created.id,
+    adminId,
     title: created.title ?? null,
     createdAt: toIso(created.createdAt),
     updatedAt: toIso(created.updatedAt),
@@ -290,41 +295,132 @@ async function appendMessage({
 }
 
 /**
- * One question/answer pair. The two rows are written in order and the title is set
- * last, from the first question only: a conversation that already has a title keeps
- * it, so a later question cannot rename the sidebar entry.
+ * The FIRST turn of a conversation — the row and its two messages in ONE round trip.
  *
- * The writes are sequential rather than wrapped in $transaction: messages are
- * append-only and the caller owns retry policy, while the title lives on the
- * conversation row and stays consistent either way.
+ * WHY THIS EXISTS (measured): a new conversation used to cost 4–5 sequential round
+ * trips (create the row, then re-read it, then insert the question, then the answer,
+ * then set the title). One round trip to this deployment's database pooler is ~355ms,
+ * so that sequence alone was ~2.2s of a ~2.6s request. The fix is not a faster
+ * database, it is writing the whole turn as one statement.
+ *
+ * It also removes a class of bug rather than just latency: the conversation row is
+ * created TOGETHER WITH the turn that gives it meaning, so a turn that never
+ * produces an answer (grounding failure, provider outage) can no longer leave a
+ * message-less row in the admin's sidebar. In one diagnostic session 25 of 70 rows
+ * were exactly that: titless, empty, and impossible to explain to an admin.
+ *
+ * The admin predicate is carried by the parent create, so a nested write can never
+ * attach a transcript to somebody else's account.
+ *
+ * @returns {Promise<{ id: number, title: string, createdAt: string, updatedAt: string, userMessageId: number, assistantMessageId: number }>}
+ */
+async function createConversationWithTurn({ prisma, adminId, question, answer, metadata } = {}) {
+  assertAdminId(adminId);
+
+  const userRow = buildMessageData({ role: ROLES.USER, content: question });
+  const assistantRow = buildMessageData({
+    role: ROLES.ASSISTANT,
+    content: answer,
+    metadata: sanitizeTurnMetadata(metadata),
+  });
+  // A NESTED create must not carry a conversationId: the parent supplies it, and
+  // setting it here would be a second, contradictory owner of the same rows.
+  delete userRow.conversationId;
+  delete assistantRow.conversationId;
+
+  const created = await prisma.agentConversation.create({
+    data: {
+      adminId,
+      // The title comes from the first question and is written once, here — there is
+      // no later "fix the title" update to make, so the row is never briefly wrong.
+      title: buildTitle(question),
+      messages: { create: [userRow, assistantRow] },
+    },
+    select: {
+      id: true,
+      title: true,
+      createdAt: true,
+      updatedAt: true,
+      messages: { select: { id: true, role: true } },
+    },
+  });
+
+  const messages = Array.isArray(created.messages) ? created.messages : [];
+  const userMessageId = (messages.find((m) => m.role === ROLES.USER) || {}).id || null;
+  const assistantMessageId = (messages.find((m) => m.role === ROLES.ASSISTANT) || {}).id || null;
+
+  return {
+    id: created.id,
+    title: created.title ?? null,
+    createdAt: toIso(created.createdAt),
+    updatedAt: toIso(created.updatedAt),
+    userMessageId,
+    assistantMessageId,
+  };
+}
+
+/**
+ * A follow-up turn inside an existing conversation.
+ *
+ * The title is set from the first question only: a conversation that already has a
+ * title keeps it, so a later question can never rename the sidebar entry.
+ *
+ * ROUND-TRIP BUDGET: 2 — or 1 when the caller passes `validated` (see below).
+ * One read for ownership, then ONE batched transaction for the two inserts and the
+ * conditional title update — Prisma sends an array of operations as a single request,
+ * so this costs what one insert used to. It is also atomic: the pre-4.5 sequential
+ * version could leave a question with no answer (or a title with no question) if the
+ * process died mid-turn, and the REST contract promises that an ok:true turn is
+ * immediately readable as ['USER','ASSISTANT']. Do not "optimise" this back into
+ * separate awaits.
+ *
+ * `validated` is the row THIS request already read through the ownership gate. It
+ * saves one round trip on a follow-up turn (measured: ~355ms of a ~1.7s turn), and it
+ * does NOT skip the check: the row in hand is still matched against the id and the
+ * admin, so a caller cannot use it to write into somebody else's transcript. Every
+ * caller that does not have a validated row — including every direct caller and test —
+ * still pays the full read.
  *
  * @returns {Promise<{ conversationId: number, title: string, userMessageId: number, assistantMessageId: number }>}
  */
-async function recordTurn({ prisma, adminId, conversationId, question, answer, metadata } = {}) {
-  const conversation = await requireOwnedConversation(prisma, adminId, conversationId);
+async function recordTurn({ prisma, adminId, conversationId, question, answer, metadata, validated = null } = {}) {
+  let conversation = validated;
+  if (conversation) {
+    // Same refusal the read path would produce, without the read: a row that is not
+    // this conversation, or not this admin's, is treated as not owned.
+    if (conversation.id !== conversationId || conversation.adminId !== adminId) {
+      throw new AgentConversationError('NOT_OWNED', `conversation ${conversationId} belongs to another admin`);
+    }
+  } else {
+    conversation = await requireOwnedConversation(prisma, adminId, conversationId);
+  }
 
-  const userMessage = await prisma.agentMessage.create({
-    data: buildMessageData({ conversationId, role: ROLES.USER, content: question }),
-  });
-
-  const assistantMessage = await prisma.agentMessage.create({
-    data: buildMessageData({
-      conversationId,
-      role: ROLES.ASSISTANT,
-      content: answer,
-      metadata: sanitizeTurnMetadata(metadata),
-    }),
+  const userRow = buildMessageData({ conversationId, role: ROLES.USER, content: question });
+  const assistantRow = buildMessageData({
+    conversationId,
+    role: ROLES.ASSISTANT,
+    content: answer,
+    metadata: sanitizeTurnMetadata(metadata),
   });
 
   const existing = typeof conversation.title === 'string' ? conversation.title.trim() : '';
-  let title = existing === '' ? null : conversation.title;
-  if (title === null) {
-    title = buildTitle(question);
-    // updateMany instead of update: Prisma accepts a unique WHERE only on update,
-    // so this is the form that keeps the admin predicate inside the statement. It
-    // also bumps updatedAt, which is what the conversation list is ordered by.
-    await prisma.agentConversation.updateMany({ where: { id: conversationId, adminId }, data: { title } });
+  const needsTitle = existing === '';
+  const title = needsTitle ? buildTitle(question) : conversation.title;
+
+  const operations = [
+    prisma.agentMessage.create({ data: userRow }),
+    prisma.agentMessage.create({ data: assistantRow }),
+  ];
+  if (needsTitle) {
+    // updateMany, not update: Prisma accepts a unique WHERE only on update, so this
+    // is the form that keeps the admin predicate inside the statement. It also bumps
+    // updatedAt, which is what the conversation list is ordered by.
+    operations.push(
+      prisma.agentConversation.updateMany({ where: { id: conversationId, adminId }, data: { title } })
+    );
   }
+
+  const [userMessage, assistantMessage] = await prisma.$transaction(operations);
 
   return {
     conversationId,
@@ -401,6 +497,7 @@ module.exports = {
   AgentConversationError,
   buildTitle,
   getOrCreateConversation,
+  createConversationWithTurn,
   appendMessage,
   recordTurn,
   listConversations,

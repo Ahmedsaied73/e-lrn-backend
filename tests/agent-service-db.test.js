@@ -188,8 +188,69 @@ test('a fabricated statistic is refused, and nothing is persisted', async () => 
   assert.equal(result.ok, false);
   assert.equal(result.code, 'GROUNDING_FAILED');
   assert.deepEqual(result.ungrounded, ['999,999']);
-  const messages = await prisma.agentMessage.count({ where: { conversationId: result.conversationId } });
-  assert.equal(messages, 0, 'a rejected answer must not be written to history');
+  // Phase 4.5: a refused FIRST turn has no conversation to count messages in, because
+  // nothing is created at all any more (the sibling test below pins the row count).
+  // Prisma also refuses a null filter, so the id itself is the assertion: it proves no
+  // transcript was ever opened. A refused FOLLOW-UP turn still has a conversation,
+  // and that path is covered by the successful-turn history assertion below.
+  assert.equal(result.conversationId, null, 'a rejected first answer must not open a conversation');
+});
+
+test('a refused turn leaves NO conversation row behind (the sidebar-orphan defect)', async () => {
+  // Phase 4.5. Before this, the conversation row was created BEFORE the turn was
+  // answered, so every failed turn left a titless, message-less conversation in the
+  // admin's sidebar — 25 of 70 rows in one diagnostic session. A conversation is now
+  // written together with the turn that gives it meaning, so a turn with nothing to
+  // store must leave nothing at all.
+  const before = await prisma.agentConversation.count({ where: { adminId: ADMIN_ID } });
+
+  const fabricated = scriptedGraphFactory([
+    toolCall('platform_overview', {}, 'call_overview'),
+    new AIMessage({ content: 'عدد الطلاب 888,888 طالباً.' }),
+  ]);
+  const result = await answerQuestion({
+    question: 'اعمل تقرير مفصل عن كل شيء في المنصة',
+    adminId: ADMIN_ID,
+    prisma,
+    graphFactory: fabricated.factory,
+  });
+  assert.equal(result.ok, false);
+
+  const after = await prisma.agentConversation.count({ where: { adminId: ADMIN_ID } });
+  assert.equal(after, before, 'a refused turn must not create a conversation');
+  assert.equal(result.conversationId, null, 'and it must not hand out an id for one');
+});
+
+test('a new conversation is created WITH its first turn, titled from that question', async () => {
+  const scripted = scriptedGraphFactory([
+    toolCall('platform_overview', {}, 'call_overview'),
+    new AIMessage({ content: 'المنصة تعمل بشكل طبيعي.' }),
+  ]);
+  const result = await answerQuestion({
+    question: 'ملخص حالة المنصة الآن',
+    adminId: ADMIN_ID,
+    prisma,
+    graphFactory: scripted.factory,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.ok(Number.isSafeInteger(result.conversationId), 'a successful turn must return its id');
+  await trackConversation(result.conversationId);
+
+  const row = await prisma.agentConversation.findUnique({
+    where: { id: result.conversationId },
+    select: { title: true, adminId: true, _count: { select: { messages: true } } },
+  });
+  assert.equal(row.adminId, ADMIN_ID);
+  assert.equal(row.title, 'ملخص حالة المنصة الآن', 'the title comes from the first question');
+  assert.equal(row._count.messages, 2, 'the row is born with its question and its answer');
+
+  // Read-after-write: the turn must be visible the moment the caller is told about it.
+  const history = await prisma.agentMessage.findMany({
+    where: { conversationId: result.conversationId },
+    orderBy: { createdAt: 'asc' },
+    select: { role: true },
+  });
+  assert.deepEqual(history.map((m) => m.role), ['USER', 'ASSISTANT']);
 });
 
 test('an action runs only under an approval bound to its exact arguments', async () => {

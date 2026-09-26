@@ -267,3 +267,63 @@ test('an already-decided approval is reported distinctly from a missing one', as
   assert.equal(socket.last('agent:error').payload.code, 'APPROVAL_ALREADY_DECIDED');
 });
 
+
+test('the per-admin turn budget also guards the socket (Phase 4.5)', async () => {
+  // The socket was the cheaper path to an unlimited LLM bill: one authenticated
+  // connection, no HTTP overhead, and — until this — no limiter at all. A refused
+  // turn must not reach the service, or the budget is only a warning.
+  let calls = 0;
+  const socket = fakeSocket({}, { adminId: ADMIN_ID });
+  let verdict = { allowed: true, code: null, retryAfterMs: null };
+  registerAgentHandlers(socket, {
+    answerQuestion: async () => {
+      calls += 1;
+      return { ok: true, source: 'llm', answer: 'تم', conversationId: 9, detail: {} };
+    },
+    limits: {
+      checkAndCount: async () => verdict,
+    },
+  });
+
+  // Allowed: the turn runs exactly as before.
+  await socket.handlers['agent:message']({ question: 'ملخص الإيرادات' });
+  assert.equal(calls, 1, 'an allowed turn must still reach the service');
+  assert.equal(socket.last('agent:complete').payload.ok, true);
+
+  // Per-minute refusal.
+  verdict = { allowed: false, code: 'RATE_LIMITED', retryAfterMs: 120000 };
+  await socket.handlers['agent:message']({ question: 'ملخص الإيرادات' });
+  assert.equal(calls, 1, 'a refused turn must NOT reach the service');
+  const limited = socket.last('agent:error').payload;
+  assert.equal(limited.code, 'RATE_LIMITED');
+  assert.equal(limited.retryAfterMs, 120000);
+  // last() would still find the FIRST turn's completion, so count instead:
+  assert.equal(socket.emitted.filter((e) => e.event === 'agent:complete').length, 1, 'no completion event for a refused turn');
+
+  // Daily refusal is a DIFFERENT code, so a client can tell a slow minute from a
+  // closed day and stop retrying until tomorrow.
+  verdict = { allowed: false, code: 'DAILY_BUDGET_EXCEEDED', retryAfterMs: 3600000 };
+  await socket.handlers['agent:message']({ question: 'ملخص الإيرادات' });
+  assert.equal(calls, 1);
+  assert.equal(socket.last('agent:error').payload.code, 'DAILY_BUDGET_EXCEEDED');
+});
+
+test('a limiter that throws fails OPEN — a socket turn is never lost to a limiter bug', async () => {
+  const socket = fakeSocket({}, { adminId: ADMIN_ID });
+  let calls = 0;
+  registerAgentHandlers(socket, {
+    answerQuestion: async () => {
+      calls += 1;
+      return { ok: true, source: 'llm', answer: 'تم', conversationId: 9, detail: {} };
+    },
+    limits: {
+      checkAndCount: async () => {
+        throw new Error('redis exploded');
+      },
+    },
+  });
+
+  await socket.handlers['agent:message']({ question: 'مرحبا' });
+  assert.equal(calls, 1, 'a broken limiter must not become an outage');
+  assert.equal(socket.last('agent:complete').payload.ok, true);
+});

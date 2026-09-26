@@ -120,7 +120,7 @@ describe('AI Admin Agent — config + kill switch', () => {
     assert.equal(defaults.aiAgent.maxToolCalls, 6, 'default tool-call cap');
     assert.equal(defaults.aiAgent.maxToolResultRows, 50, 'default row cap');
     assert.equal(defaults.aiAgent.maxAnswerTokens, 700, 'default answer cap');
-    assert.equal(defaults.aiAgent.turnTimeoutMs, 45000, 'default turn timeout');
+    assert.equal(defaults.aiAgent.turnTimeoutMs, 25000, 'default turn timeout');
     assert.equal(defaults.aiAgent.approvalTtlMs, 300000, 'default approval TTL');
     assert.equal(defaults.aiAgent.dailyTurnBudget, 500, 'default daily budget');
     assert.equal(defaults.aiAgent.conversationRetentionDays, 90, 'default retention');
@@ -158,7 +158,10 @@ describe('AI Admin Agent — config + kill switch', () => {
 
   it('ships model defaults that are known-good in this codebase', () => {
     const cfg = resolveConfig({ AI_AGENT_ENABLED: 'true' });
-    assert.equal(cfg.aiAgent.primaryModel, 'llama-3.3-70b-versatile', 'Groq primary default');
+    // Both ids verified LIVE with tool calling on this project's keys (Phase 4.5).
+    // The old Groq default `llama-3.3-70b-versatile` now 404s model_not_found — do
+    // not restore it; `openai/gpt-oss-120b` (131k ctx) is the verified tool-caller.
+    assert.equal(cfg.aiAgent.primaryModel, 'openai/gpt-oss-120b', 'Groq primary default is a verified tool-calling model');
     assert.equal(cfg.aiAgent.fallbackModel, 'gemini-3.6-flash', 'fallback reuses the grader model');
   });
 });

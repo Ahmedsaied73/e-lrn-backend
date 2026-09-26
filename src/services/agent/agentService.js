@@ -25,6 +25,7 @@
  */
 
 const config = require('../../config/env');
+const { randomUUID } = require('node:crypto');
 const { HumanMessage } = require('@langchain/core/messages');
 const { answerDeterministic } = require('./engine');
 const { createAgentGraph, finalAnswerText, toolCallSummary } = require('./graph');
@@ -221,7 +222,58 @@ async function answerQuestion({
 
   emit({ type: 'thinking', status: 'started' });
 
-  const conversation = await conversations.getOrCreateConversation({ prisma: db, adminId, conversationId });
+  // ── Phase 4.5: the conversation row is created WITH the turn, not before it ──
+  //
+  // Creating the row up front is what left message-less conversations in the
+  // sidebar whenever a turn failed (a grounding failure or a provider outage left
+  // a titless, empty row the admin could neither open nor explain). Now a NEW
+  // conversation is not created here at all: the row is written together with its
+  // first pair of messages, in ONE round trip, after there is something to store.
+  //
+  // `pendingId` is what the turn uses until then. It must be UNIQUE and not derived
+  // from a constant: the graph's checkpointer is keyed by thread id, so two admins
+  // opening their first conversation at the same time would otherwise share one
+  // thread and see each other's messages in the model context.
+  const continuing = conversationId !== undefined && conversationId !== null;
+  const conversation = continuing
+    ? await conversations.getOrCreateConversation({ prisma: db, adminId, conversationId })
+    : { id: null };
+  const turnConversationId = conversation.id === null ? `pending-${randomUUID()}` : conversation.id;
+
+  /**
+   * The ONE place that knows how a turn is written.
+   *
+   * The "is this a new conversation?" branch must not be duplicated per tier: getting
+   * it wrong in one tier and not the other is precisely how message-less rows used to
+   * reappear. `persist: false` (a caller that only wants the answer) skips the write
+   * entirely and leaves conversation.id null.
+   */
+  async function persistTurn(answer, metadata) {
+    if (!persist) return;
+    if (conversation.id === null) {
+      const created = await conversations.createConversationWithTurn({
+        prisma: db,
+        adminId,
+        question,
+        answer,
+        metadata,
+      });
+      conversation.id = created.id;
+      return;
+    }
+    await conversations.recordTurn({
+      prisma: db,
+      adminId,
+      conversationId: conversation.id,
+      question,
+      answer,
+      metadata,
+      // The ownership gate already ran at the top of this turn, so recordTurn reuses
+      // that row instead of reading it again (~355ms of a ~1.7s follow-up turn). It
+      // still re-checks the row against the id and the admin.
+      ...(continuing ? { validated: conversation } : {}),
+    });
+  }
 
   // ── Tier 1: deterministic ───────────────────────────────────────────────────
   const deterministic = await answerDeterministic(question, {
@@ -231,22 +283,13 @@ async function answerQuestion({
   });
   if (deterministic.matched) {
     emit({ type: 'tier', tier: 'deterministic', intent: deterministic.intent });
-    if (persist) {
-      await conversations.recordTurn({
-        prisma: db,
-        adminId,
-        conversationId: conversation.id,
-        question,
-        answer: deterministic.answer,
-        // conversationService whitelists these keys — sending `tier` would be
-        // silently dropped, and an empty metadata object would claim otherwise.
-        metadata: {
-          deterministic: true,
-          latencyMs: deterministic.latencyMs,
-          toolCalls: deterministic.tool ? [deterministic.tool] : 0,
-        },
-      });
-    }
+    await persistTurn(deterministic.answer, {
+      // conversationService whitelists these keys — sending `tier` would be
+      // silently dropped, and an empty metadata object would claim otherwise.
+      deterministic: true,
+      latencyMs: deterministic.latencyMs,
+      toolCalls: deterministic.tool ? [deterministic.tool] : 0,
+    });
     return {
       ok: true,
       source: 'deterministic',
@@ -288,7 +331,7 @@ async function answerQuestion({
 
   let run;
   try {
-    const turn = await runAgentTurn(graph, question, conversation.id, emit);
+    const turn = await runAgentTurn(graph, question, turnConversationId, emit);
     run = turn;
   } catch (err) {
     return {
@@ -356,22 +399,13 @@ async function answerQuestion({
     latencyMs: Date.now() - startedAt,
   };
 
-  if (persist) {
-    await conversations.recordTurn({
-      prisma: db,
-      adminId,
-      conversationId: conversation.id,
-      question,
-      answer,
-      metadata: {
-        llm: true,
-        provider: run.provider,
-        model: run.provider === 'gemini' ? config.aiAgent.fallbackModel : config.aiAgent.primaryModel,
-        toolCalls: detail.toolCalls,
-        latencyMs: detail.latencyMs,
-      },
-    });
-  }
+  await persistTurn(answer, {
+    llm: true,
+    provider: run.provider,
+    model: run.provider === 'gemini' ? config.aiAgent.fallbackModel : config.aiAgent.primaryModel,
+    toolCalls: detail.toolCalls,
+    latencyMs: detail.latencyMs,
+  });
 
   // One audit row per model-answered turn: the deterministic tier is reproducible
   // from the catalogue, a model answer is not.

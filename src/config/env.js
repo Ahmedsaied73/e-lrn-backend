@@ -228,15 +228,27 @@ function resolveAiAgent() {
     providers,
     groqApiKey,
     geminiApiKey,
-    primaryModel: process.env.AI_AGENT_MODEL_PRIMARY || 'llama-3.3-70b-versatile',
-    // Defaults to the model the AI grader already runs here (proven in prod).
+    // Both model ids below were VERIFIED LIVE with tool calling on THIS project's
+    // keys (Phase 4.5). Do not "restore" the older defaults: the previous Groq
+    // default `llama-3.3-70b-versatile` now returns 404 model_not_found, and a live
+    // probe showed the whole agent tier answering LLM_ERROR in ~0.6s because of it.
+    // Verified tool-calling ids here: Groq `openai/gpt-oss-120b` (131k ctx),
+    // Gemini `gemini-3.6-flash` / `gemini-3.8-flash`. Note `qwen/qwen3.8-27b` also
+    // calls tools but its 7k ITPM limit 413s this schema, and `allam-2-7b` is
+    // Arabic-native but has NO tool support — neither may be used as a default.
+    primaryModel: process.env.AI_AGENT_MODEL_PRIMARY || 'openai/gpt-oss-120b',
+    // Gemini flash stays the fallback: the same family the AI grader already runs
+    // here (proven in prod), and an independent vendor from the Groq primary.
     fallbackModel: process.env.AI_AGENT_MODEL_FALLBACK || 'gemini-3.6-flash',
     // Budgets/caps — every one CLAMPED, because a typo in an env var must never
     // be able to turn one admin question into unbounded LLM/DB spend.
     maxToolCalls: clampAgentInt(process.env.AI_AGENT_MAX_TOOL_CALLS, 6, 1, 10),
     maxToolResultRows: clampAgentInt(process.env.AI_AGENT_MAX_TOOL_RESULT_ROWS, 50, 1, 200),
     maxAnswerTokens: clampAgentInt(process.env.AI_AGENT_MAX_ANSWER_TOKENS, 700, 128, 4000),
-    turnTimeoutMs: clampAgentInt(process.env.AI_AGENT_TURN_TIMEOUT_MS, 45000, 5000, 120000),
+    // 25s default (was 45s): the graph aborts a hung provider per call, so a lower
+    // budget fails the turn FAST instead of holding the SSE stream open until the
+    // client gives up. Clamp bounds are unchanged (5s floor / 120s ceiling).
+    turnTimeoutMs: clampAgentInt(process.env.AI_AGENT_TURN_TIMEOUT_MS, 25000, 5000, 120000),
     approvalTtlMs: clampAgentInt(process.env.AI_AGENT_APPROVAL_TTL_MS, 5 * 60 * 1000, 30 * 1000, 30 * 60 * 1000),
     dailyTurnBudget: clampAgentInt(process.env.AI_AGENT_DAILY_TURN_BUDGET, 500, 1, 100000),
     conversationRetentionDays: clampAgentInt(process.env.AI_AGENT_CONVERSATION_RETENTION_DAYS, 90, 7, 3650),

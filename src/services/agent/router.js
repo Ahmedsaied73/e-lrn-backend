@@ -624,6 +624,12 @@ module.exports = {
   // it does on the fast path — one definition, two tiers.
   normalize,
   tokenize,
+  // Phase 4.5: the tool-surface selector (tools/index.js) builds its per-question
+  // lexicon FROM these, instead of maintaining a second keyword list. Exported for
+  // exactly that reason — a matching rule that exists in two places drifts.
+  containsSequence,
+  tokenMatches,
+  phraseTokens,
   extractSlots,
   extractWindowDays,
   extractGrade,

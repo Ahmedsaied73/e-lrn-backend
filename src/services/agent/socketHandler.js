@@ -98,7 +98,7 @@ async function authenticateSocket(socket, next) {
  * of them resolves — throwing handlers detach sockets in silent ways, so the
  * catch below turns a bug into 'agent:error' instead of a dropped connection.
  */
-function registerAgentHandlers(socket, { answerQuestion, conversations, approvals, prisma } = {}) {
+function registerAgentHandlers(socket, { answerQuestion, conversations, approvals, prisma, limits } = {}) {
   const adminId = socket && socket.agent && socket.agent.adminId;
   if (!adminId) throw new Error('registerAgentHandlers requires an authenticated socket (socket.agent.adminId)');
 
@@ -106,6 +106,11 @@ function registerAgentHandlers(socket, { answerQuestion, conversations, approval
   const conversationService = conversations || require('./conversationService');
   const approvalService = approvals || require('./approvals');
   const db = prisma || require('../../config/db');
+  // Phase 4.5: the same per-admin turn budget the REST route enforces. Without it
+  // the socket was the cheaper path to an unlimited LLM bill — one authenticated
+  // connection, no HTTP overhead, no limiter. Injected so a test can drive the
+  // budget without a real Redis.
+  const turnBudget = limits || require('./limits').turnLimits();
 
   const forwardProgress = (type) => (event) => {
     socket.emit(type, event || {});
@@ -119,6 +124,26 @@ function registerAgentHandlers(socket, { answerQuestion, conversations, approval
 
     if (!question.trim() || question.length > 2000) {
       socket.emit('agent:error', { code: 'EMPTY_QUESTION', detail: 'question is required (max 2000 characters)' });
+      return;
+    }
+
+    // The budget is checked BEFORE the service is called: a refused turn must not
+    // reach the model, let alone the database.
+    let verdict = { allowed: true, code: null, retryAfterMs: null };
+    try {
+      verdict = await turnBudget.checkAndCount(adminId);
+    } catch {
+      // Fail open: a limiter that throws must not become an outage.
+    }
+    if (!verdict.allowed) {
+      socket.emit('agent:error', {
+        code: verdict.code,
+        detail:
+          verdict.code === 'DAILY_BUDGET_EXCEEDED'
+            ? 'Daily agent question budget exhausted, try again tomorrow.'
+            : 'Too many agent requests, please wait a moment.',
+        retryAfterMs: verdict.retryAfterMs,
+      });
       return;
     }
 
@@ -138,7 +163,9 @@ function registerAgentHandlers(socket, { answerQuestion, conversations, approval
         },
       });
       socket.emit('agent:complete', result);
-    } catch (err) {
+    } catch {
+      // The failure is reported, never thrown: a socket handler that throws would
+      // leave the admin watching a panel that never resolves.
       socket.emit('agent:error', { code: 'AGENT_ERROR', detail: 'failed to process the message' });
     }
   });
@@ -216,7 +243,7 @@ function initAgentSocket(httpServer) {
   io.on('connection', (socket) => {
     try {
       registerAgentHandlers(socket);
-    } catch (err) {
+    } catch {
       socket.emit('agent:error', { code: 'HANDLER_FAILED', detail: 'could not start the session' });
       socket.disconnect(true);
     }

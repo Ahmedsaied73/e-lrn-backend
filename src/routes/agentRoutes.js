@@ -16,18 +16,21 @@
  */
 
 const express = require('express');
-const rateLimit = require('express-rate-limit');
 const { authenticateToken, authorizeAdmin } = require('../middlewares/index');
-const { createRateLimitStore } = require('../integrations/redis/rateLimitStore');
-const { isRedisEnabled } = require('../integrations/redis/redisClient');
 const config = require('../config/env');
 const prisma = require('../config/db');
 const { AppError } = require('../utils/AppError');
 const { answerQuestion } = require('../services/agent/agentService');
+const { turnLimits } = require('../services/agent/limits');
 const { listConversations, getMessages } = require('../services/agent/conversationService');
 const {
   decideApproval,
   getApproval,
+  // Phase 4.5: the route below CALLS requestApproval, but the import list never
+  // mentioned it — so POST /admin/agent/approvals threw a ReferenceError and
+  // answered 500 for every request. Nothing caught it because no REST test
+  // covered this endpoint. Fixed together with the test that now does.
+  requestApproval,
   AgentApprovalError,
 } = require('../services/agent/approvals');
 
@@ -37,16 +40,29 @@ const router = express.Router();
 // then the role guard — the same order as every other /admin/* route.
 router.use(authenticateToken, authorizeAdmin());
 
-// Per-admin ask budget. Large enough that no real admin workflow hits it, small
-// enough that a stuck client cannot burn the provider quota unattended. Mounted
-// AFTER the auth middlewares so the key is the admin id, not a shared IP.
-const askLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: Number(process.env.AI_AGENT_ASK_LIMIT) || 60,
-  message: 'Too many agent requests, please wait a moment.',
-  keyGenerator: (req) => (req.user && req.user.id ? `u:${req.user.id}` : `ip:${req.ip}`),
-  ...(isRedisEnabled() ? { store: createRateLimitStore('rl:agent-ask:', { failClosed: config.rateLimit.requireRedis }) } : {}),
-});
+// Per-admin turn budget (Phase 4.5). This used to be an express-rate-limit mounted
+// here only, which left the WebSocket surface unlimited and the configured daily
+// budget unenforced. The policy now lives in services/agent/limits.js and is shared
+// by both transports, so this is a guard rather than a policy: it exists to turn a
+// refused turn into this route's normal error envelope. Keyed by admin id (the auth
+// middlewares have already run), never by IP.
+const limits = turnLimits();
+
+function enforceTurnBudget(req, res, next) {
+  return limits
+    .checkAndCount(req.user && req.user.id)
+    .then((verdict) => {
+      if (verdict.allowed) return next();
+      const code = verdict.code === 'DAILY_BUDGET_EXCEEDED' ? 'AGENT_DAILY_BUDGET_EXCEEDED' : 'AGENT_RATE_LIMITED';
+      const message =
+        verdict.code === 'DAILY_BUDGET_EXCEEDED'
+          ? 'Daily agent question budget exhausted, try again tomorrow.'
+          : 'Too many agent requests, please wait a moment.';
+      if (verdict.retryAfterMs) res.set('Retry-After', String(Math.ceil(verdict.retryAfterMs / 1000)));
+      return next(new AppError(message, 429, code));
+    })
+    .catch(() => next());
+}
 
 function positiveIntOrNull(value, field) {
   if (value === null || value === undefined) return null;
@@ -61,7 +77,7 @@ function positiveIntOrNull(value, field) {
 // The one turn endpoint: { question, conversationId?, approvalId? } in,
 // { ok, source, answer, conversationId, detail } out. An approvalId lets the
 // model spend a previously granted, owner-checked approval exactly once.
-router.post('/ask', askLimiter, async (req, res, next) => {
+router.post('/ask', enforceTurnBudget, async (req, res, next) => {
   try {
     const { question, conversationId = null, approvalId = null } = req.body || {};
     if (typeof question !== 'string' || question.trim().length === 0) {
@@ -193,7 +209,11 @@ router.post('/approvals', async (req, res, next) => {
       conversationId: conversationIdOrNull,
       toolName,
       args,
-      ...(ttlMs === null || ttlMs === undefined ? {} : { ttlMs: Number(ttlMs) }),
+      // Phase 4.5: `ttlMs` is documented OPTIONAL, but requestApproval rejects a
+      // missing/NaN ttl outright — so omitting it 400'd every request. The default
+      // comes from config.aiAgent.approvalTtlMs, which is already clamped to exactly
+      // the bounds the service enforces (30s..30m), so the two can never disagree.
+      ttlMs: ttlMs === null || ttlMs === undefined ? config.aiAgent.approvalTtlMs : Number(ttlMs),
     });
     return res.status(201).json({
       success: true,

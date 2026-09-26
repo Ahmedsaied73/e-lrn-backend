@@ -27,7 +27,7 @@ const { Annotation, StateGraph, START, END, MemorySaver } = require('@langchain/
 const { ToolNode } = require('@langchain/langgraph/prebuilt');
 const { SystemMessage, ToolMessage } = require('@langchain/core/messages');
 const config = require('../../config/env');
-const { listDefinitions, toLangChainTools } = require('./tools');
+const { listDefinitions, selectToolSet, toLangChainTools } = require('./tools');
 const { invokeWithFailover, safeMessage } = require('./llmProvider');
 
 const SYSTEM_PROMPT = `أنت مساعد إداري لمنصة تعليمية إلكترونية. مهمتك الإجابة عن أسئلة المشرفين بالاعتماد على الأدوات المتاحة فقط.
@@ -71,6 +71,39 @@ function countToolCalls(message) {
   return Array.isArray(calls) ? calls.length : 0;
 }
 
+/**
+ * The newest human message in this state — the question the shortlist is built from.
+ * Phase 4.5: read per turn, not once per graph, because a conversation's surface has
+ * to follow the question that is actually being asked (see toolsForTurn).
+ */
+function latestQuestionText(state) {
+  const messages = (state && state.messages) || [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    const role = message && (message.getType ? message.getType() : message.role);
+    if (role === 'human' || role === 'user') {
+      return typeof message.content === 'string' ? message.content : '';
+    }
+  }
+  return '';
+}
+
+/**
+ * Tool names already used in this conversation, so a follow-up turn keeps them
+ * available: "وماذا عن الدفع؟" matches almost nothing on its own, and dropping the
+ * tool the previous turn used would break the thread.
+ */
+function historyToolNames(state) {
+  const messages = (state && state.messages) || [];
+  const names = new Set();
+  for (const message of messages) {
+    for (const call of (message && message.tool_calls) || []) {
+      if (call && call.name) names.add(call.name);
+    }
+  }
+  return [...names];
+}
+
 // One checkpointer for the process, keyed by conversation id. It is shared so a
 // future resume/interrupt flow has a stable thread, while each turn still gets
 // its own graph (see createAgentGraph) so no turn can see another's authority.
@@ -85,6 +118,11 @@ const sharedCheckpointer = new MemorySaver();
  * cost is object construction only — no network, no client duplication.
  */
 function createAgentGraph({ resolveToolContext, checkpointer = sharedCheckpointer, invokeModel } = {}) {
+  // The FULL catalogue stays bound to the ToolNode, and that is deliberate: the node
+  // is the execution AUTHORITY (strict args, row caps, redaction, the approval gate,
+  // the audit row), not a menu. Keeping it complete means a conversation can still
+  // call a tool whose schema is no longer on this turn's shortlist, and the guards
+  // cannot be bypassed by which schemas happen to be shown.
   const defs = listDefinitions();
   const resolver = typeof resolveToolContext === 'function' ? resolveToolContext : () => ({});
   const tools = toLangChainTools(defs, resolver);
@@ -92,15 +130,43 @@ function createAgentGraph({ resolveToolContext, checkpointer = sharedCheckpointe
   const maxToolCalls = config.aiAgent.maxToolCalls;
   const timeoutMs = config.aiAgent.turnTimeoutMs;
 
+  // ── Phase 4.5: the per-turn tool SURFACE (what the model is shown) ──────────
+  //
+  // Measured, not guessed: binding all 28 read tools shipped ~25.8k characters
+  // (~7,000 tokens) of schema on every model call, while this deployment's Groq
+  // free tier allows 8,000 tokens per MINUTE. The tier was therefore structurally
+  // dead — no model id fixes a 2-call turn that needs 14k of schema — and the fix
+  // is to stop sending the whole catalogue. tools/index.js documents the selection;
+  // it is deterministic, costs no I/O, and is recomputed from the question and the
+  // tools this conversation already used.
+  //
+  // Selection is memoized per (question + history) so a multi-step turn binds the
+  // same shortlist on every model call instead of re-deriving it per step.
+  let selection = null;
+  function toolsForTurn(state) {
+    const question = latestQuestionText(state);
+    const history = historyToolNames(state);
+    const key = `${question}|${history.join(',')}`;
+    if (selection && selection.key === key) return selection.tools;
+    const chosen = selectToolSet({ question, historyTools: history });
+    const bound = toLangChainTools(chosen.defs, resolver);
+    selection = { key, tools: bound, names: chosen.defs.map((d) => d.name), reasons: chosen.reasons };
+    return bound;
+  }
+
   // The one seam that makes the whole loop testable offline: production always
   // uses the real failover wrapper, while a test can hand in a scripted model and
   // exercise the graph (loop, budget, tool gating) with no network and no key.
   const callModel =
     typeof invokeModel === 'function'
       ? invokeModel
-      : (messages) =>
+      : (messages, boundTools) =>
           invokeWithFailover((model) => {
-            const bound = typeof model.bindTools === 'function' ? model.bindTools(tools) : model;
+            // Fall back to the full set only if a caller somehow bound nothing: an
+            // empty tool list would silently make every analytics question
+            // unanswerable instead of loud.
+            const surface = Array.isArray(boundTools) && boundTools.length ? boundTools : tools;
+            const bound = typeof model.bindTools === 'function' ? model.bindTools(surface) : model;
             // A per-call abort budget: a hung provider must fail this turn, never
             // hang the request that is waiting for it.
             return bound.invoke(messages, { signal: AbortSignal.timeout(timeoutMs) });
@@ -108,7 +174,7 @@ function createAgentGraph({ resolveToolContext, checkpointer = sharedCheckpointe
 
   async function agentNode(state) {
     const messages = [new SystemMessage(SYSTEM_PROMPT), ...state.messages];
-    const { result, provider } = await callModel(messages, tools);
+    const { result, provider } = await callModel(messages, toolsForTurn(state));
     return { messages: [result], toolCalls: countToolCalls(result), provider };
   }
 
@@ -158,8 +224,16 @@ function createAgentGraph({ resolveToolContext, checkpointer = sharedCheckpointe
     graph,
     tools,
     maxToolCalls,
+    // The full catalogue, for diagnostics and for anything that must reason about
+    // what the agent is CAPABLE of (the approval UI, the audit trail).
     toolNames: defs.map((d) => d.name),
     hasMutatingTools: defs.some((d) => d.kind === 'action'),
+    // The per-turn surface, for tests and diagnostics: which schemas the model would
+    // be shown for a given question, and why each one was chosen.
+    selectFor: (question, historyTools = []) => {
+      const chosen = selectToolSet({ question, historyTools });
+      return { names: chosen.defs.map((d) => d.name), reasons: Object.fromEntries(chosen.reasons) };
+    },
   };
 }
 

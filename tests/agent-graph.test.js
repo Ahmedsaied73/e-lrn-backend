@@ -187,3 +187,83 @@ test('the tool context resolver is told WHICH tool is asking, so authority can b
   assert.deepEqual(clauses, [{ tool: 'courses_list', args: { take: 3 } }]);
 });
 
+/**
+ * Phase 4.5 — the tool SURFACE the model is shown.
+ *
+ * Binding all 28 read tools shipped ~7k tokens of schema per call against an 8k
+ * tokens/minute free tier, so the agentic tier was structurally unable to answer
+ * anything. The trim is what makes it work — and these tests exist because a silent
+ * re-fattening would not fail anything else: the tier would just start 413ing again
+ * in production while every other suite stayed green.
+ */
+test('the model is shown a SHORT tool surface, not the whole catalogue', async () => {
+  const model = scriptedModel([textAnswer('لا حاجة لأداة.')]);
+  const { graph, toolNames } = createAgentGraph({ resolveToolContext: ctx, invokeModel: model.invokeModel });
+
+  await graph.invoke(
+    { messages: [new HumanMessage('نظرة عامة')] },
+    { configurable: { thread_id: threadId('trim') } }
+  );
+
+  const bound = model.calls[0].toolNames;
+  assert.ok(
+    bound.length < toolNames.length,
+    `the surface was not trimmed at all: ${bound.length} of ${toolNames.length}`
+  );
+  assert.ok(bound.length <= 8, `the surface must stay small, got ${bound.length}: ${bound.join(', ')}`);
+  assert.ok(bound.includes('platform_overview'), 'the core tool must be on the surface');
+  assert.equal(model.calls[0].toolNames.join(','), bound.join(','), 'the surface must be stable within a turn');
+});
+
+test('a tool the question names is exposed even though it is not core', async () => {
+  const model = scriptedModel([
+    toolCall('payment_issues', { windowDays: 30 }, 'call_pay'),
+    textAnswer('لا توجد مشاكل دفع.'),
+  ]);
+  const { graph, selectFor } = createAgentGraph({ resolveToolContext: ctx, invokeModel: model.invokeModel });
+
+  const result = await graph.invoke(
+    { messages: [new HumanMessage('مشاكل الدفع')] },
+    { configurable: { thread_id: threadId('surface') } }
+  );
+
+  assert.ok(
+    model.calls[0].toolNames.includes('payment_issues'),
+    `the model must be shown the tool the question is about, got: ${model.calls[0].toolNames.join(', ')}`
+  );
+  assert.deepEqual(toolCallSummary(result), ['payment_issues'], 'and it must actually run');
+  // WHY it was on the surface matters as much as that it was: 'router' (the fast
+  // path would have chosen it) or a lexical score both mean "chosen for THIS
+  // question", whereas 'core' would mean it was only there by accident.
+  assert.notEqual(
+    selectFor('مشاكل الدفع').reasons.payment_issues,
+    'core',
+    'payment_issues must be selected because the question is about it'
+  );
+});
+
+test('trimming the surface does not shrink the execution authority', async () => {
+  // The shortlist is a DISPLAY decision; the ToolNode still holds the full
+  // catalogue, so the guards (row caps, redaction, the approval gate) apply to
+  // every tool exactly as before. If this ever fails, the surface has started
+  // deciding what is executable — which would make a prompt an authority.
+  const model = scriptedModel([
+    toolCall('admin_audit_recent', { windowDays: 7 }, 'call_audit'),
+    textAnswer('تم.'),
+  ]);
+  const { graph, selectFor } = createAgentGraph({ resolveToolContext: ctx, invokeModel: model.invokeModel });
+
+  const exposed = selectFor('مرحبا').names;
+  assert.equal(
+    exposed.includes('admin_audit_recent'),
+    false,
+    'precondition: this tool is NOT on the surface for an unrelated question'
+  );
+
+  const result = await graph.invoke(
+    { messages: [new HumanMessage('مرحبا')] },
+    { configurable: { thread_id: threadId('authority') } }
+  );
+  assert.deepEqual(toolCallSummary(result), ['admin_audit_recent'], 'the tool node still executes it');
+});
+

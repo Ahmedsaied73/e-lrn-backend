@@ -72,6 +72,7 @@ describe('agent REST surface', () => {
       ['POST', '/admin/agent/ask', { question: 'نظرة عامة على المنصة' }],
       ['POST', '/admin/agent/approvals/1/decide', { approved: true }],
       ['GET', '/admin/agent/approvals/1', null],
+      ['POST', '/admin/agent/approvals', { toolName: 'agent_rest_probe_x', args: {} }],
     ]) {
       const anon = await req(method, path, null, body);
       assert.equal(anon.status, 401, `${method} ${path} unauthenticated must 401`);
@@ -128,5 +129,67 @@ describe('agent REST surface', () => {
     const malformed = await req('GET', '/admin/agent/conversations/abc/messages', adminCookie());
     assert.equal(malformed.status, 400);
     assert.equal(malformed.json.code, 'AGENT_INVALID_INPUT');
+  });
+
+  /**
+   * Phase 4.5 — the endpoint that shipped broken.
+   *
+   * `POST /admin/agent/approvals` had NO test at all, which is exactly why two
+   * defects survived into the Phase 4 commit: `requestApproval` was never imported
+   * (every call → ReferenceError → 500), and the optional `ttlMs` was never
+   * defaulted (every call without it → 400). Both are invisible to a reader and to
+   * every other suite, so this test now walks the whole create → read → decide path.
+   */
+  it('creates, reads and decides an approval request (this endpoint used to always fail)', async () => {
+    const created = await req('POST', '/admin/agent/approvals', adminCookie(), {
+      toolName: 'agent_rest_probe_reset_quiz_attempt',
+      args: { userSlug: 'aaaaaaaaaaaa', quizSlug: 'bbbbbbbbbbbb' },
+    });
+    assert.equal(created.status, 201, `create failed: ${JSON.stringify(created.json)}`);
+    assert.equal(created.json.success, true);
+    assert.equal(created.json.data.status, 'PENDING');
+    assert.equal(created.json.data.toolName, 'agent_rest_probe_reset_quiz_attempt');
+    assert.ok(Number.isSafeInteger(created.json.data.id), 'an approval id must be returned');
+    assert.ok(!Number.isNaN(Date.parse(created.json.data.expiresAt)), 'expiresAt is a timestamp');
+    // The raw args must NOT be echoed back: the endpoint answers with a hash.
+    assert.equal(created.json.data.args, undefined, 'args must not be echoed in the response');
+    createdApprovals.push(created.json.data.id);
+
+    const read = await req('GET', `/admin/agent/approvals/${created.json.data.id}`, adminCookie());
+    assert.equal(read.status, 200);
+    assert.equal(read.json.data.status, 'PENDING');
+    assert.equal(read.json.data.argsHash, created.json.data.argsHash, 'the hash must be stable');
+
+    const rejected = await req('POST', `/admin/agent/approvals/${created.json.data.id}/decide`, adminCookie(), {
+      approved: false,
+    });
+    assert.equal(rejected.status, 200, `decide failed: ${JSON.stringify(rejected.json)}`);
+    assert.equal(rejected.json.data.status, 'REJECTED');
+
+    // A decided request cannot be decided again — the HITL flow is one-shot. The
+    // route maps every non-(404) approval failure to 409, not 400: a second decision
+    // is a state conflict, not a malformed request.
+    const again = await req('POST', `/admin/agent/approvals/${created.json.data.id}/decide`, adminCookie(), {
+      approved: true,
+    });
+    assert.equal(again.status, 409, 'a decided approval must not be re-decided');
+    assert.match(again.json.code, /^AGENT_APPROVAL_/, 'the conflict must carry a specific code');
+  });
+
+  it('rejects an approval request with a bad tool name or an out-of-range ttl', async () => {
+    const badName = await req('POST', '/admin/agent/approvals', adminCookie(), {
+      toolName: 'Not A Tool Name',
+      args: {},
+    });
+    assert.equal(badName.status, 400);
+    assert.equal(badName.json.code, 'AGENT_APPROVAL_INVALID_INPUT');
+
+    const badTtl = await req('POST', '/admin/agent/approvals', adminCookie(), {
+      toolName: 'agent_rest_probe_x',
+      args: {},
+      ttlMs: 5,
+    });
+    assert.equal(badTtl.status, 400, 'a ttl below the floor must be refused, not silently clamped');
+    assert.equal(badTtl.json.code, 'AGENT_APPROVAL_INVALID_INPUT');
   });
 });

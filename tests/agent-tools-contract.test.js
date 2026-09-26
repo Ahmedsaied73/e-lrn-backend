@@ -22,8 +22,17 @@ const {
   listDefinitions,
   getDefinition,
   toLangChainTools,
+  selectToolSet,
+  selectDefinitions,
+  approximateSchemaTokens,
+  TOOL_LEXICON,
+  TOOL_DESCRIPTION_TOKENS,
+  CORE_TOOL_NAMES,
+  MAX_READ_TOOLS_PER_TURN,
 } = require('../src/services/agent/tools');
 const { execute, readTool, AgentToolError } = require('../src/services/agent/tools/_kit');
+const { wrapReadDefinition, createTtlCache, clearCache, cacheStats } = require('../src/services/agent/toolCache');
+const envConfig = require('../src/config/env');
 const { disconnectRedis } = require('../src/integrations/redis/redisClient');
 
 // Safety net: if any tool under test touches the cache, close the handle so the
@@ -195,5 +204,185 @@ describe('agent tools — LangChain wrapper', () => {
 
   it('returns null for an unknown tool name instead of throwing', () => {
     assert.equal(getDefinition('does_not_exist'), null);
+  });
+});
+
+/**
+ * Phase 4.5 — the per-question tool surface.
+ *
+ * These tests protect the agentic tier from being structurally dead again. That
+ * failure is invisible in ordinary use: the tier answers "لا توجد أداة مناسبة" or
+ * dies on a 413 and nothing in a normal unit run goes red. So the two properties
+ * that actually matter are pinned here: the surface must be SMALL, and it must
+ * still CONTAIN THE TOOL THE QUESTION IS ABOUT.
+ */
+describe('agent tools — per-question selection (Phase 4.5)', () => {
+  it('never exposes an empty surface, and always the core set', () => {
+    for (const question of ['', 'مرحبا', 'zzz qqq', '؟؟؟', 'كيف حال المنصة؟']) {
+      const { reads, defs } = selectToolSet({ question });
+      assert.ok(reads.length > 0, `an empty surface for "${question}" makes the tier useless`);
+      for (const name of CORE_TOOL_NAMES) {
+        assert.ok(
+          defs.some((d) => d.name === name),
+          `core tool ${name} missing for "${question}"`
+        );
+      }
+    }
+  });
+
+  it('caps the read surface and hides actions unless mutations are armed', () => {
+    const { reads, actions } = selectToolSet({ question: 'اشتراكات الدورات' });
+    assert.ok(reads.length <= MAX_READ_TOOLS_PER_TURN, `read surface too wide: ${reads.length}`);
+    assert.equal(actions.length, 0, 'read-only by default');
+
+    const armed = selectToolSet({ question: 'اشتراكات الدورات', includeActions: true });
+    assert.equal(armed.actions.length, 12, 'arming mutations must expose the whole action catalogue');
+    assert.equal(armed.defs.length, armed.reads.length + 12);
+  });
+
+  it('picks the tool the question is actually about', () => {
+    const cases = [
+      ['مشاكل الدفع', 'payment_issues'],
+      ['حالة الفيديوهات', 'video_pipeline_status'],
+      ['الطلاب غير النشطين', 'inactive_students'],
+      ['طابور التصحيح', 'grading_backlog'],
+      ['قائمة الدورات', 'courses_list'],
+    ];
+    for (const [question, expected] of cases) {
+      const names = selectDefinitions({ question }).map((d) => d.name);
+      assert.ok(
+        names.includes(expected),
+        `"${question}" should expose ${expected}, got: ${names.join(', ')}`
+      );
+    }
+  });
+
+
+  it('keeps the tools a follow-up turn already used, even when the wording matches nothing', () => {
+    const names = selectDefinitions({
+      question: 'وماذا عن ذلك؟',
+      historyTools: ['video_engagement'],
+    }).map((d) => d.name);
+    assert.ok(
+      names.includes('video_engagement'),
+      `a follow-up must keep its context, got: ${names.join(', ')}`
+    );
+  });
+
+  it('is deterministic: the same question always gets the same surface', () => {
+    const first = selectDefinitions({ question: 'اشتراكات الدورات' }).map((d) => d.name);
+    const second = selectDefinitions({ question: 'اشتراكات الدورات' }).map((d) => d.name);
+    assert.deepEqual(first, second);
+  });
+
+  it('is SMALLER than the full catalogue — the reason this module exists', () => {
+    const full = approximateSchemaTokens(readDefinitions);
+    for (const question of ['اشتراكات الدورات', 'حالة الفيديوهات', 'طابور التصحيح', 'مرحبا']) {
+      const trimmed = approximateSchemaTokens(selectDefinitions({ question }));
+      assert.ok(
+        trimmed.tokens < full.tokens * 0.5,
+        `"${question}" ships ${trimmed.tokens} tokens vs ${full.tokens} for the full catalogue`
+      );
+    }
+    const typical = approximateSchemaTokens(selectDefinitions({ question: 'اشتراكات الدورات' }));
+    console.log(
+      `      [tool surface] full catalogue ${full.chars} chars (~${full.tokens} tokens) -> ` +
+        `per-turn ${typical.chars} chars (~${typical.tokens} tokens)`
+    );
+  });
+
+  it('leaves no read tool unreachable: every tool has selectable vocabulary', () => {
+    for (const def of readDefinitions) {
+      const hasPhrases = (TOOL_LEXICON.get(def.name) || []).length > 0;
+      const hasWords = (TOOL_DESCRIPTION_TOKENS.get(def.name) || []).length > 0;
+      assert.ok(
+        hasPhrases || hasWords,
+        `${def.name} has no selection vocabulary — the model could never be shown it`
+      );
+    }
+  });
+});
+
+describe('agent tool micro-cache (Phase 4.5)', () => {
+  function probeDefinition({ fail = false } = {}) {
+    const state = { calls: 0 };
+    const def = readTool({
+      name: fail ? '_microcache_failing' : '_microcache_probe',
+      description: 'أداة داخلية للتحقق من التخزين المؤقت داخل العملية للاختبارات',
+      cacheTtlSeconds: 30,
+      run: async () => {
+        state.calls += 1;
+        if (fail) throw new Error('boom');
+        return { calls: state.calls, rows: [], returned: 0, truncated: false };
+      },
+    });
+    return { def, calls: () => state.calls };
+  }
+
+  it('serves a repeated read from memory instead of the database', async () => {
+    const original = envConfig.redis.enabled;
+    envConfig.redis.enabled = true;
+    clearCache();
+    try {
+      const probe = probeDefinition();
+      const wrapped = wrapReadDefinition(probe.def);
+      const first = await wrapped.run({}, {});
+      const second = await wrapped.run({}, {});
+      assert.equal(probe.calls(), 1, 'the second read must not reach the database');
+      assert.deepEqual(second, first, 'a cache hit must serve the same payload');
+      assert.ok(cacheStats().hits >= 1, 'the hit must be counted, not silently served');
+    } finally {
+      envConfig.redis.enabled = original;
+      clearCache();
+    }
+  });
+
+  it('is a passthrough when the shared cache layer is off (dev + DB tests)', async () => {
+    const original = envConfig.redis.enabled;
+    envConfig.redis.enabled = false;
+    clearCache();
+    try {
+      const probe = probeDefinition();
+      const wrapped = wrapReadDefinition(probe.def);
+      await wrapped.run({}, {});
+      await wrapped.run({}, {});
+      assert.equal(probe.calls(), 2, 'with the cache layer off every read must hit the database');
+    } finally {
+      envConfig.redis.enabled = original;
+      clearCache();
+    }
+  });
+
+  it('never caches a failure, and never wraps an action', async () => {
+    const original = envConfig.redis.enabled;
+    envConfig.redis.enabled = true;
+    clearCache();
+    try {
+      const failing = probeDefinition({ fail: true });
+      const wrapped = wrapReadDefinition(failing.def);
+      await assert.rejects(() => wrapped.run({}, {}));
+      await assert.rejects(() => wrapped.run({}, {}));
+      assert.equal(failing.calls(), 2, 'a failed query must not be pinned in front of admins');
+
+      // An action comes back byte-identical: the cache is a read-only concept.
+      assert.equal(wrapReadDefinition(getDefinition('enroll_student')), getDefinition('enroll_student'));
+      assert.equal(wrapReadDefinition(null), null);
+    } finally {
+      envConfig.redis.enabled = original;
+      clearCache();
+    }
+  });
+
+  it('bounds its size and honours an injected clock', () => {
+    let clock = 1_000_000;
+    const cache = createTtlCache({ maxEntries: 2, now: () => clock });
+    cache.set('a', 1, 10);
+    cache.set('b', 2, 10);
+    cache.set('c', 3, 10);
+    assert.equal(cache.size(), 2, 'oldest entries must be evicted, not accumulate');
+    assert.equal(cache.get('a'), undefined);
+    assert.equal(cache.get('c'), 3);
+    clock += 10_001;
+    assert.equal(cache.get('c'), undefined, 'an entry must expire on its own TTL');
   });
 });
