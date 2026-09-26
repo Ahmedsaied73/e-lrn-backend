@@ -123,7 +123,7 @@ describe('AI Admin Agent — config + kill switch', () => {
     assert.equal(defaults.aiAgent.turnTimeoutMs, 25000, 'default turn timeout');
     assert.equal(defaults.aiAgent.approvalTtlMs, 300000, 'default approval TTL');
     assert.equal(defaults.aiAgent.dailyTurnBudget, 500, 'default daily budget');
-    assert.equal(defaults.aiAgent.conversationRetentionDays, 90, 'default retention');
+    assert.equal(defaults.aiAgent.conversationRetentionDays, 30, 'default retention');
 
     const absurd = resolveConfig({
       AI_AGENT_ENABLED: 'true',

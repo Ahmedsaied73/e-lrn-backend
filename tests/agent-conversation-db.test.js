@@ -23,6 +23,7 @@ const {
   recordTurn,
   listConversations,
   getMessages,
+  pruneExpiredConversations,
 } = require('../src/services/agent/conversationService');
 
 const ADMIN_ID = 1;
@@ -173,6 +174,84 @@ test('the conversation list is newest-first and clamped', async () => {
   for (const row of list) {
     assert.ok(!Object.keys(row).includes('messages'), 'the list must not embed messages');
   }
+});
+
+test('retention: prunes only conversations past the window, and cascades their messages', async () => {
+  const expired = await newConversation();
+  const fresh = await newConversation();
+
+  // Backdate past the 30-day window. Ageing is on updatedAt, not createdAt, so
+  // this is the only way to simulate age — and it is exactly the case the job
+  // keys on: untouched for longer than the window.
+  const backdated = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
+  await prisma.agentConversation.update({ where: { id: expired.id }, data: { updatedAt: backdated } });
+
+  const result = await pruneExpiredConversations({ prisma, retentionDays: 30 });
+
+  assert.equal(result.disabled, false, 'pruning is enabled');
+  assert.ok(result.deleted >= 1, 'the backdated conversation is deleted');
+  assert.equal(result.remaining, 0, 'nothing is left past the cutoff');
+
+  assert.equal(
+    await prisma.agentConversation.count({ where: { id: expired.id } }),
+    0,
+    'the expired conversation is gone'
+  );
+  assert.equal(
+    await prisma.agentMessage.count({ where: { conversationId: expired.id } }),
+    0,
+    'messages cascade with the parent'
+  );
+  assert.equal(
+    await prisma.agentConversation.count({ where: { id: fresh.id } }),
+    1,
+    'a conversation inside the window is untouched'
+  );
+});
+
+test('retention: ageing follows last activity, not creation', async () => {
+  // An old conversation the admin just used must survive: updatedAt says "alive",
+  // and it is also the column the sidebar orders by, so the two agree by design.
+  const revived = await newConversation();
+  const created = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000);
+  await prisma.agentConversation.update({
+    where: { id: revived.id },
+    data: { createdAt: created, updatedAt: created },
+  });
+  // One more real turn bumps updatedAt back to now. This goes through recordTurn
+  // rather than appendMessage deliberately: recordTurn is the only path that
+  // writes the conversation row, so it is the only one that moves updatedAt.
+  await recordTurn({
+    prisma,
+    adminId: ADMIN_ID,
+    conversationId: revived.id,
+    question: 'سؤال جديد',
+    answer: 'رد',
+  });
+
+  const result = await pruneExpiredConversations({ prisma, retentionDays: 30 });
+  assert.equal(result.deleted, 0, 'a just-used old conversation is not pruned');
+  assert.equal(
+    await prisma.agentConversation.count({ where: { id: revived.id } }),
+    1,
+    'it survives on last activity alone'
+  );
+});
+
+test('retention: a zero or negative window disables pruning instead of deleting everything', async () => {
+  const before = await prisma.agentConversation.count({ where: { id: { in: created } } });
+
+  for (const retentionDays of [0, -1]) {
+    const result = await pruneExpiredConversations({ prisma, retentionDays });
+    assert.equal(result.disabled, true, `retentionDays=${retentionDays} disables pruning`);
+    assert.equal(result.deleted, 0);
+  }
+
+  assert.equal(
+    await prisma.agentConversation.count({ where: { id: { in: created } } }),
+    before,
+    'a disabled window must not remove a single row'
+  );
 });
 
 test('cleanup', async () => {

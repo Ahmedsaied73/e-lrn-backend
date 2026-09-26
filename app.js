@@ -438,6 +438,19 @@ const server = app.listen(port, () => {
     // handle so shutdown can stop it.
     reconciliationTask = startReconciliationJob();
 
+    // Agent conversation retention (daily). Deletes transcripts untouched for
+    // longer than AI_AGENT_CONVERSATION_RETENTION_DAYS, with messages and
+    // approvals cascading. Only meaningful when the agent is enabled.
+    if (config.aiAgent && config.aiAgent.enabled) {
+      try {
+        const { startRetentionJob } = require('./src/jobs/pruneAgentConversations');
+        agentRetentionTask = startRetentionJob();
+      } catch (err) {
+        // Retention slipping a day is survivable; boot is not.
+        console.warn('[WARN] Agent retention job failed to start:', err.message);
+      }
+    }
+
     // Payments reconciliation (D11 backstop) — only when the module is enabled.
     // Lazy require + guarded start: a payments problem must never break boot.
     if (config.features && config.features.payments && config.paymob && config.paymob.enabled) {
@@ -485,6 +498,7 @@ const server = app.listen(port, () => {
 // so a hung connection can't keep the instance "up" after detach.
 let reconciliationTask = null; // node-cron task handle (stopped on shutdown)
 let paymentReconciliationTask = null; // payments cron handle (only when enabled)
+let agentRetentionTask = null; // agent transcript retention cron handle
 
 function shutdown(signal) {
   console.log(`[SHUTDOWN] ${signal} received — draining connections...`);
@@ -505,6 +519,16 @@ function shutdown(signal) {
     }
   } catch (err) {
     console.warn('[WARN] Payment reconciliation cron stop failed:', err.message);
+  }
+
+  // Agent retention cron — same: absent when the agent was disabled at boot.
+  try {
+    if (agentRetentionTask) {
+      require('./src/jobs/pruneAgentConversations').stopRetentionJob(agentRetentionTask);
+      agentRetentionTask = null;
+    }
+  } catch (err) {
+    console.warn('[WARN] Agent retention cron stop failed:', err.message);
   }
 
   // Close BullMQ worker + queue so their dedicated Redis connections are

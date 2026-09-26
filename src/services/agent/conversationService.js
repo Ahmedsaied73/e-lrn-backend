@@ -46,6 +46,11 @@ const MESSAGES_TAKE_MAX = 100;
 const METADATA_STRING_MAX = 96;
 const TOOL_CALLS_MAX = 20;
 
+// Cap on one prune statement. Conversations are small (a transcript, not a blob),
+// so a few hundred per tick is plenty to keep up with organic growth while keeping
+// the DELETE's lock footprint bounded.
+const MAX_PRUNE_BATCH = 200;
+
 // Arabic counts as letters, so a question made only of digits, punctuation or
 // emoji is "no letters" and falls back to DEFAULT_TITLE. A Unicode property escape
 // keeps that correct for any script instead of hand-listing character ranges.
@@ -410,15 +415,17 @@ async function recordTurn({ prisma, adminId, conversationId, question, answer, m
   const operations = [
     prisma.agentMessage.create({ data: userRow }),
     prisma.agentMessage.create({ data: assistantRow }),
+    // ALWAYS touch the conversation row, not just when the title is first derived.
+    // `updatedAt` is what retention ages on and what the sidebar orders by, and
+    // Prisma's @updatedAt only fires when the row is actually written. Previously
+    // this ran only on the first turn, so a conversation's updatedAt froze at that
+    // moment: a transcript in daily use would eventually be pruned as "expired"
+    // while its owner was still talking to it, and it would sort as stale in the
+    // sidebar. `title` is already the correct final value in both branches, so
+    // re-asserting it is idempotent — and it rides the existing $transaction, so
+    // this costs no extra round trip.
+    prisma.agentConversation.updateMany({ where: { id: conversationId, adminId }, data: { title } }),
   ];
-  if (needsTitle) {
-    // updateMany, not update: Prisma accepts a unique WHERE only on update, so this
-    // is the form that keeps the admin predicate inside the statement. It also bumps
-    // updatedAt, which is what the conversation list is ordered by.
-    operations.push(
-      prisma.agentConversation.updateMany({ where: { id: conversationId, adminId }, data: { title } })
-    );
-  }
 
   const [userMessage, assistantMessage] = await prisma.$transaction(operations);
 
@@ -493,6 +500,69 @@ async function getMessages({ prisma, adminId, conversationId, take = MESSAGES_TA
   }));
 }
 
+/**
+ * Delete conversations whose LAST ACTIVITY is older than the retention window.
+ *
+ * Why `updatedAt` and not `createdAt`: retention is about how long a transcript is
+ * kept, and an admin who opens a 60-day-old conversation and adds a turn has just
+ * made it live again. Ageing on createdAt would delete a conversation out from
+ * under them mid-use. `updatedAt` is also the column the sidebar orders by, so the
+ * pruned set is exactly "conversations the admin has not touched in N days".
+ *
+ * CASCADE: AgentMessage and AgentApproval both declare onDelete: Cascade, so the
+ * transcript and any bound approval rows go with the parent in the same statement.
+ * Nothing is orphaned and there is no second pass to keep in sync.
+ *
+ * Bounded: a single DELETE is capped at MAX_PRUNE_BATCH. A retention job that
+ * takes a table-wide lock while it chews through thousands of rows is exactly the
+ * kind of job that takes the admin console down with it; the next tick continues
+ * where this one stopped.
+ *
+ * @param {number} retentionDays  Window in days. 0 (or less) disables pruning.
+ * @param {Date}   [now]         Injectable clock, for deterministic tests.
+ * @returns {Promise<{ deleted: number, remaining: number|null, disabled: boolean }>}
+ *   `remaining` is the count still past the cutoff after this batch, or null when
+ *   the count query failed (pruning itself must not be reported as "all done").
+ */
+async function pruneExpiredConversations({ prisma, retentionDays, now = new Date() } = {}) {
+  if (!Number.isSafeInteger(retentionDays) || retentionDays <= 0) {
+    return { deleted: 0, remaining: null, disabled: true };
+  }
+
+  const cutoff = new Date(now.getTime() - retentionDays * 24 * 60 * 60 * 1000);
+
+  // Select-then-delete, not a single unbounded deleteMany: Postgres has no
+  // DELETE ... LIMIT, so a bare deleteMany would lock and scan the whole expired
+  // set in one statement. Taking ids first caps the DELETE at MAX_PRUNE_BATCH.
+  // Ordering by updatedAt means a partial run still removes the least-recently-
+  // used history first rather than an arbitrary set.
+  const victims = await prisma.agentConversation.findMany({
+    where: { updatedAt: { lt: cutoff } },
+    orderBy: { updatedAt: 'asc' },
+    take: MAX_PRUNE_BATCH,
+    select: { id: true },
+  });
+
+  if (victims.length === 0) {
+    return { deleted: 0, remaining: 0, disabled: false };
+  }
+
+  const { count } = await prisma.agentConversation.deleteMany({
+    where: { id: { in: victims.map((row) => row.id) } },
+  });
+
+  // Best-effort: a failure here must not misreport the run as complete, and must
+  // not roll back the deletes that already succeeded.
+  let remaining = null;
+  try {
+    remaining = await prisma.agentConversation.count({ where: { updatedAt: { lt: cutoff } } });
+  } catch {
+    remaining = null;
+  }
+
+  return { deleted: count, remaining, disabled: false };
+}
+
 module.exports = {
   AgentConversationError,
   buildTitle,
@@ -502,4 +572,5 @@ module.exports = {
   recordTurn,
   listConversations,
   getMessages,
+  pruneExpiredConversations,
 };

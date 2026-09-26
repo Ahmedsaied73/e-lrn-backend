@@ -251,7 +251,7 @@ function resolveAiAgent() {
     turnTimeoutMs: clampAgentInt(process.env.AI_AGENT_TURN_TIMEOUT_MS, 25000, 5000, 120000),
     approvalTtlMs: clampAgentInt(process.env.AI_AGENT_APPROVAL_TTL_MS, 5 * 60 * 1000, 30 * 1000, 30 * 60 * 1000),
     dailyTurnBudget: clampAgentInt(process.env.AI_AGENT_DAILY_TURN_BUDGET, 500, 1, 100000),
-    conversationRetentionDays: clampAgentInt(process.env.AI_AGENT_CONVERSATION_RETENTION_DAYS, 90, 7, 3650),
+    conversationRetentionDays: clampAgentInt(process.env.AI_AGENT_CONVERSATION_RETENTION_DAYS, 30, 7, 3650),
   };
 }
 
