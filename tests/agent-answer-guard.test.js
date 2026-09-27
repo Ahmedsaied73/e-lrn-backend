@@ -110,3 +110,62 @@ test('multiple payloads are all considered', () => {
   assert.equal(checkGrounded('النافذة 900 يوم', [{ windowDays: 900 }]).ok, true);
   assert.equal(checkGrounded('النافذة 901 يوم', [{ windowDays: 900 }]).ok, false);
 });
+
+/**
+ * No evidence, no figures.
+ *
+ * WHY: the 3-digit threshold exists so list markers and row numbers do not trip the
+ * guard. But when a turn calls NO tool at all, there is no payload to tell "row 3"
+ * apart from "there are 3 students" — and a provider-failover turn was caught
+ * answering a count question with `tools: []` and a fabricated small number, which the
+ * old threshold passed as noise. With no evidence, every integer is fiction until a
+ * tool says otherwise, so every integer counts as a claim.
+ */
+test('an answer produced WITHOUT any tool call may cite no figure at all', () => {
+  const toolless = checkGrounded('there are exactly 3 students in the third secondary', []);
+  assert.equal(toolless.ok, false, 'a toolless answer must not state a count');
+  assert.equal(toolless.ungrounded.length, 1);
+
+  // The same sentence WITH the tool payload is the good answer it was meant to be.
+  const grounded = checkGrounded('there are exactly 3 students in the third secondary', [
+    { thirdSecondary: 3 },
+  ]);
+  assert.equal(grounded.ok, true);
+});
+
+test('no evidence + no figures still passes (a refusal needs no source)', () => {
+  assert.equal(checkGrounded('no suitable tool exists for this question', []).ok, true);
+});
+
+test('the no-evidence rule does not make a grounded answer noisier', () => {
+  // A row marker in a real, tool-backed table must stay allowed: the whole point of
+  // the 3-digit threshold is that this must not become a guard admins learn to ignore.
+  const table = '| # | student |\n| 1 | Ahmed |\n| 2 | Sara |\n| 3 | Mohamed |';
+  const result = checkGrounded(table, [{ rows: [{ name: 'Ahmed' }, { name: 'Sara' }, { name: 'Mohamed' }] }]);
+  assert.equal(result.ok, true);
+});
+
+
+/**
+ * Arabic-Indic numerals are figures too.
+ *
+ * REGRESSION PIN: `\d` in JavaScript matches ASCII 0-9 ONLY, so the figure pattern
+ * used to miss every Arabic-Indic numeral (١٢٣, ٨٣٫٣, ١٠٠٪). Since the agent answers
+ * in Arabic, that meant most of the figures it writes were never checked at all — a
+ * failover turn could claim "بكل ثقة ١٠٠٪" with zero tool payloads and the guard
+ * called it clean. The earlier "Arabic decimal separators" test passed for exactly
+ * that reason and proved nothing.
+ */
+test('Arabic-Indic numerals are extracted and checked like ASCII ones', () => {
+  // No evidence: an Arabic-Indic percentage is still a claim.
+  assert.equal(checkGrounded('نسبة النجاح ١٠٠٪', []).ok, false);
+  // Grounded: the same figure written Arabic-Indic, from a 0..1 ratio in the payload.
+  assert.equal(checkGrounded('نسبة النجاح ١٠٠٪', [{ confidence: 1 }]).ok, true);
+  // A plain integer: allowed when the tool said it, refused when it did not.
+  assert.equal(checkGrounded('العدد ١٢٣', [{ count: 123 }]).ok, true);
+  assert.equal(checkGrounded('العدد ١٢٣', [{ count: 124 }]).ok, false);
+  // The 3-digit threshold applies to Arabic-Indic digits as well, so small integers
+  // remain list markers rather than claims when there IS evidence.
+  assert.equal(checkGrounded('| 1 | أحمد |', [{ rows: [{ name: 'أحمد' }] }]).ok, true);
+});
+
