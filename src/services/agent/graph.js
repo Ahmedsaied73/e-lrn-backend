@@ -122,6 +122,77 @@ const sharedCheckpointer = new MemorySaver();
  * approval, so two concurrent turns cannot leak context into each other. The
  * cost is object construction only — no network, no client duplication.
  */
+/**
+ * The model's view of the conversation, with spent tool payloads removed.
+ *
+ * WHY: `state.messages` is the durable record — the grounding guard reads every
+ * tool payload from it to validate the final answer, and the approval flow reads
+ * the refusal out of it — so nothing may be deleted there. But every one of those
+ * payloads is ALSO re-sent to the model on every model call of every turn. Measured
+ * on this deployment: a single row-returning tool answers with up to 50 fat rows, so
+ * a 5-turn admin conversation re-ships the first four turns' raw JSON every time it
+ * asks a new question. That is the quota burn, and it grows with the conversation.
+ *
+ * The safe cut: keep every AI message (the human-readable answer from that turn is
+ * what a follow-up actually reasons over — "وماذا عن ذلك؟" is answered from the
+ * previous ANSWER, not from its JSON), and keep the most recent tool payload intact
+ * (the model needs it to answer the turn in progress). Only the SPENT payloads are
+ * replaced with a one-line stand-in that says which tool ran and how many rows it
+ * returned, so the model knows to re-query rather than to guess.
+ *
+ * This is a DISPLAY decision, exactly like the per-question tool-surface trim: the
+ * ToolNode still executes from the full catalogue and the guard still validates
+ * against the untouched state.
+ */
+const KEPT_TOOL_PAYLOADS = 1;
+
+function elideSpentToolPayload(message) {
+  const raw = typeof message.content === 'string' ? message.content : JSON.stringify(message.content);
+  let rows = null;
+  try {
+    const parsed = JSON.parse(raw);
+    // The toolkit's real envelope is `{ data, meta }` (see _kit.finalize), so the row
+    // list is `data.rows`. A bare object is accepted too, because a tool double or a
+    // provider that unwraps the result must not defeat the trim.
+    const body = parsed && typeof parsed === 'object' && parsed.data && typeof parsed.data === 'object'
+      ? parsed.data
+      : parsed;
+    if (body && Array.isArray(body.rows)) rows = body.rows.length;
+    else if (body && Number.isSafeInteger(body.returned)) rows = body.returned;
+  } catch {
+    // A payload that is not JSON is elided without a row count rather than kept.
+  }
+  const shape = rows === null ? '' : ` (${rows} صف)`;
+  return new ToolMessage({
+    content:
+      `« نتيجة ${message.name || 'أداة'}${shape} — حُذف التفصيل من السياق بعد استخدامه لتوفير التوكنز. ` +
+      'أعد استدعاء الأداة إن احتجت هذه البيانات مرة أخرى. »',
+    tool_call_id: message.tool_call_id,
+    name: message.name,
+  });
+}
+
+/**
+ * Replace every tool payload EXCEPT the last `KEPT_TOOL_PAYLOADS` ones.
+ *
+ * Counted from the END on purpose: the payload the model needs is the one for the turn
+ * in progress, which is the newest. (Keeping the oldest instead is the subtle version
+ * of this bug — the model would be answering off a stale payload.)
+ *
+ * Returns a NEW array and never mutates its input: the input is `state.messages`, the
+ * durable record the grounding guard and the approval flow both read from.
+ */
+function compactToolPayloads(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  const isTool = (message) => message && typeof message.getType === 'function' && message.getType() === 'tool';
+  const toolIndexes = [];
+  list.forEach((message, index) => {
+    if (isTool(message)) toolIndexes.push(index);
+  });
+  const keep = new Set(toolIndexes.slice(-KEPT_TOOL_PAYLOADS));
+  return list.map((message, index) => (isTool(message) && !keep.has(index) ? elideSpentToolPayload(message) : message));
+}
+
 function createAgentGraph({ resolveToolContext, checkpointer = sharedCheckpointer, invokeModel } = {}) {
   // The FULL catalogue stays bound to the ToolNode, and that is deliberate: the node
   // is the execution AUTHORITY (strict args, row caps, redaction, the approval gate,
@@ -195,7 +266,9 @@ function createAgentGraph({ resolveToolContext, checkpointer = sharedCheckpointe
           });
 
   async function agentNode(state) {
-    const messages = [new SystemMessage(SYSTEM_PROMPT), ...state.messages];
+    // The model is shown the COMPACTED history; the state keeps every payload, so
+    // grounding validation and approval detection are unaffected by this trim.
+    const messages = [new SystemMessage(SYSTEM_PROMPT), ...compactToolPayloads(state.messages)];
     const { result, provider } = await callModel(messages, toolsForTurn(state));
     return { messages: [result], toolCalls: countToolCalls(result), provider };
   }
@@ -296,6 +369,8 @@ module.exports = {
   SYSTEM_PROMPT,
   AgentState,
   createAgentGraph,
+  compactToolPayloads,
+  KEPT_TOOL_PAYLOADS,
   finalAnswerText,
   toolCallSummary,
   countToolCalls,
