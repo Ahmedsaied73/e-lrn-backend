@@ -5,7 +5,9 @@
  * no individual tool can forget one:
  *
  *   CAPS   row-returning reads are clamped to config.aiAgent.maxToolResultRows
- *          (50 by default) no matter what the model asks for.
+ *          (50 by default) no matter what the model asks for, AND every payload
+ *          — read or action — is capped in CHARS by maxToolResultChars()
+ *          (12,000 by default) in finalize(), the single funnel.
  *   CACHE  reads may declare cacheTtlSeconds and go through the repo's fail-open
  *          cache (src/integrations/redis/cache.js). Actions are NEVER cached.
  *   PII    every payload is passed through redactPayload() before it can reach a
@@ -124,9 +126,118 @@ function auditSafeArgs(args) {
   return safe;
 }
 
+/**
+ * Hard cap on the SERIALIZED SIZE of one tool result, for every read AND every
+ * action — config-clamped at boot. Additive to the row cap above: rows say how
+ * many records ship, chars say how many BYTES they cost, and only the second is
+ * what the model is re-billed for on every subsequent step of the turn.
+ */
+function maxToolResultChars() {
+  return config.aiAgent.maxToolResultChars;
+}
+
+/** JSON char count of an already-JSON-safe value (payloads are redacted first). */
+function charsOf(value) {
+  const json = JSON.stringify(value);
+  return typeof json === 'string' ? json.length : 0;
+}
+
+/**
+ * Largest prefix of `list` that still serializes to <= budget chars, found by
+ * bisection. One JSON.stringify per probe (~8 probes for a 200-row list) instead
+ * of a linear walk that would re-serialize the whole tail 200 times.
+ */
+function longestFittingPrefix(list, budget, build) {
+  if (charsOf(build(list.length)) <= budget) return list.length;
+  let lo = 0;
+  let hi = list.length - 1; // known-too-large
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (charsOf(build(mid)) <= budget) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+/**
+ * Cut an over-budget payload down to `cap` chars and SAY SO, or return null when
+ * it already fits (a small payload is returned untouched, so ordinary answers stay
+ * byte-identical to what this layer produced before the cap existed).
+ *
+ * WHY the head of `rows`, and why scalars are never dropped:
+ *   - rows are the bulk of every list-returning read, and they are the only part
+ *     the model can re-obtain — it just calls the same tool again with a smaller
+ *     `take` or a filter. Dropping a scalar instead (a `total`, a `returned`, an
+ *     `asOf`) would destroy information that is NOT retrievable, and it would do
+ *     so silently: the answer would look complete and be wrong. Admin tables are
+ *     ordered newest-first, so the leading entries are the ones an answer cites.
+ *   - Other array-valued keys are trimmed next (`items`, `courses`, …) in key
+ *     order, for tools that list something other than `rows`.
+ *   - The honesty fields are added to the payload itself (not only to meta) so
+ *     that whatever renders the result — LLM tier, fast path, or the stored turn —
+ *     cannot present a shortened list as a complete one.
+ */
+function trimPayloadToBudget(data, cap) {
+  const fullChars = charsOf(data);
+  if (fullChars <= cap) return null;
+
+  const meta = {
+    payloadTruncated: true,
+    payloadChars: fullChars,
+    payloadRows: Array.isArray(data)
+      ? data.length
+      : data && typeof data === 'object' && Array.isArray(data.rows)
+        ? data.rows.length
+        : null,
+  };
+
+  // A bare string has no list to shorten; slice it and keep the same shape.
+  if (typeof data === 'string') {
+    return { data: data.slice(0, Math.max(0, cap - 60)), meta };
+  }
+
+  if (Array.isArray(data)) {
+    const keep = longestFittingPrefix(data, cap, (n) => data.slice(0, n));
+    return { data: data.slice(0, keep), meta };
+  }
+
+  if (!data || typeof data !== 'object') return { data, meta };
+
+  const working = { ...data };
+  // The honesty fields cost characters too, so they are reserved BEFORE the
+  // search — otherwise a payload trimmed to exactly the cap would ship over it
+  // the moment `payloadChars` is attached.
+  const emptyShape = {};
+  for (const key of Object.keys(working)) {
+    if (Array.isArray(working[key])) emptyShape[key] = [];
+  }
+  const budget = Math.max(0, cap - charsOf({ ...emptyShape, ...meta }));
+  const fits = () => charsOf({ ...working, ...meta }) <= cap;
+
+  const listKeys = Object.keys(working).filter((key) => Array.isArray(working[key]));
+  // rows FIRST, then every other list in key order.
+  const ordered = [...listKeys.filter((k) => k === 'rows'), ...listKeys.filter((k) => k !== 'rows')];
+  for (const key of ordered) {
+    if (fits()) break;
+    const list = working[key];
+    const keep = longestFittingPrefix(list, budget, (n) => ({ ...working, ...meta, [key]: list.slice(0, n) }));
+    working[key] = list.slice(0, keep);
+  }
+
+  // Pathological case: the SCALARS alone exceed the cap. They are kept anyway —
+  // a truncated-but-honest answer beats one with its own totals removed — and the
+  // payloadTruncated flag is still set so the overshoot is never invisible.
+  return { data: { ...working, ...meta }, meta };
+}
+
 function finalize(payload, def, startedAt) {
+  // Cap AFTER redaction: the cap exists to bound what the MODEL pays for, and
+  // redaction only ever shortens strings, so measuring before it would
+  // under-count the real cost.
+  const data = redactPayload(payload);
+  const trimmed = trimPayloadToBudget(data, maxToolResultChars());
   return {
-    data: redactPayload(payload),
+    data: trimmed ? trimmed.data : data,
     meta: {
       tool: def.name,
       asOf: new Date().toISOString(),
@@ -212,6 +323,8 @@ module.exports = {
   KIND_ACTION,
   AgentToolError,
   maxRows,
+  maxToolResultChars,
+  trimPayloadToBudget,
   clampTake,
   daysAgo,
   readTool,

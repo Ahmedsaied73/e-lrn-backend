@@ -272,6 +272,15 @@ function resolveAiAgent() {
     // be able to turn one admin question into unbounded LLM/DB spend.
     maxToolCalls: clampAgentInt(process.env.AI_AGENT_MAX_TOOL_CALLS, 6, 1, 10),
     maxToolResultRows: clampAgentInt(process.env.AI_AGENT_MAX_TOOL_RESULT_ROWS, 50, 1, 200),
+    // CHARS, not rows, and that is the whole point: the row cap above bounds how
+    // many records ship, but a tool result is re-serialized into EVERY model call
+    // of the turn, so 50 wide rows get paid for again on each step. Measured live
+    // on this schema: a NORMAL 50-row read is 8.8k chars, and a 200-row wide
+    // select is 85.7k — so a 12,000-char default is a no-op for ordinary answers
+    // and only bites the pathological ones. Clamp bounds: 2k floor (below that the
+    // answer is useless), 60k ceiling (a deliberate "give me everything" admin,
+    // still ~15k tokens).
+    maxToolResultChars: clampAgentInt(process.env.AI_AGENT_MAX_TOOL_RESULT_CHARS, 12000, 2000, 60000),
     maxAnswerTokens: clampAgentInt(process.env.AI_AGENT_MAX_ANSWER_TOKENS, 700, 128, 4000),
     // 25s default (was 45s): the graph aborts a hung provider per call, so a lower
     // budget fails the turn FAST instead of holding the SSE stream open until the

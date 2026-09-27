@@ -240,6 +240,33 @@ describe('agent tools — execute() guards', () => {
     );
   });
 });
+/**
+ * The char cap in finalize() is the only cross-cutting rule a new tool cannot opt
+ * out of, so its worst case is pinned here on a REAL catalogue tool: a payload
+ * made only of scalars (the platform aggregate) has no list to shorten, and the
+ * cap must therefore keep every number and say that it trimmed rather than
+ * silently returning a hollow object.
+ */
+describe('agent tools — the payload char cap never hollows out an answer', () => {
+  it('keeps every scalar of a listless payload and declares the overshoot', async () => {
+    const original = envConfig.aiAgent.maxToolResultChars;
+    // Below the floor on purpose: this bypasses the env clamp to prove the
+    // BEHAVIOUR at a hostile setting, not to argue about the clamp (that is
+    // pinned in tests/agent-tool-payload-cap.test.js). The await is inside the
+    // try — execute() is async, so restoring the cap in a finally that ran first
+    // would restore it before finalize() ever read it.
+    envConfig.aiAgent.maxToolResultChars = 10;
+    try {
+      const { data } = await execute({ ...getDefinition('platform_overview'), cacheTtlSeconds: 0 }, {}, { prisma: prismaStub() });
+      assert.equal(data.users.students, 7, 'a count must survive an impossible cap');
+      assert.equal(data.payloadTruncated, true, 'the overshoot is declared');
+      assert.ok(data.payloadChars > 10, 'payloadChars reports the real pre-trim size');
+      assert.equal(data.payloadRows, null, 'a listless payload has no row count to report');
+    } finally {
+      envConfig.aiAgent.maxToolResultChars = original;
+    }
+  });
+});
 describe('agent tools — LangChain wrapper', () => {
   it('wraps every default tool with its own name', () => {
     const tools = toLangChainTools();
