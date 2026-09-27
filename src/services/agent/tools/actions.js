@@ -19,11 +19,18 @@
  */
 
 const { z } = require('zod');
+const bcrypt = require('bcrypt');
 const cache = require('../../../integrations/redis/cache');
 const { actionTool } = require('./_kit');
-const { isValidSlug } = require('../../../utils/slugs');
+const { isValidSlug, randomBase36Slug } = require('../../../utils/slugs');
 
 const GRADE_VALUES = ['FIRST_SECONDARY', 'SECOND_SECONDARY', 'THIRD_SECONDARY'];
+
+// coursesController validates price with a local isInvalidPrice() (finite, >= 0,
+// <= 1e9) that it does NOT export. The same ceiling is restated exactly once here
+// and consumed by the course schemas, so the bound exists in one place per layer
+// instead of being copied per tool.
+const COURSE_PRICE_MAX_EGP = 1e9;
 
 // Opaque public identifiers are exactly 12 lowercase base36 chars (see
 // src/utils/slugs.js). Validating the FORMAT in the schema means a hallucinated
@@ -45,6 +52,29 @@ async function findCourse(prisma, courseSlug) {
     where: { slug: courseSlug },
     select: { id: true, slug: true, title: true, price: true },
   });
+}
+
+/**
+ * The /user/me payload cache (v1:me:{id}, 60s) holds pre-write fields and the HTTP
+ * user paths drop it after every write. Never-throw by design: a Redis failure
+ * only serves a ≤60s-stale profile, never worth failing a completed write for.
+ */
+async function invalidateMeCache(userId) {
+  try {
+    await cache.del(cache.buildKey('me', String(userId)));
+  } catch {
+    /* best-effort: the stale copy expires on its own TTL */
+  }
+}
+
+/**
+ * The course-cache invalidation set coursesController runs on EVERY course write
+ * (list pages + the category facets). One copy here so a new write path cannot
+ * forget one of the two and leave a stale title/price in front of admins.
+ */
+async function invalidateCourseCaches() {
+  await cache.delPrefix('v1:courses:');
+  await cache.del(cache.buildKey('search', 'cats'));
 }
 
 /** The invalidation set the HTTP enrollment paths perform — one copy, no drift. */
@@ -674,8 +704,7 @@ const updateCoursePrice = actionTool({
 
     // Mirrors the HTTP path exactly: the course list and the category facets are
     // cached, so a new price must not linger behind them.
-    await cache.delPrefix('v1:courses:');
-    await cache.del(cache.buildKey('search', 'cats'));
+    await invalidateCourseCaches();
 
     return {
       ok: true,
@@ -684,6 +713,262 @@ const updateCoursePrice = actionTool({
       beforePriceEgp: course.price,
       afterPriceEgp: updated.price,
       note: 'الاشتراكات القائمة لم تتأثر — السعر الجديد يُطبَّق على عمليات الشراء القادمة.',
+    };
+  },
+});
+
+const createStudent = actionTool({
+  name: 'create_student',
+  description:
+    'إنشاء حساب طالب جديد بالاسم والبريد الإلكتروني وكلمة المرور (٨ أحرف على الأقل) ورقم الهاتف والصف الدراسي. يُستخدم عند طلب «أضف طالباً» أو «أنشئ حساب طالب». يفشل إذا كان البريد أو الهاتف مستخدماً من قبل، ولا ينفّذ إلا بعد موافقة المشرف، ويعيد معرّف الطالب (slug) وبياناته دون أي بيانات دخول.',
+  schema: z.object({
+    name: z.string().min(2).max(120).describe('اسم الطالب كاملاً'),
+    email: z.string().email().max(190).describe('البريد الإلكتروني للطالب (فريد)'),
+    password: z.string().min(8).max(200).describe('كلمة مرور الطالب: ٨ أحرف على الأقل'),
+    phoneNumber: z.string().min(6).max(20).describe('رقم هاتف الطالب (فريد)'),
+    grade: z
+      .enum(GRADE_VALUES)
+      .describe('الصف الدراسي: FIRST_SECONDARY أو SECOND_SECONDARY أو THIRD_SECONDARY'),
+  }),
+  audit: { action: 'USER_CREATE', targetType: 'user' },
+  run: async (args, ctx) => {
+    const prisma = ctx.prisma;
+    const email = args.email.trim().toLowerCase();
+    const phoneNumber = args.phoneNumber.trim();
+
+    // Mirrors authController.register: the pre-checks turn the HTTP 409 into a
+    // precise, actionable reason instead of a generic write failure.
+    const existingEmail = await prisma.user.findUnique({ where: { email }, select: { id: true } });
+    if (existingEmail) return { ok: false, reason: 'EMAIL_TAKEN' };
+    const existingPhone = await prisma.user.findUnique({ where: { phoneNumber }, select: { id: true } });
+    if (existingPhone) return { ok: false, reason: 'PHONE_TAKEN' };
+
+    // One hashing policy for the whole platform: the register path's cost (10).
+    const hashedPassword = await bcrypt.hash(args.password, 10);
+
+    let created;
+    try {
+      created = await prisma.user.create({
+        data: {
+          name: args.name.trim(),
+          email,
+          phoneNumber,
+          password: hashedPassword,
+          grade: args.grade,
+          slug: randomBase36Slug(),
+        },
+        select: { id: true, slug: true, name: true, email: true, phoneNumber: true, grade: true, role: true },
+      });
+    } catch (error) {
+      // The pre-checks are not atomic: a concurrent register of the same email or
+      // phone lands here as P2002 — same refusal, still never a raw DB error.
+      if (error.code === 'P2002') return { ok: false, reason: 'EMAIL_OR_PHONE_TAKEN' };
+      throw error;
+    }
+
+    return {
+      ok: true,
+      targetId: created.id,
+      student: {
+        slug: created.slug,
+        name: created.name,
+        email: created.email,
+        phoneNumber: created.phoneNumber,
+        grade: created.grade,
+        role: created.role,
+      },
+      note: 'لم تُنشأ جلسة دخول للطالب — يدخل بكلمة المرور التي حدّدتها.',
+    };
+  },
+});
+
+const updateStudent = actionTool({
+  name: 'update_student',
+  description:
+    'تعديل بيانات طالب: الاسم أو الصف الدراسي أو رقم الهاتف (حقل واحد على الأقل). يُستخدم عند طلب «عدّل بيانات الطالب» أو «انقل الطالب للصف الثالث». لا يغيّر البريد أو كلمة المرور، ولا ينفّذ إلا بعد موافقة المشرف، ويعيد الحقول المتغيّرة.',
+  schema: z
+    .object({
+      userSlug: slugArg('الطالب'),
+      name: z.string().min(2).max(120).optional().describe('الاسم الجديد للطالب'),
+      grade: z.enum(GRADE_VALUES).optional().describe('الصف الدراسي الجديد'),
+      phoneNumber: z.string().min(6).max(20).optional().describe('رقم الهاتف الجديد (فريد)'),
+    })
+    .strict()
+    .refine((v) => Boolean(v.name || v.grade || v.phoneNumber), {
+      message: 'حدّد حقلاً واحداً على الأقل: name أو grade أو phoneNumber',
+    }),
+  audit: { action: 'USER_UPDATE', targetType: 'user' },
+  run: async (args, ctx) => {
+    const prisma = ctx.prisma;
+    const student = await findStudent(prisma, args.userSlug);
+    if (!student) return { ok: false, reason: 'STUDENT_NOT_FOUND' };
+
+    // The field set PUT /user/:userId allows an ADMIN to change on someone else.
+    // email/password stay on the console path: a model must never be able to mint
+    // or rotate a student's credentials.
+    const data = {};
+    if (args.name) data.name = args.name.trim();
+    if (args.grade) data.grade = args.grade;
+    if (args.phoneNumber) data.phoneNumber = args.phoneNumber.trim();
+
+    let updated;
+    try {
+      updated = await prisma.user.update({
+        where: { id: student.id },
+        data,
+        select: { id: true, slug: true, name: true, grade: true, phoneNumber: true },
+      });
+    } catch (error) {
+      if (error.code === 'P2002') return { ok: false, reason: 'PHONE_TAKEN' };
+      throw error;
+    }
+
+    await invalidateMeCache(student.id);
+
+    return {
+      ok: true,
+      targetId: updated.id,
+      student: {
+        slug: updated.slug,
+        name: updated.name,
+        grade: updated.grade,
+        phoneNumber: updated.phoneNumber,
+      },
+      changedFields: Object.keys(data),
+      before: { name: student.name, grade: student.grade },
+    };
+  },
+});
+
+const createCourse = actionTool({
+  name: 'create_course',
+  description:
+    'إنشاء دورة جديدة بالعنوان والوصف والسعر بالجنيه المصري والصف الدراسي (والتصنيف والصورة اختياريان). تُنسب الدورة إلى المشرف الذي وافق عليها. لا ينفّذ إلا بعد موافقة المشرف، ويعيد معرّف الدورة (slug) وسعرها وصفّها.',
+  schema: z.object({
+    title: z.string().min(3).max(200).describe('عنوان الدورة'),
+    description: z.string().min(10).max(5000).describe('وصف الدورة'),
+    priceEgp: z
+      .number()
+      .int()
+      .min(0)
+      .max(COURSE_PRICE_MAX_EGP)
+      .describe('السعر بالجنيه المصري كرقم صحيح بدون كسور، و0 تعني مجانية'),
+    grade: z
+      .enum(GRADE_VALUES)
+      .describe('الصف الدراسي: FIRST_SECONDARY أو SECOND_SECONDARY أو THIRD_SECONDARY'),
+    category: z.string().min(2).max(100).optional().describe('تصنيف الدورة (اختياري)'),
+    thumbnail: z.string().url().max(500).optional().describe('رابط صورة الدورة (اختياري)'),
+  }),
+  audit: { action: 'COURSE_CREATE', targetType: 'course' },
+  run: async (args, ctx) => {
+    const prisma = ctx.prisma;
+
+    let course;
+    try {
+      course = await prisma.course.create({
+        data: {
+          title: args.title.trim(),
+          slug: randomBase36Slug(),
+          description: args.description.trim(),
+          price: args.priceEgp,
+          grade: args.grade,
+          category: args.category || undefined,
+          thumbnail: args.thumbnail || 'https://via.placeholder.com/640x360?text=No+Thumbnail',
+          // Attribution is the approving admin. coursesController only falls back
+          // to findFirst({ role: 'ADMIN' }) for direct script invocation with NO
+          // user context — an agent action always has one, so a "first admin"
+          // guess here would silently mis-attribute the course.
+          teacherId: ctx.adminId,
+        },
+        select: { id: true, slug: true, title: true, price: true, grade: true, category: true },
+      });
+    } catch (error) {
+      // The approving admin row disappeared between approval and execution.
+      if (error.code === 'P2003') return { ok: false, reason: 'ADMIN_NOT_FOUND' };
+      throw error;
+    }
+
+    await invalidateCourseCaches();
+
+    return {
+      ok: true,
+      targetId: course.id,
+      course: {
+        slug: course.slug,
+        title: course.title,
+        priceEgp: course.price,
+        grade: course.grade,
+        category: course.category,
+      },
+      teacherId: ctx.adminId,
+      note: 'الدورة أُنشئت بدون فيديوهات — تُضاف الفيديوهات من لوحة التحكم.',
+    };
+  },
+});
+
+const updateCourse = actionTool({
+  name: 'update_course',
+  description:
+    'تعديل بيانات دورة: العنوان أو الوصف أو السعر بالجنيه المصري أو الصف الدراسي أو التصنيف أو الصورة (حقل واحد على الأقل). يُستخدم عند طلب «عدّل بيانات الدورة». لا ينفّذ إلا بعد موافقة المشرف، ويعيد الحقول المتغيّرة.',
+  schema: z
+    .object({
+      courseSlug: slugArg('الدورة'),
+      title: z.string().min(3).max(200).optional().describe('العنوان الجديد للدورة'),
+      description: z.string().min(10).max(5000).optional().describe('الوصف الجديد للدورة'),
+      priceEgp: z
+        .number()
+        .int()
+        .min(0)
+        .max(COURSE_PRICE_MAX_EGP)
+        .optional()
+        .describe('السعر الجديد بالجنيه المصري كرقم صحيح، و0 تعني مجانية'),
+      grade: z.enum(GRADE_VALUES).optional().describe('الصف الدراسي الجديد'),
+      category: z.string().min(2).max(100).optional().describe('التصنيف الجديد'),
+      thumbnail: z.string().url().max(500).optional().describe('رابط الصورة الجديد'),
+    })
+    .strict()
+    .refine(
+      (v) =>
+        Boolean(v.title || v.description || v.priceEgp !== undefined || v.grade || v.category || v.thumbnail),
+      { message: 'حدّد حقلاً واحداً على الأقل للتعديل' }
+    ),
+  audit: { action: 'COURSE_UPDATE', targetType: 'course' },
+  run: async (args, ctx) => {
+    const prisma = ctx.prisma;
+    const course = await findCourse(prisma, args.courseSlug);
+    if (!course) return { ok: false, reason: 'COURSE_NOT_FOUND' };
+
+    // Exactly the columns updateCourse accepts. The HTTP surface has no separate
+    // publish/isPublished step (the Course model has no such field), so "publish"
+    // is folded in here rather than shipped as a tool that would update nothing.
+    const data = {};
+    if (args.title) data.title = args.title.trim();
+    if (args.description) data.description = args.description.trim();
+    if (args.priceEgp !== undefined) data.price = args.priceEgp;
+    if (args.grade) data.grade = args.grade;
+    if (args.category) data.category = args.category.trim();
+    if (args.thumbnail) data.thumbnail = args.thumbnail.trim();
+
+    const updated = await prisma.course.update({
+      where: { id: course.id },
+      data,
+      select: { id: true, slug: true, title: true, price: true, grade: true, category: true },
+    });
+
+    await invalidateCourseCaches();
+
+    return {
+      ok: true,
+      targetId: updated.id,
+      course: {
+        slug: updated.slug,
+        title: updated.title,
+        priceEgp: updated.price,
+        grade: updated.grade,
+        category: updated.category,
+      },
+      changedFields: Object.keys(data),
+      before: { title: course.title, priceEgp: course.price },
     };
   },
 });
@@ -701,4 +986,8 @@ module.exports = [
   markVideoFailed,
   reorderCourseVideos,
   updateCoursePrice,
+  createStudent,
+  updateStudent,
+  createCourse,
+  updateCourse,
 ];

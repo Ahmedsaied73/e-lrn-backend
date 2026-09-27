@@ -96,12 +96,20 @@ function prismaStub() {
 describe('agent tools — registry contract', () => {
   it('exposes the full read catalogue and (loaded but unexposed) actions', () => {
     assert.ok(readDefinitions.length >= 25, `expected >= 25 read tools, got ${readDefinitions.length}`);
-    assert.equal(actionDefinitions.length, 12, 'the approved mutation catalogue is 12 tools');
+    assert.equal(actionDefinitions.length, 16, 'the approved mutation catalogue is 16 tools');
     // Default posture: read-only. A mutation switch that is off must not leak
     // mutating tools into the model's tool list.
     assert.equal(listDefinitions().length, readDefinitions.length, 'actions hidden by default');
     assert.equal(listDefinitions().some((d) => d.kind === 'action'), false, 'no action in the default list');
-    assert.equal(listDefinitions({ includeActions: true }).length, readDefinitions.length + 12, 'all when armed');
+    // Derived from the catalogue rather than hardcoded: the exact membership is
+    // pinned by the allowlist test above, so a second literal count here only
+    // produced churn (it was missed when the CRUD tools landed and turned this
+    // suite red for a reason that had nothing to do with the contract).
+    assert.equal(
+      listDefinitions({ includeActions: true }).length,
+      readDefinitions.length + actionDefinitions.length,
+      'all when armed'
+    );
   });
 
   it('names are unique snake_case and every description is Arabic', () => {
@@ -129,6 +137,8 @@ describe('agent tools — registry contract', () => {
     const names = actionDefinitions.map((d) => d.name).sort();
     assert.deepEqual(names, [
       'broadcast_notification',
+      'create_course',
+      'create_student',
       'enroll_student',
       'grade_essay',
       'grant_gate_exemption',
@@ -139,7 +149,9 @@ describe('agent tools — registry contract', () => {
       'retry_ai_grading',
       'revoke_gate_exemption',
       'unenroll_student',
+      'update_course',
       'update_course_price',
+      'update_student',
     ]);
   });
 });
@@ -375,8 +387,8 @@ describe('agent tools — per-question selection (Phase 4.5)', () => {
     assert.equal(actions.length, 0, 'read-only by default');
 
     const armed = selectToolSet({ question: 'اشتراكات الدورات', includeActions: true });
-    assert.equal(armed.actions.length, 12, 'arming mutations must expose the whole action catalogue');
-    assert.equal(armed.defs.length, armed.reads.length + 12);
+    assert.equal(armed.actions.length, 16, 'arming mutations must expose the whole action catalogue');
+    assert.equal(armed.defs.length, armed.reads.length + 16);
   });
 
   /* REGRESSION (P0): the reported bug was the agent answering «لا تتوفر لدي أداة مناسبة…
