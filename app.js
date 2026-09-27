@@ -337,6 +337,12 @@ if (config.aiAgent && config.aiAgent.enabled) {
   } catch (err) {
     console.warn('[WARN] Agent router failed to mount:', err.message);
   }
+} else {
+  // WHY: with the flag off the admin console's agent panel gets a bare 404 and
+  // nothing on the server says why — which is indistinguishable from "the feature
+  // broke". One boot line names the cause instead of leaving it to a client error.
+  // The no-stub doctrine is unchanged: nothing is mounted in this branch.
+  console.log('[INFO] AI admin agent disabled (AI_AGENT_ENABLED=false) — /admin/agent and /agent-ws are not mounted.');
 }
 
 // ── Bunny Stream routes ────────────────────────────────────────────────────────
@@ -432,6 +438,10 @@ const server = app.listen(port, () => {
       } catch (err) {
         console.warn('[WARN] Agent WebSocket failed to mount:', err.message);
       }
+    } else {
+      // Same reason as the REST mount above: a silently absent /agent-ws looks like
+      // a broken client, so the boot log states it was configuration, not failure.
+      console.log('[INFO] AI admin agent disabled (AI_AGENT_ENABLED=false) — /agent-ws is not mounted.');
     }
 
     // Start Bunny video reconciliation job (every 10 minutes). Keep the task

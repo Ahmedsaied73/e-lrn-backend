@@ -379,6 +379,59 @@ describe('agent tools — per-question selection (Phase 4.5)', () => {
     assert.equal(armed.defs.length, armed.reads.length + 12);
   });
 
+  /* REGRESSION (P0): the reported bug was the agent answering «لا تتوفر لدي أداة مناسبة…
+   * يمكنك تنفيذ هذا الإجراء من خلال لوحة التحكم الإدارية» to «سجّل الطالب … في دورة …».
+   * The cause was NOT the model: actions are opt-in in selectToolSet, and with the
+   * switch off the surface handed to the model contained zero action tools, so it
+   * answered honestly and pointed at the admin console instead.
+   *
+   * The assertion is deliberately generic (at least ONE action tool) rather than a
+   * named one: what must never regress is that arming mutations produces a bound
+   * action tool for a write question. The LangChain half matters because the graph
+   * binds the selected surface — action DEFINITIONS that never become bound tools
+   * are the failure mode being pinned here.
+   */
+  it('binds an action tool for a write question when mutations are armed', () => {
+    const restore = pinMutations(true);
+    try {
+      const { defs } = selectToolSet({
+        question: 'سجّل الطالب في دورة الفيزياء',
+        includeActions: true,
+      });
+      const actionNames = new Set(actionDefinitions.map((d) => d.name));
+      assert.ok(
+        defs.some((d) => actionNames.has(d.name)),
+        `a write question with mutations armed got no action tool: ${defs.map((d) => d.name).join(', ')}`
+      );
+
+      const bound = toLangChainTools(defs);
+      assert.ok(
+        bound.some((t) => actionNames.has(t.name)),
+        'the action definitions never reached the bound tool surface'
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it('keeps the write question action-free under the read-only default', () => {
+    // The inverse guard. Always binding the action catalogue would also make the
+    // test above pass, while destroying the property the rest of this file — and
+    // the tool layer's whole safety argument — rests on: read-only is the default.
+    const restore = pinMutations(false);
+    try {
+      const { defs } = selectToolSet({ question: 'سجّل الطالب في دورة الفيزياء' });
+      const actionNames = new Set(actionDefinitions.map((d) => d.name));
+      assert.equal(
+        defs.some((d) => actionNames.has(d.name)),
+        false,
+        'the read-only default must never carry an action tool'
+      );
+    } finally {
+      restore();
+    }
+  });
+
   it('picks the tool the question is actually about', () => {
     const cases = [
       ['مشاكل الدفع', 'payment_issues'],
