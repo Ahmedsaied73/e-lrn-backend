@@ -22,7 +22,7 @@ const { KIND_READ, KIND_ACTION, execute } = require('./_kit');
 // already owns Arabic normalization + clitic tolerance ("ÙˆØ§Ù„Ø·Ù„Ø§Ø¨" â†’ "Ø§Ù„Ø·Ù„Ø§Ø¨"). Reusing
 // it means the tool surface can never drift from the fast path, and adding a tool means
 // adding an intent, not editing a second list that nobody remembers to update.
-const { INTENTS, normalize, tokenize, containsSequence, phraseTokens, route } = require('../router');
+const { INTENTS, normalize, tokenize, containsSequence, tokenMatches, phraseTokens, route } = require('../router');
 const { wrapReadDefinition } = require('../toolCache');
 
 // z is needed for toJSONSchema in stripUnsupportedSchemaKeys(). The tool files
@@ -294,6 +294,110 @@ function approximateSchemaTokens(defs) {
   return { chars, tokens: Math.round(chars / 4) };
 }
 
+// ─── P3: the intent gate for the mutating surface ─────────────────────────────
+//
+// WHY THIS EXISTS, with the measured cost (approximateSchemaTokens below, chars/4):
+// a read-only turn binds 7-8 tools ≈ 508-636 tokens, while the SAME turn with the 12
+// actions bound rises to 19-20 tools ≈ 1,333-1,461 tokens. That ~2.5-3x is paid on
+// EVERY model call of EVERY turn — including "كم عدد الطلاب؟", which the read surface
+// answers on its own. It is also attention dilution: 12 mutating schemas sit between
+// the question and the tool that answers it, and this deployment's providers already
+// answer a turn without emitting a tool call intermittently.
+//
+// WHY A LEXICON AND NOT A MODEL CALL: this runs BEFORE the first model call, so it has
+// to be free, synchronous and deterministic. A classifier would pay the very latency
+// and token cost this gate exists to save.
+//
+// THE BIAS IS DELIBERATE: a false positive costs schema tokens for one turn, whereas a
+// false negative makes a write request unanswerable — «لا تتوفر لدي أداة مناسبة», the
+// exact bug this work is fixing. Every close call below resolves to "expose the actions".
+//
+// Matching goes through the router's own normalize()/tokenize()/tokenMatches() (imported
+// above) rather than a second Arabic matcher: a gate that disagreed with the fast path
+// about what a word means would disagree silently.
+
+/** Action tool names: a conversation that already used one keeps the action surface. */
+const ACTION_NAMES = new Set(actionDefinitions.map((d) => d.name));
+
+/** Imperatives that ask for a change and nothing else ("سجّل", "ألغِ", "رتّب"). */
+const WRITE_VERBS = [
+  'سجل', 'الغ', 'الغي', 'اعتمد', 'صحح', 'ارسل', 'اعط', 'انشئ', 'اضف', 'حدث',
+  'احذف', 'ازل', 'فعل', 'عطل', 'علم', 'ارفع', 'استثن', 'رتب', 'اجعل', 'امنح', 'اقبل', 'اعد',
+];
+
+/**
+ * Verbal nouns: admins write "إلغاء تسجيل" as often as "ألغِ التسجيل". "تصحيح" is
+ * deliberately absent — it is the analytics collocation in "طابور التصحيح" (one of the
+ * router's own questions), while the imperative "صحح" already covers a real request.
+ */
+const WRITE_NOUNS = [
+  'تسجيل', 'الغاء', 'اعتماد', 'ارسال', 'اعطاء', 'انشاء', 'اضافه', 'تحديث', 'تعديل',
+  'حذف', 'ازاله', 'تفعيل', 'تعطيل', 'رفع', 'استثناء', 'ترتيب', 'اعاده', 'منح', 'قبول',
+];
+
+/**
+ * Affixes Arabic glues onto a verb: one trailing object pronoun. CLOSED list on
+ * purpose — an open prefix match would read the analytics word "فعالية" as the
+ * imperative "فعّل" and arm the mutation surface for a question that only counts things.
+ */
+const WRITE_SUFFIXES = ['', 'ه', 'ها', 'هم', 'هن', 'ك', 'كم', 'نا', 'ني', 'ت', 'وا'];
+
+/**
+ * Enabling phrases. They are a request for PERMISSION, so on their own they decide
+ * nothing: "هل يمكن تسجيل الطالب أحمد؟" is a write, "هل يمكن معرفة عدد الطلاب؟" is a read.
+ */
+const WRITE_ENABLERS = [
+  'هل يمكن', 'هل يمكنك', 'هل تستطيع', 'ممكن', 'اريد', 'ارجو', 'من فضلك', 'لو سمحت',
+  'عايز', 'ياريت', 'برجاء',
+];
+
+/**
+ * The one entry Arabic spelling makes undecidable: "غيّر" (change it) and "غير"
+ * (not / other) normalize to the SAME token, and "غير" is also the analytics word in
+ * "الطلاب غير النشطين". It is therefore position-sensitive; see hasWriteIntent.
+ */
+const AMBIGUOUS_WRITE_TOKEN = 'غير';
+
+/** One lexicon entry against one token, tolerating a clitic and one pronoun suffix. */
+function isWriteToken(token, entry) {
+  return WRITE_SUFFIXES.some((suffix) => {
+    if (suffix && !token.endsWith(suffix)) return false;
+    const stem = suffix ? token.slice(0, -suffix.length) : token;
+    // tokenMatches (not ===) so "والغ" and "الغ" are the same word to this gate too.
+    return Boolean(stem) && tokenMatches(stem, entry);
+  });
+}
+
+/**
+ * Does this turn LOOK like a write request? Pure: no config, no I/O, no clock — the
+ * caller owns the mutation switch, because this helper only answers "is the admin
+ * asking for a change?".
+ *
+ * `historyTools` is the tool names this conversation already used. An ACTION name in it
+ * forces true, for the same reason selectToolSet keeps history tools: a follow-up
+ * ("وما حالة الطلب؟") carries no imperative, and dropping the action surface mid-thread
+ * would strand the admin exactly where the previous turn left off.
+ */
+function hasWriteIntent(question, historyTools = []) {
+  if (Array.isArray(historyTools) && historyTools.some((name) => ACTION_NAMES.has(name))) return true;
+
+  const tokens = tokenize(normalize(question || ''));
+  if (!tokens.length) return false;
+
+  const verbHit = tokens.some((token) => WRITE_VERBS.some((entry) => isWriteToken(token, entry)));
+  const nounHit = tokens.some((token) => WRITE_NOUNS.some((entry) => isWriteToken(token, entry)));
+  const enabled = WRITE_ENABLERS.some((phrase) => containsSequence(tokens, phraseTokens(phrase)));
+
+  // The ambiguous form only counts where an imperative can grammatically sit: as the
+  // FIRST token of the request ("غيّر سعر الدورة"), or anywhere once an enabling phrase
+  // is present ("هل يمكن تغيير..."). Mid-sentence it is the negation in "غير النشطين".
+  const changeHit = tokens.some((token) => isWriteToken(token, AMBIGUOUS_WRITE_TOKEN));
+  const leadingChange = changeHit && isWriteToken(tokens[0], AMBIGUOUS_WRITE_TOKEN);
+
+  if (enabled) return verbHit || nounHit || changeHit;
+  return verbHit || nounHit || leadingChange;
+}
+
 /**
  * Strip JSON-Schema keywords Gemini rejects, without touching the Zod schema the
  * tool actually validates with.
@@ -463,6 +567,8 @@ module.exports = {
   selectToolSet,
   selectDefinitions,
   approximateSchemaTokens,
+  // P3 — the write-intent gate the graph consults before it binds the action tools.
+  hasWriteIntent,
   TOOL_LEXICON,
   TOOL_DESCRIPTION_TOKENS,
   CORE_TOOL_NAMES,
