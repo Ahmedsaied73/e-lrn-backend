@@ -11,10 +11,11 @@
  *
  * Run: npm test
  */
-const { describe, it, after } = require('node:test');
+const { describe, it, after, before } = require('node:test');
 const assert = require('node:assert/strict');
 const { actionDefinitions, getDefinition } = require('../src/services/agent/tools');
 const { execute, AgentToolError } = require('../src/services/agent/tools/_kit');
+const auditLog = require('../src/services/auditLog');
 const { disconnectRedis } = require('../src/integrations/redis/redisClient');
 
 const ARABIC_RE = /[\u0600-\u06FF]/;
@@ -24,11 +25,23 @@ const ADMIN_ID = 42;
 const STUDENT_SLUG = 'stu123abc456';
 const COURSE_SLUG = 'crs123abc456';
 
+/**
+ * Every mutating tool this phase added, with the audit action it must declare. The
+ * deletes are listed LAST and kept in one block on purpose: they are the only
+ * irreversible tools in the catalogue, and a reviewer scanning this file should see
+ * immediately which ones they are.
+ */
 const CRUD_TOOLS = [
   { name: 'create_student', audit: 'USER_CREATE', target: 'user' },
   { name: 'update_student', audit: 'USER_UPDATE', target: 'user' },
   { name: 'create_course', audit: 'COURSE_CREATE', target: 'course' },
   { name: 'update_course', audit: 'COURSE_UPDATE', target: 'course' },
+  { name: 'create_video', audit: 'VIDEO_CREATE', target: 'video' },
+  { name: 'upsert_quiz', audit: 'QUIZ_UPSERT', target: 'quiz' },
+  { name: 'delete_video', audit: 'VIDEO_DELETE', target: 'video', irreversible: true },
+  { name: 'delete_quiz', audit: 'QUIZ_DELETE', target: 'quiz', irreversible: true },
+  { name: 'delete_course', audit: 'COURSE_DELETE', target: 'course', irreversible: true },
+  { name: 'delete_user', audit: 'USER_DELETE', target: 'user', irreversible: true },
 ];
 
 const NEW_STUDENT_ARGS = {
@@ -145,20 +158,25 @@ function prismaStub(overrides = {}) {
 
 const approved = (prisma) => ({ prisma, approved: true, adminId: ADMIN_ID });
 
-describe('agent CRUD tools (P2a) — catalogue contract', () => {
-  it('adds exactly the four approved students/courses tools', () => {
+describe('agent CRUD tools — catalogue contract', () => {
+  it('registers the whole CRUD surface, deletes included', () => {
     const names = actionDefinitions.map((d) => d.name);
     for (const { name } of CRUD_TOOLS) {
       assert.ok(names.includes(name), `${name} is missing from the action catalogue`);
     }
-    // The delete tools are a LATER phase by product decision — shipping one here
-    // would put an irreversible write in front of the model before that review.
+    // The deletes shipped last by product decision, so their presence is asserted
+    // explicitly rather than implied: this test failing means either a delete tool
+    // was removed (fine, but then this list must say so) or the catalogue collapsed.
     for (const forbidden of ['delete_user', 'delete_course', 'delete_video', 'delete_quiz']) {
-      assert.equal(names.includes(forbidden), false, `${forbidden} must not exist yet`);
+      const def = getDefinition(forbidden);
+      assert.ok(def, `${forbidden} should now be registered`);
+      // An irreversible tool the model cannot recognise as irreversible is the
+      // failure mode that matters: the description must SAY so in Arabic.
+      assert.match(def.description, /غير قابل للتراجع/, `${forbidden} must warn that it is irreversible`);
     }
   });
 
-  it('every new tool is an approval-gated, uncached, Arabic, audited action', () => {
+  it('every CRUD tool is an approval-gated, uncached, Arabic, audited action', () => {
     for (const { name, audit, target } of CRUD_TOOLS) {
       const def = getDefinition(name);
       assert.ok(def, `${name} not registered`);
@@ -181,6 +199,148 @@ describe('agent CRUD tools (P2a) — catalogue contract', () => {
     for (const { name } of CRUD_TOOLS) {
       assert.match(getDefinition(name).description, /موافقة المشرف/, `${name} must announce the gate`);
     }
+  });
+});
+
+/**
+ * P2b semantics — the deletes and the quiz upsert.
+ *
+ * These run with NO database on purpose. A refusal that happens only after a query
+ * is a different (and much weaker) guarantee than one that happens before it, so
+ * every stub below THROWS on any call: reaching the database at all is the failure.
+ */
+describe('agent CRUD tools — P2b semantics', () => {
+  /**
+   * auditLog.record writes through the GLOBAL prisma client, so a suite that runs an
+   * approved action would deposit real AuditLog rows in the shared database and turn
+   * a "pure" test file into a data-writing one. It is swapped for a spy for the
+   * duration of this block — which also makes the audit spec itself assertable.
+   */
+  const auditCalls = [];
+  const realRecord = auditLog.record;
+  before(() => {
+    auditLog.record = async (req, spec) => {
+      auditCalls.push(spec);
+      return true;
+    };
+  });
+  after(() => {
+    auditLog.record = realRecord;
+  });
+
+  /** Any property access returns a function that throws: the DB must not be reached. */
+  function forbiddenPrisma() {
+    return new Proxy(
+      {},
+      {
+        get: () => () => {
+          throw new Error('the database must not be reached in this test');
+        },
+      }
+    );
+  }
+
+  const DELETE_ARGS = {
+    delete_video: { videoSlug: 'vid123abc456' },
+    delete_quiz: { quizSlug: 'qiz123abc456' },
+    delete_course: { courseSlug: COURSE_SLUG },
+    delete_user: { userSlug: STUDENT_SLUG },
+  };
+
+  it('every delete refuses without approval BEFORE it resolves its target', async () => {
+    for (const [name, args] of Object.entries(DELETE_ARGS)) {
+      await assert.rejects(
+        () => execute(getDefinition(name), args, { prisma: forbiddenPrisma() }),
+        (err) => err instanceof AgentToolError && err.code === 'APPROVAL_REQUIRED',
+        `${name} must refuse an unapproved call`
+      );
+    }
+  });
+
+  it('delete_video does not touch Bunny when the slug matches nothing', async () => {
+    const bunnyVideoService = require('../src/services/bunnyVideoService');
+    const original = bunnyVideoService.deleteVideo;
+    let destructiveCalls = 0;
+    bunnyVideoService.deleteVideo = async () => {
+      destructiveCalls += 1;
+      return { id: 1, bunnyVideoId: 'x' };
+    };
+    try {
+      const result = await execute(
+        getDefinition('delete_video'),
+        { videoSlug: 'missing123ab' },
+        approved({ bunnyVideo: { findUnique: async () => null } })
+      );
+      assert.equal(result.data.ok, false);
+      assert.equal(result.data.reason, 'VIDEO_NOT_FOUND');
+      assert.equal(destructiveCalls, 0, 'an unknown slug must never reach the destructive call');
+      // The refusal is still EVIDENCE: an attempt to delete a video is recorded
+      // against the tool's own audit action, so a failed or mistaken request is
+      // visible in the trail rather than silently disappearing.
+      assert.equal(auditCalls.at(-1).action, 'VIDEO_DELETE');
+      assert.equal(auditCalls.at(-1).targetType, 'video');
+      assert.equal(auditCalls.at(-1).metadata.via, 'agent');
+    } finally {
+      bunnyVideoService.deleteVideo = original;
+    }
+  });
+
+  it('delete_user refuses to delete the approving admin, and refuses a course owner', async () => {
+    const self = await execute(
+      getDefinition('delete_user'),
+      { userSlug: STUDENT_SLUG },
+      approved({
+        user: { findUnique: async () => ({ id: ADMIN_ID, slug: STUDENT_SLUG, name: 'المشرف', role: 'ADMIN' }) },
+      })
+    );
+    assert.equal(self.data.reason, 'CANNOT_DELETE_SELF');
+
+    let transactionCalls = 0;
+    const owner = await execute(
+      getDefinition('delete_user'),
+      { userSlug: STUDENT_SLUG },
+      approved({
+        user: { findUnique: async () => ({ id: 7, slug: STUDENT_SLUG, name: 'معلم', role: 'ADMIN' }) },
+        course: { count: async () => 2 },
+        $transaction: async () => {
+          transactionCalls += 1;
+          return [];
+        },
+      })
+    );
+    assert.equal(owner.data.reason, 'USER_OWNS_COURSES');
+    assert.equal(owner.data.ownedCourses, 2, 'the refusal tells the admin what is blocking it');
+    assert.equal(transactionCalls, 0, 'nothing may be deleted while a course still references the user');
+  });
+
+  it('upsert_quiz rejects an invalid SurveyJS document through the REAL validator', async () => {
+    let upserts = 0;
+    const result = await execute(
+      getDefinition('upsert_quiz'),
+      { videoSlug: 'vid123abc456', title: 'اختبار قصير', surveyJson: {}, answerKey: {} },
+      approved({
+        bunnyVideo: { findUnique: async () => ({ id: 5, title: 'فيديو' }) },
+        quiz: {
+          findUnique: async () => null,
+          upsert: async () => {
+            upserts += 1;
+            return { id: 1 };
+          },
+        },
+      })
+    );
+    assert.equal(result.data.ok, false);
+    assert.equal(result.data.reason, 'INVALID_SURVEY_JSON');
+    assert.ok(Array.isArray(result.data.details) && result.data.details.length > 0, 'the validator reason is surfaced');
+    assert.equal(upserts, 0, 'an invalid definition must not be persisted');
+  });
+
+  it('create_student never returns credential material', async () => {
+    const result = await execute(getDefinition('create_student'), NEW_STUDENT_ARGS, approved(prismaStub()));
+    const flat = JSON.stringify(result.data);
+    assert.equal(/password|hashed|\$2[aby]\$/.test(flat), false, `a credential leaked into a tool payload: ${flat}`);
+    assert.equal(result.data.ok, true);
+    assert.ok(result.data.student.slug, 'the created student is identified by slug');
   });
 });
 

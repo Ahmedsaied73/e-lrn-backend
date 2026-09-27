@@ -973,6 +973,443 @@ const updateCourse = actionTool({
   },
 });
 
+// ─── Videos (P2b) ─────────────────────────────────────────────────────────────
+//
+// create_video REUSES bunnyVideoService.createVideo instead of re-implementing it:
+// that function owns the ordering (the Bunny object is created first because its
+// GUID is needed for the local row), the compensating remote delete when the local
+// write fails, and the next `position` under the per-course unique constraint.
+// Restating that here would be a second, subtly different copy of a stateful
+// procedure — and the differences would only show up in production.
+const createVideo = actionTool({
+  name: 'create_video',
+  description:
+    'إنشاء فيديو جديد داخل دورة (يُنشأ على Bunny Stream ويُضاف في نهاية ترتيب فيديوهات الدورة بحالة PENDING). يُستخدم عند طلب «أضف فيديو للدورة». لا ينفّذ إلا بعد موافقة المشرف، ويعيد معرّف الفيديو (slug) وترتيبه وحالته.',
+  schema: z.object({
+    courseSlug: slugArg('الدورة'),
+    title: z.string().min(3).max(200).describe('عنوان الفيديو'),
+  }),
+  audit: { action: 'VIDEO_CREATE', targetType: 'video' },
+  run: async (args, ctx) => {
+    const bunnyVideoService = require('../../bunnyVideoService');
+    try {
+      const video = await bunnyVideoService.createVideo({
+        courseSlug: args.courseSlug,
+        title: args.title.trim(),
+        // Always the approving admin, exactly as the HTTP controller takes it from
+        // the JWT and never from the request body.
+        requestedByUserId: ctx.adminId,
+      });
+      return {
+        ok: true,
+        targetId: video.id,
+        video: {
+          slug: video.slug,
+          title: video.title,
+          position: video.position,
+          status: video.status,
+        },
+        note:
+          'الفيديو أُنشئ بحالة PENDING — يبقى رفع ملف الفيديو من لوحة التحكم لبدء المعالجة.',
+      };
+    } catch (err) {
+      // The service reports its expected outcomes as AppError with a code. Each is
+      // a fact the model can act on, so none of them may surface as a throw.
+      const code = err && err.code;
+      if (code === 'COURSE_NOT_FOUND') return { ok: false, reason: 'COURSE_NOT_FOUND' };
+      if (code === 'BUNNY_API_ERROR') return { ok: false, reason: 'BUNNY_UNAVAILABLE' };
+      throw err;
+    }
+  },
+});
+
+const deleteVideo = actionTool({
+  name: 'delete_video',
+  description:
+    'حذف فيديو نهائياً من Bunny Stream ومن قاعدة البيانات مع تقدّم الطلاب واختباره المرتبط به. إجراء غير قابل للتراجع ويتطلب معرّف الفيديو بدقة. لا ينفّذ إلا بعد موافقة المشرف.',
+  // No `confirm: true` argument on purpose: the approval IS the confirmation, and
+  // a model-supplied flag would be a second gate that means nothing.
+  schema: z.object({
+    videoSlug: slugArg('الفيديو'),
+  }),
+  audit: { action: 'VIDEO_DELETE', targetType: 'video' },
+  run: async (args, ctx) => {
+    const prisma = ctx.prisma;
+    const bunnyVideoService = require('../../bunnyVideoService');
+    const video = await prisma.bunnyVideo.findUnique({
+      where: { slug: args.videoSlug },
+      select: { id: true, slug: true, title: true, status: true },
+    });
+    if (!video) return { ok: false, reason: 'VIDEO_NOT_FOUND' };
+
+    try {
+      // One procedure, one copy: this removes the Bunny object, the local row
+      // (quizzes and progress cascade) and drops the course's video caches.
+      const result = await bunnyVideoService.deleteVideo(video.id);
+      return {
+        ok: true,
+        targetId: video.id,
+        video: { slug: video.slug, title: video.title, bunnyVideoId: result.bunnyVideoId },
+      };
+    } catch (err) {
+      if (err && err.code === 'VIDEO_NOT_FOUND') return { ok: false, reason: 'VIDEO_NOT_FOUND' };
+      if (err && err.code === 'BUNNY_API_ERROR') {
+        // Bunny refused and the service deletes the local row only AFTER Bunny
+        // succeeds, so the video still exists and the admin can retry.
+        return { ok: false, reason: 'BUNNY_UNAVAILABLE_RETRY_LATER' };
+      }
+      throw err;
+    }
+  },
+});
+
+// ─── Quizzes (P2b) ────────────────────────────────────────────────────────────
+//
+// Quiz authoring is the one write whose payload is a whole SurveyJS document, so
+// the tool delegates validation to the SAME two service functions the HTTP
+// controller uses (validateSurveyJson + buildAnswerKey). Nothing about the schema
+// is re-checked here: a second validator is a second source of truth, and the two
+// would drift the first time one of them learned a new question type.
+
+/** The cache drops both HTTP quiz paths perform, in one place, never fatal. */
+async function invalidateQuizCaches(bunnyVideoId) {
+  try {
+    const { invalidateVideoCaches } = require('../../bunnyVideoService');
+    const video = await require('../../../config/db').bunnyVideo.findUnique({
+      where: { id: bunnyVideoId },
+      select: { courseId: true },
+    });
+    if (video) await invalidateVideoCaches(video.courseId);
+  } catch {
+    // A stale videos-list cache self-heals on its TTL; never fail a save for it.
+  }
+  await cache.delPrefix(`v1:quiz:meta:${bunnyVideoId}:`);
+}
+
+const upsertQuiz = actionTool({
+  name: 'upsert_quiz',
+  description:
+    'إنشاء أو تحديث اختبار فيديو: العنوان وتعريف أسئلة SurveyJS ومفتاح الإجابات ودرجة النجاح وعدد المحاولات والحد الزمني. يُستخدم عند طلب «أضف اختباراً للفيديو» أو «عدّل اختبار الفيديو». يُرفض أي تعريف أسئلة أو مفتاح إجابات غير صالح. لا ينفّذ إلا بعد موافقة المشرف.',
+  schema: z.object({
+    videoSlug: slugArg('الفيديو'),
+    title: z.string().min(2).max(200).describe('عنوان الاختبار'),
+    surveyJson: z.record(z.string(), z.unknown()).describe('تعريف أسئلة SurveyJS ككائن JSON'),
+    answerKey: z
+      .record(z.string(), z.unknown())
+      .describe('مفتاح الإجابات: كائن JSON مفتاحه اسم السؤال وقيمته الإجابة الصحيحة'),
+    timeLimitSec: z.number().int().positive().optional().describe('الحد الزمني بالثواني (اختياري — بدونه لا حد زمني)'),
+    passingScore: z.number().int().min(0).max(100).optional().describe('درجة النجاح من ٠ إلى ١٠٠ (الافتراضي ٥٠)'),
+    maxAttempts: z.number().int().min(1).max(10).optional().describe('عدد المحاولات (١ إلى ١٠، الافتراضي ٣)'),
+  }),
+  // ONE literal, deliberately not the HTTP pair (QUIZ_CREATE / QUIZ_UPDATE): a
+  // single tool performs both, and a label that depends on whether a row happened
+  // to exist already is a label no report can group by.
+  audit: { action: 'QUIZ_UPSERT', targetType: 'quiz' },
+  run: async (args, ctx) => {
+    const prisma = ctx.prisma;
+    const quizService = require('../../quizService');
+
+    const video = await prisma.bunnyVideo.findUnique({
+      where: { slug: args.videoSlug },
+      select: { id: true, title: true },
+    });
+    if (!video) return { ok: false, reason: 'VIDEO_NOT_FOUND' };
+
+    const surveyValidation = quizService.validateSurveyJson(args.surveyJson);
+    if (!surveyValidation.ok) {
+      return { ok: false, reason: 'INVALID_SURVEY_JSON', details: surveyValidation.errors };
+    }
+    const keyValidation = quizService.buildAnswerKey(args.surveyJson, args.answerKey);
+    if (!keyValidation.ok) {
+      return { ok: false, reason: 'INVALID_ANSWER_KEY', details: keyValidation.errors };
+    }
+
+    const existing = await prisma.quiz.findUnique({
+      where: { bunnyVideoId: video.id },
+      select: { id: true, surveyJson: true },
+    });
+
+    const quiz = await prisma.quiz.upsert({
+      where: { bunnyVideoId: video.id },
+      create: {
+        bunnyVideoId: video.id,
+        title: args.title.trim(),
+        slug: randomBase36Slug(),
+        timeLimitSec: args.timeLimitSec ?? null,
+        passingScore: args.passingScore ?? 50,
+        maxAttempts: args.maxAttempts ?? 3,
+        surveyJson: args.surveyJson,
+        answerKey: keyValidation.answerKey,
+      },
+      update: {
+        title: args.title.trim(),
+        timeLimitSec: args.timeLimitSec ?? null,
+        passingScore: args.passingScore ?? 50,
+        maxAttempts: args.maxAttempts ?? 3,
+        surveyJson: args.surveyJson,
+        answerKey: keyValidation.answerKey,
+      },
+      select: { id: true, slug: true, title: true, passingScore: true, maxAttempts: true, timeLimitSec: true },
+    });
+
+    // Replaced question images orphan in the bucket — diff old vs new object lists
+    // and remove the drop-outs. Best-effort, exactly like the controller: a storage
+    // failure must never undo a saved quiz.
+    try {
+      const { extractBucketObjectNames, getSupabaseAdmin, getSupabaseBucket } =
+        require('../../../integrations/supabase/supabaseClient');
+      const oldNames = existing ? extractBucketObjectNames(existing.surveyJson) : [];
+      const newNames = new Set(extractBucketObjectNames(args.surveyJson));
+      const onlyOld = oldNames.filter((name) => !newNames.has(name));
+      if (onlyOld.length > 0) {
+        const { error } = await getSupabaseAdmin().storage.from(getSupabaseBucket()).remove(onlyOld);
+        if (error) console.error('[agent/upsert_quiz] image cleanup error:', error.message);
+      }
+    } catch (cleanupErr) {
+      console.error('[agent/upsert_quiz] image cleanup failed:', cleanupErr.message);
+    }
+
+    await invalidateQuizCaches(video.id);
+
+    return {
+      ok: true,
+      targetId: quiz.id,
+      created: !existing,
+      quiz: {
+        slug: quiz.slug,
+        videoSlug: args.videoSlug,
+        videoTitle: video.title,
+        title: quiz.title,
+        passingScore: quiz.passingScore,
+        maxAttempts: quiz.maxAttempts,
+        timeLimitSec: quiz.timeLimitSec,
+      },
+      note: existing
+        ? 'تعديل الاختبار لا يمسّ محاولات الطلاب السابقة — المحاولات القائمة تبقى بدرجاتها.'
+        : 'الاختبار أُنشئ — الطلاب يرونه في شاشة الفيديو بعد إكمال الفيديو السابق.',
+    };
+  },
+});
+
+const deleteQuiz = actionTool({
+  name: 'delete_quiz',
+  description:
+    'حذف اختبار نهائياً مع كل محاولات الطلاب المسجّلة عليه. إجراء غير قابل للتراجع ويتطلب معرّف الاختبار بدقة. لا ينفّذ إلا بعد موافقة المشرف.',
+  schema: z.object({
+    quizSlug: slugArg('الاختبار'),
+  }),
+  audit: { action: 'QUIZ_DELETE', targetType: 'quiz' },
+  run: async (args, ctx) => {
+    const prisma = ctx.prisma;
+    const quiz = await prisma.quiz.findUnique({
+      where: { slug: args.quizSlug },
+      select: {
+        id: true,
+        title: true,
+        bunnyVideoId: true,
+        surveyJson: true,
+        _count: { select: { attempts: true } },
+      },
+    });
+    if (!quiz) return { ok: false, reason: 'QUIZ_NOT_FOUND' };
+
+    await prisma.quiz.delete({ where: { id: quiz.id } });
+
+    // Storage cleanup AFTER the DB delete succeeded — a bucket failure must never
+    // report a completed delete as failed.
+    try {
+      const { removeQuizImagesBestEffort } = require('../../../integrations/supabase/supabaseClient');
+      await removeQuizImagesBestEffort(quiz.surveyJson);
+    } catch (cleanupErr) {
+      console.error('[agent/delete_quiz] storage cleanup error:', cleanupErr.message);
+    }
+
+    await invalidateQuizCaches(quiz.bunnyVideoId);
+
+    // The attempt count is REPORTED, not used as a veto: an admin asking to delete
+    // a quiz that has attempts is making an explicit, approved decision, and burying
+    // it behind a second confirmation would be a gate the model has to satisfy.
+    return {
+      ok: true,
+      targetId: quiz.id,
+      quiz: { slug: args.quizSlug, title: quiz.title, deletedAttempts: quiz._count.attempts },
+    };
+  },
+});
+
+// ─── Deletes (P2b, shipped last by product decision) ──────────────────────────
+//
+// These four are the only irreversible tools in the catalogue. They mirror their
+// HTTP controllers statement for statement, including the ORDER the controller
+// uses, because that order is what makes the operation survivable: the database
+// work happens first and the remote/storage cleanup after it, best-effort, so a
+// Bunny or Supabase outage can never leave a half-deleted course behind.
+const deleteCourse = actionTool({
+  name: 'delete_course',
+  description:
+    'حذف دورة نهائياً: الفيديوهات وتسجيلات الطلاب والشهادات والاختبارات المرتبطة بها، مع حذف فيديوهاتها من Bunny Stream وصور اختباراتها من التخزين. إجراء غير قابل للتراجع ويتطلب معرّف الدورة بدقة. لا ينفّذ إلا بعد موافقة المشرف.',
+  schema: z.object({
+    courseSlug: slugArg('الدورة'),
+  }),
+  audit: { action: 'COURSE_DELETE', targetType: 'course' },
+  run: async (args, ctx) => {
+    const prisma = ctx.prisma;
+    const bunnyClient = require('../../../integrations/bunny/bunnyStreamClient');
+
+    const course = await prisma.course.findUnique({
+      where: { slug: args.courseSlug },
+      select: {
+        id: true,
+        title: true,
+        _count: { select: { videos: true, enrollments: true, certificates: true } },
+      },
+    });
+    if (!course) return { ok: false, reason: 'COURSE_NOT_FOUND' };
+    const courseId = course.id;
+
+    // Snapshots taken BEFORE the transaction, because the rows they describe are
+    // exactly what it deletes (and the quiz rows cascade with the BunnyVideos).
+    const [bunnyVideos, quizRows, enrollmentRows] = await Promise.all([
+      prisma.bunnyVideo.findMany({ where: { courseId }, select: { bunnyVideoId: true } }),
+      prisma.quiz.findMany({ where: { bunnyVideo: { courseId } }, select: { surveyJson: true } }),
+      prisma.enrollment.findMany({ where: { courseId }, select: { userId: true } }),
+    ]);
+    const enrolledUserIds = enrollmentRows.map((row) => row.userId);
+
+    await prisma.$transaction(async (tx) => {
+      // Children whose FK is Restrict are removed explicitly — a bare
+      // course.delete would throw P2003 for any course with rows.
+      if (course._count.videos > 0) await tx.video.deleteMany({ where: { courseId } });
+      if (course._count.enrollments > 0) await tx.enrollment.deleteMany({ where: { courseId } });
+      if (course._count.certificates > 0) await tx.certificate.deleteMany({ where: { courseId } });
+
+      // A course inside a learning path must be DISCONNECTED, not delete-cascaded
+      // (the path itself is a separate product object).
+      const paths = await tx.learningPath.findMany({
+        where: { courses: { some: { id: courseId } } },
+        select: { id: true },
+      });
+      for (const path of paths) {
+        await tx.learningPath.update({
+          where: { id: path.id },
+          data: { courses: { disconnect: { id: courseId } } },
+        });
+      }
+
+      await tx.course.delete({ where: { id: courseId } });
+    });
+
+    // Remote cleanup after the DB commit — per-video errors are logged, never fatal:
+    // the delete has already happened and failing here would only lie to the admin.
+    let remoteCleanupFailures = 0;
+    for (const video of bunnyVideos) {
+      try {
+        await bunnyClient.deleteVideo(video.bunnyVideoId);
+      } catch (cleanupErr) {
+        remoteCleanupFailures += 1;
+        console.error(`[agent/delete_course] Failed to delete Bunny video ${video.bunnyVideoId}:`, cleanupErr.message);
+      }
+    }
+
+    try {
+      const { removeQuizImagesBestEffort } = require('../../../integrations/supabase/supabaseClient');
+      for (const quiz of quizRows) {
+        await removeQuizImagesBestEffort(quiz.surveyJson);
+      }
+    } catch (cleanupErr) {
+      console.error('[agent/delete_course] Storage cleanup error:', cleanupErr.message);
+    }
+
+    await cache.delPrefix('v1:courses:');
+    await cache.delPrefix(`v1:videos:course:${courseId}:`);
+    await cache.del(cache.buildKey('search', 'cats'));
+
+    // Every enrolled student's cached gate verdict still says allowed:true for a
+    // course they are no longer in — drop the namespace so the next evaluation
+    // fails closed from the database.
+    try {
+      const quizService = require('../../quizService');
+      await Promise.all(enrolledUserIds.map((userId) => quizService.invalidateGateForUser(userId)));
+    } catch (err) {
+      console.error('[agent/delete_course] gate invalidation failed:', err.message);
+    }
+
+    return {
+      ok: true,
+      targetId: courseId,
+      course: {
+        slug: args.courseSlug,
+        title: course.title,
+        deletedEnrollments: course._count.enrollments,
+        deletedVideos: bunnyVideos.length,
+      },
+      remoteCleanupFailures,
+      note:
+        remoteCleanupFailures > 0
+          ? 'تم الحذف من قاعدة البيانات، لكن فشل حذف بعض الفيديوهات من Bunny Stream — راجع سجلات الخادم.'
+          : null,
+    };
+  },
+});
+
+const deleteUser = actionTool({
+  name: 'delete_user',
+  description:
+    'حذف حساب مستخدم نهائياً مع تسجيلاته في الدورات ومدفوعاته وشهاداته ومحاولاته. إجراء غير قابل للتراجع، ولا يمكن حذف حساب المشرف الذي وافق على الطلب نفسه، ولا حساب يملك دورات. لا ينفّذ إلا بعد موافقة المشرف.',
+  schema: z.object({
+    userSlug: slugArg('المستخدم'),
+  }),
+  audit: { action: 'USER_DELETE', targetType: 'user' },
+  run: async (args, ctx) => {
+    const prisma = ctx.prisma;
+
+    const user = await prisma.user.findUnique({
+      where: { slug: args.userSlug },
+      select: { id: true, slug: true, name: true, role: true },
+    });
+    if (!user) return { ok: false, reason: 'USER_NOT_FOUND' };
+
+    // The approving admin cannot delete themselves: the approval would be
+    // attributed to a row that no longer exists, and the audit trail would lose
+    // its actor.
+    if (user.id === ctx.adminId) return { ok: false, reason: 'CANNOT_DELETE_SELF' };
+
+    // Course owners must release their courses first — a bulk delete would bypass
+    // the Bunny remote cleanup, leaving orphans on Bunny's servers.
+    const ownedCourses = await prisma.course.count({ where: { teacherId: user.id } });
+    if (ownedCourses > 0) {
+      return { ok: false, reason: 'USER_OWNS_COURSES', ownedCourses };
+    }
+
+    // Several child relations default to Restrict, so a bare user.delete throws
+    // P2003 for any user with rows. Explicit cascade, in one transaction.
+    await prisma.$transaction([
+      prisma.quizAttempt.deleteMany({ where: { userId: user.id } }),
+      prisma.gateExemption.deleteMany({ where: { userId: user.id } }),
+      prisma.assignmentAnswer.deleteMany({ where: { userId: user.id } }),
+      prisma.submission.deleteMany({ where: { userId: user.id } }),
+      prisma.bunnyVideoProgress.deleteMany({ where: { userId: user.id } }),
+      prisma.enrollment.deleteMany({ where: { userId: user.id } }),
+      prisma.payment.deleteMany({ where: { userId: user.id } }),
+      prisma.certificate.deleteMany({ where: { userId: user.id } }),
+      prisma.user.delete({ where: { id: user.id } }),
+    ]);
+
+    // Their access token stays valid until it expires, but the enrollment rows are
+    // gone — a cached gate verdict would answer allowed:true in the meantime.
+    const quizService = require('../../quizService');
+    await quizService.invalidateGateForUser(user.id);
+    await invalidateMeCache(user.id);
+
+    return {
+      ok: true,
+      targetId: user.id,
+      user: { slug: user.slug, name: user.name, role: user.role },
+      note: 'الحساب حُذف. رمز الدخول الحالي يبقى صالحاً حتى انتهاء صلاحيته القصيرة (١٥ دقيقة)، ولا يستطيع الوصول لأي دورة.',
+    };
+  },
+});
+
 module.exports = [
   enrollStudent,
   unenrollStudent,
@@ -990,4 +1427,10 @@ module.exports = [
   updateStudent,
   createCourse,
   updateCourse,
+  createVideo,
+  deleteVideo,
+  upsertQuiz,
+  deleteQuiz,
+  deleteCourse,
+  deleteUser,
 ];

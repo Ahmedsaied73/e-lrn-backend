@@ -96,7 +96,11 @@ function prismaStub() {
 describe('agent tools — registry contract', () => {
   it('exposes the full read catalogue and (loaded but unexposed) actions', () => {
     assert.ok(readDefinitions.length >= 25, `expected >= 25 read tools, got ${readDefinitions.length}`);
-    assert.equal(actionDefinitions.length, 16, 'the approved mutation catalogue is 16 tools');
+    // No literal action COUNT here on purpose: the exact membership is pinned by
+    // "the approved mutation catalogue is exactly the approved list" below, and a
+    // second copy of the number only ever produced churn (it went stale twice —
+    // when the CRUD tools landed and again when the deletes did — and turned this
+    // suite red for reasons that had nothing to do with the contract).
     // Default posture: read-only. A mutation switch that is off must not leak
     // mutating tools into the model's tool list.
     assert.equal(listDefinitions().length, readDefinitions.length, 'actions hidden by default');
@@ -139,6 +143,11 @@ describe('agent tools — registry contract', () => {
       'broadcast_notification',
       'create_course',
       'create_student',
+      'create_video',
+      'delete_course',
+      'delete_quiz',
+      'delete_user',
+      'delete_video',
       'enroll_student',
       'grade_essay',
       'grant_gate_exemption',
@@ -152,6 +161,7 @@ describe('agent tools — registry contract', () => {
       'update_course',
       'update_course_price',
       'update_student',
+      'upsert_quiz',
     ]);
   });
 });
@@ -387,8 +397,8 @@ describe('agent tools — per-question selection (Phase 4.5)', () => {
     assert.equal(actions.length, 0, 'read-only by default');
 
     const armed = selectToolSet({ question: 'اشتراكات الدورات', includeActions: true });
-    assert.equal(armed.actions.length, 16, 'arming mutations must expose the whole action catalogue');
-    assert.equal(armed.defs.length, armed.reads.length + 16);
+    assert.equal(armed.actions.length, actionDefinitions.length, 'arming mutations must expose the whole action catalogue');
+    assert.equal(armed.defs.length, armed.reads.length + actionDefinitions.length);
   });
 
   /* REGRESSION (P0): the reported bug was the agent answering «لا تتوفر لدي أداة مناسبة…
