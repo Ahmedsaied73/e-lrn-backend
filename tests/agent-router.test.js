@@ -49,13 +49,35 @@ test('every catalogued sample routes to the intent that owns it, with schema-val
   assert.deepEqual(failures, [], `routing failures:\n${failures.join('\n')}`);
 });
 
-test('the catalogue covers every read tool except the free-text search tool', () => {
+test('the catalogue covers every read tool except the ones that need a model on purpose', () => {
   const covered = new Set(INTENTS.map((i) => i.tool));
   const { readDefinitions } = require('../src/services/agent/tools');
   const uncovered = readDefinitions.map((d) => d.name).filter((name) => !covered.has(name));
-  // student_search needs a free-text term (a person's name), which cannot be
-  // parsed reliably without a model — it belongs to the agentic tier on purpose.
-  assert.deepEqual(uncovered, ['student_search']);
+
+  // Each exemption is a DELIBERATE decision, so each carries its reason. Anything
+  // added to the catalogue without an intent and without a reason here fails this
+  // test, which is the point: the fast path is the cheap tier, and a tool belongs
+  // there only if a question about it can be phrased without a model.
+  const AGENTIC_ONLY = {
+    // A free-text term (a person's name) cannot be parsed reliably without a model.
+    student_search: 'needs a free-text name',
+    // Schema introspection answers "what tables/columns/indexes exist", which is a
+    // lookup the admin phrases in their own words; there is no recurring phrasing
+    // to template, and the answer is a list no template renders.
+    db_schema_overview: 'free-form lookup, list-shaped answer',
+    db_schema_detail: 'free-form lookup, list-shaped answer',
+    db_table_stats: 'free-form lookup, list-shaped answer',
+  };
+
+  const unexpected = uncovered.filter((name) => !(name in AGENTIC_ONLY));
+  assert.deepEqual(unexpected, [], `tools with no fast-path intent and no documented reason: ${unexpected.join(', ')}`);
+  // And the exemption list is not allowed to rot: every name in it must still exist.
+  const stillThere = Object.keys(AGENTIC_ONLY).filter((name) => uncovered.includes(name));
+  assert.deepEqual(
+    stillThere.sort(),
+    uncovered.slice().sort(),
+    'an exemption that is no longer needed must be removed from the list'
+  );
 });
 
 test('slots are extracted from real phrasings', () => {
