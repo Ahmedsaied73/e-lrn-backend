@@ -36,6 +36,11 @@ const readDefinitions = [
   ...require('./quizzes'),
   ...require('./enrollments'),
   ...require('./operations'),
+  // Schema/metadata reads. Last in the list on purpose: they answer a question no
+  // other tool can ("which TABLES does this platform have?"), so nothing that
+  // already worked depends on them, and their 3 schemas are only bound when the
+  // question is about the database.
+  ...require('./schema'),
 ];
 
 // Action definitions are LOADED but only exposed when the mutation switch is on
