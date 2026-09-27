@@ -402,7 +402,9 @@ async function answerQuestion({
   await persistTurn(answer, {
     llm: true,
     provider: run.provider,
-    model: run.provider === 'gemini' ? config.aiAgent.fallbackModel : config.aiAgent.primaryModel,
+    // The model that actually answered, resolved through the provider ORDER so it
+    // cannot be wrong when the primary/fallback pairing changes.
+    model: require('./llmProvider').modelIdFor(run.provider),
     toolCalls: detail.toolCalls,
     latencyMs: detail.latencyMs,
   });

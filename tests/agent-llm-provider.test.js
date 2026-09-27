@@ -29,6 +29,7 @@ const {
   statusOf,
   safeMessage,
   providerOrder,
+  modelIdFor,
   healthState,
   resetFailoverState,
 } = require('../src/services/agent/llmProvider');
@@ -42,12 +43,18 @@ async function withBothProviders(fn) {
   const agent = config.aiAgent;
   const snapshot = {
     primary: agent.primary,
+    // providerOrder drives providerOrder() in llmProvider, and it is what actually
+    // decides which vendor is asked first. Pinning only `primary` left the array
+    // on its real (gemini-first) value, so these tests exercised the wrong vendor
+    // order and every failover assertion below failed.
+    providerOrder: Array.isArray(agent.providerOrder) ? [...agent.providerOrder] : null,
     groq: { ...agent.providers.groq },
     gemini: { ...agent.providers.gemini },
     groqApiKey: agent.groqApiKey,
     geminiApiKey: agent.geminiApiKey,
   };
   agent.primary = 'groq';
+  agent.providerOrder = ['groq', 'gemini'];
   agent.providers.groq = { configured: true };
   agent.providers.gemini = { configured: true };
   agent.groqApiKey = 'gsk_unitTestOnly000000000000000000000000000000000000';
@@ -57,6 +64,9 @@ async function withBothProviders(fn) {
     return await fn();
   } finally {
     agent.primary = snapshot.primary;
+    // Restore the order too, or a later test inherits the pinned ['groq','gemini']
+    // and silently exercises the wrong vendor first.
+    if (snapshot.providerOrder) agent.providerOrder = snapshot.providerOrder;
     agent.providers.groq = snapshot.groq;
     agent.providers.gemini = snapshot.gemini;
     agent.groqApiKey = snapshot.groqApiKey;
@@ -165,10 +175,80 @@ test('after a transient primary failure the primary is skipped during the cooldo
   });
 });
 
+/**
+ * modelIdFor() must resolve the primary/fallback split by POSITION in the order,
+ * never by vendor name.
+ *
+ * This is the regression the whole order refactor exists for. Keying the choice off
+ * the name (the old `name === 'groq' ? primary : fallback`) meant that flipping the
+ * provider order in env.js — legitimately, and without touching llmProvider.js —
+ * made the Gemini primary ask Groq's model id, and every turn 404'd. Nothing in
+ * llmProvider.js would have failed a test; only the ORDER changed.
+ */
+test('modelIdFor follows the provider ORDER, not the vendor name', () => {
+  const agent = config.aiAgent;
+  const snapshot = {
+    providerOrder: Array.isArray(agent.providerOrder) ? [...agent.providerOrder] : null,
+    primaryModel: agent.primaryModel,
+    fallbackModel: agent.fallbackModel,
+  };
+  // Distinct, obviously-fake ids: the assertion is about WHICH slot is returned,
+  // and shared ids would make a swap invisible.
+  agent.primaryModel = 'MODEL-FOR-POSITION-ZERO';
+  agent.fallbackModel = 'MODEL-FOR-POSITION-ONE';
+  try {
+    agent.providerOrder = ['gemini', 'groq'];
+    assert.equal(modelIdFor('gemini'), 'MODEL-FOR-POSITION-ZERO', 'the FIRST name in the order gets primaryModel');
+    assert.equal(modelIdFor('groq'), 'MODEL-FOR-POSITION-ONE', 'the SECOND name in the order gets fallbackModel');
+
+    // Reversed: the SAME vendor now holds the OTHER id. Under the old name-keyed
+    // logic these four expectations above and below could not both hold.
+    agent.providerOrder = ['groq', 'gemini'];
+    assert.equal(modelIdFor('groq'), 'MODEL-FOR-POSITION-ZERO', 'after reversing, groq holds the primary id');
+    assert.equal(modelIdFor('gemini'), 'MODEL-FOR-POSITION-ONE', 'after reversing, gemini holds the fallback id');
+
+    // A provider the order never names (a later addition, or a test double) is
+    // treated as the tail and gets the NON-primary id: handing an unknown vendor the
+    // primary model id is the 404 this function used to cause.
+    assert.equal(modelIdFor('some_future_provider'), 'MODEL-FOR-POSITION-ONE', 'an unnamed provider is the tail');
+
+    // With no order at all there is no position to read, so the tail rule applies
+    // rather than throwing.
+    agent.providerOrder = [];
+    assert.equal(modelIdFor('gemini'), 'MODEL-FOR-POSITION-ONE', 'an empty order falls back to the tail id');
+  } finally {
+    if (snapshot.providerOrder) agent.providerOrder = snapshot.providerOrder;
+    agent.primaryModel = snapshot.primaryModel;
+    agent.fallbackModel = snapshot.fallbackModel;
+  }
+});
+
+test('providerOrder() walks the configured order, and only configured providers', async () => {
+  await withBothProviders(async () => {
+    // withBothProviders pins ['groq','gemini'], so Groq leads even though the
+    // shipped default is gemini-first: this is about the order being honoured, not
+    // about which order is the default.
+    assert.deepEqual(providerOrder(), ['groq', 'gemini'], 'the pinned order is walked verbatim');
+
+    // An unconfigured provider is dropped, wherever it sits in the order — the
+    // failover must never spend a call on a provider with no key.
+    const agent = config.aiAgent;
+    agent.providers.gemini = { configured: false };
+    assert.deepEqual(providerOrder(), ['groq'], 'an unconfigured provider is not contacted');
+    agent.providers.gemini = { configured: true };
+
+    // A configured provider the order forgot is still appended, so adding a vendor
+    // later can never leave it unreachable as a failover.
+    agent.providerOrder = ['gemini'];
+    assert.deepEqual(providerOrder(), ['gemini', 'groq'], 'the unlisted configured provider is appended');
+  });
+});
+
 test('when nothing is configured the failure is explicit, not a crash', async () => {
   const agent = config.aiAgent;
-  const snapshot = { primary: agent.primary, groq: { ...agent.providers.groq }, gemini: { ...agent.providers.gemini } };
+  const snapshot = { primary: agent.primary, providerOrder: Array.isArray(agent.providerOrder) ? [...agent.providerOrder] : null, groq: { ...agent.providers.groq }, gemini: { ...agent.providers.gemini } };
   agent.primary = null;
+  agent.providerOrder = ['gemini', 'groq'];
   agent.providers.groq = { configured: false };
   agent.providers.gemini = { configured: false };
   try {
@@ -183,6 +263,7 @@ test('when nothing is configured the failure is explicit, not a crash', async ()
     );
   } finally {
     agent.primary = snapshot.primary;
+    if (snapshot.providerOrder) agent.providerOrder = snapshot.providerOrder;
     agent.providers.groq = snapshot.groq;
     agent.providers.gemini = snapshot.gemini;
   }

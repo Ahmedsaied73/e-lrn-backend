@@ -25,6 +25,10 @@ const { KIND_READ, KIND_ACTION, execute } = require('./_kit');
 const { INTENTS, normalize, tokenize, containsSequence, phraseTokens, route } = require('../router');
 const { wrapReadDefinition } = require('../toolCache');
 
+// z is needed for toJSONSchema in stripUnsupportedSchemaKeys(). The tool files
+// own their own schemas; this is only the serialiser the provider is shown.
+const { z } = require('zod');
+
 const readDefinitions = [
   ...require('./platform'),
   ...require('./students'),
@@ -291,6 +295,132 @@ function approximateSchemaTokens(defs) {
 }
 
 /**
+ * Strip JSON-Schema keywords Gemini rejects, without touching the Zod schema the
+ * tool actually validates with.
+ *
+ * WHY THIS EXISTS: the generateContent API accepts only a small subset of JSON
+ * Schema and rejects the WHOLE request — 400, every tool, every turn — on the
+ * first keyword it does not know. Found live, one at a time:
+ *   exclusiveMinimum  ← z.number().int().positive()  (Zod 4 default target)
+ *   propertyNames     ← z.record() / z.object().catchall()
+ *   const / examples  ← z.literal(), z.enum()'s examples
+ * That last one matters most: a single tool in a 15-tool payload carrying one bad
+ * keyword made the agent answer "تعذّر الوصول إلى مزوّد الذكاء الاصطناعي" to
+ * EVERY question. Groq tolerates all of it, which is why this stayed invisible
+ * while Groq was primary — the two vendors disagree about the dialect, not about
+ * the tools.
+ *
+ * This is a WHITELIST for the same reason: enumerating the rejected keywords
+ * means the next Zod release that emits something new breaks the agent silently
+ * again, and the failure looks like a provider outage rather than a schema bug.
+ *
+ * `exclusiveMinimum: 0` becomes `minimum: 1`: every id here is a 1-based
+ * autoincrement key, so the stricter bound is the honest one. Anything dropped
+ * only narrows what the model is TOLD; execute() still validates with the tool's
+ * own Zod schema, so a bad argument is rejected exactly as before. This stops
+ * the provider refusing to look at the tools — it does not weaken the tools.
+ */
+const GEMINI_SCHEMA_KEYS = new Set([
+  'type', 'format', 'title', 'description', 'default',
+  'enum', 'items', 'properties', 'required', 'additionalProperties',
+  'minimum', 'maximum', 'minItems', 'maxItems', 'minLength', 'maxLength',
+  'pattern', 'nullable',
+]);
+
+function stripUnsupportedSchemaKeys(schema) {
+  const convert = (node) => {
+    if (Array.isArray(node)) return node.map(convert);
+    if (!node || typeof node !== 'object') return node;
+
+    const out = {};
+    for (const [key, value] of Object.entries(node)) {
+      if (key === 'exclusiveMinimum') {
+        if (typeof value === 'number') out.minimum = value + 1;
+        continue;
+      }
+      if (key === 'exclusiveMaximum') {
+        if (typeof value === 'number') out.maximum = value - 1;
+        continue;
+      }
+      if (!GEMINI_SCHEMA_KEYS.has(key)) continue;
+
+      // `properties` is a MAP OF NAMES, not a schema node: its keys are argument
+      // names (attemptId, courseSlug, …) and every one of them must survive. The
+      // generic branch would whitelist-filter those names away and produce
+      // `properties: {}` — a tool that declares three arguments and tells the model
+      // it takes none. So the map is passed through by key and only its VALUES are
+      // converted.
+      if (key === 'properties') {
+        const map = {};
+        for (const [name, sub] of Object.entries(value || {})) {
+          map[name] = convert(sub);
+        }
+        out.properties = map;
+        continue;
+      }
+
+      // additionalProperties: false is how Zod says "reject unknown keys"; Gemini
+      // only understands the boolean, and a schema object here is not supported.
+      if (key === 'additionalProperties' && typeof value !== 'boolean') {
+        out.additionalProperties = false;
+        continue;
+      }
+      out[key] = convert(value);
+    }
+    return out;
+  };
+
+  /**
+   * Cross-check: Gemini requires every name in `required` to exist in
+   * `properties`. Zod can emit a `required` entry for an optional key under some
+   * unions/refinements, and Gemini answers 400 "property is not defined" for the
+   * WHOLE payload — so the two lists are reconciled here rather than trusted.
+   */
+  const pruneRequired = (node) => {
+    if (Array.isArray(node)) {
+      node.forEach(pruneRequired);
+      return;
+    }
+    if (!node || typeof node !== 'object') return;
+    if (node.properties) {
+      node.required = Array.isArray(node.required)
+        ? node.required.filter((name) => Object.prototype.hasOwnProperty.call(node.properties, name))
+        : [];
+      if (node.required.length === 0) delete node.required;
+    }
+    if (node.items) pruneRequired(node.items);
+  };
+
+  try {
+    const json = z.toJSONSchema(schema, { io: 'input' });
+    // Gemini rejects a parameterless object schema outright ("parameters" with no
+    // properties), and it must still be an object-typed schema either way.
+    if (!json.properties) json.properties = {};
+    const converted = convert(json);
+    pruneRequired(converted);
+
+    // Positive control, enforced in CODE rather than only in a test: a strip that
+    // silently emptied `properties` would leave a schema that is valid, leak-free
+    // and completely useless — the model would be told the tool takes no arguments.
+    // Zod's `$schema`/title keys are dropped by the whitelist, so anything still
+    // here came from the real schema.
+    if (!converted.properties || Object.keys(converted.properties).length === 0) {
+      // A parameterless tool is legitimate only if the source said so.
+      if (json.properties && Object.keys(json.properties).length > 0) {
+        throw new Error(`stripUnsupportedSchemaKeys erased the arguments of a ${Object.keys(json.properties).length}-argument schema`);
+      }
+    }
+    return converted;
+  } catch (err) {
+    // A schema Zod cannot express, or one this strip would damage, falls back to
+    // the Zod form. The vendor then reports the real problem instead of the model
+    // being handed an empty tool — a loud failure beats a silently useless one.
+    if (err && /erased the arguments/.test(String(err.message))) throw err;
+    return schema;
+  }
+}
+
+/**
  * Convert definitions to LangChain tools. `resolveContext(args, def)` supplies the
  * per-invocation context (at minimum { approved, adminId } for actions) â€” the
  * graph passes the approval it just received, which is exactly why the approval
@@ -314,7 +444,10 @@ function toLangChainTools(defs = listDefinitions(), resolveContext = () => ({}))
     return tool(async (args) => execute(bound, args, await resolveContext(args, def)), {
       name: def.name,
       description: def.description,
-      schema: def.schema,
+      // The MODEL is shown a plain JSON Schema with the keywords Gemini rejects
+      // removed (see stripUnsupportedSchemaKeys). execute() below still validates
+      // with the tool's own Zod schema, so this is a transport fix only.
+      schema: stripUnsupportedSchemaKeys(def.schema),
     });
   });
 }

@@ -67,10 +67,22 @@ let primaryCooldownUntil = 0;
  */
 const unusableProviders = new Map();
 
-/** Providers in preference order, configured ones only. */
+/**
+ * Providers in preference order, configured ones only.
+ *
+ * The order comes from config.aiAgent (which resolves
+ * AI_AGENT_PROVIDER_ORDER, default gemini-first), so this is never a second,
+ * drifting copy of the preference: if the order changes, only env.js changes.
+ * The tail is the configured providers the order did not name, so adding a
+ * provider can never leave it unreachable as a failover.
+ */
 function providerOrder() {
   const agent = config.aiAgent;
-  const order = [agent.primary, agent.primary === 'groq' ? 'gemini' : 'groq'];
+  const named = Array.isArray(agent.providerOrder) ? agent.providerOrder : [agent.primary];
+  const order = [...named];
+  for (const name of Object.keys(agent.providers)) {
+    if (!order.includes(name)) order.push(name);
+  }
   return order.filter((name) => name && agent.providers[name] && agent.providers[name].configured);
 }
 
@@ -158,9 +170,29 @@ function configReasonOf(err) {
 }
 
 /** The model id a provider is currently configured with (for diagnostics only). */
+/**
+ * The model id a PROVIDER should be asked for.
+ *
+ * The primary/fallback split is a POSITION in the failover order, not a property
+ * of the vendor. Keying the choice off the provider NAME (the old
+ * `name === 'groq' ? primary : fallback`) meant that flipping the provider order
+ * in env.js — legitimately, and without touching this file — made the Gemini
+ * primary ask Groq's model id and 404 on every turn. Both positions are now
+ * resolved from the ORDER itself, so any provider order works.
+ */
 function modelIdFor(providerName) {
   const agent = config.aiAgent;
-  return providerName === 'groq' ? agent.primaryModel : agent.fallbackModel;
+  const order = Array.isArray(agent.providerOrder) && agent.providerOrder.length
+    ? agent.providerOrder
+    : [agent.primary];
+  const position = order.indexOf(providerName);
+  if (position === 0) return agent.primaryModel;
+  if (position > 0) return agent.fallbackModel;
+  // Not named in the order (a late addition, or a test double) is the tail: hand it
+  // the NON-primary id. The empty-order case lands here too, and that is deliberate
+  // — with no order there is no position zero to justify the primary id, and
+  // guessing wrong here is the 404 this function used to cause.
+  return agent.primaryModel === agent.fallbackModel ? agent.primaryModel : agent.fallbackModel;
 }
 
 /**
@@ -178,6 +210,12 @@ function safeMessage(err) {
  * Build one chat model. A fresh instance per call keeps failover stateless and
  * avoids a bound-model holding a stale client after a provider switch.
  * temperature 0 because an administrative answer must be reproducible.
+ *
+ * The model id comes from modelIdFor(provider), NOT from a literal in this
+ * branch: hardcoding `primaryModel` under the Groq branch and `fallbackModel`
+ * under the Gemini branch re-encoded "groq is always first" in a second place,
+ * so flipping the provider order made each vendor request the other's model id
+ * (Gemini asking for `openai/gpt-oss-120b` → 404 on every turn).
  */
 function createModel(providerName) {
   const agent = config.aiAgent;
@@ -185,7 +223,7 @@ function createModel(providerName) {
     const { ChatGroq } = require('@langchain/groq');
     return new ChatGroq({
       apiKey: agent.groqApiKey,
-      model: agent.primaryModel,
+      model: modelIdFor('groq'),
       temperature: 0,
       maxRetries: 0, // retries are OUR job: we switch provider instead
       maxTokens: agent.maxAnswerTokens,
@@ -195,7 +233,7 @@ function createModel(providerName) {
     const { ChatGoogleGenerativeAI } = require('@langchain/google-genai');
     return new ChatGoogleGenerativeAI({
       apiKey: agent.geminiApiKey,
-      model: agent.fallbackModel,
+      model: modelIdFor('gemini'),
       temperature: 0,
       maxRetries: 0,
       maxOutputTokens: agent.maxAnswerTokens,
@@ -374,6 +412,10 @@ module.exports = {
   statusOf,
   safeMessage,
   providerOrder,
+  // Exported so agentService records the model that ACTUALLY answered. It used to
+  // re-derive that with its own `provider === 'gemini' ? fallback : primary`
+  // ternary, which is the same drift modelIdFor() exists to remove.
+  modelIdFor,
   healthState,
   resetFailoverState,
 };

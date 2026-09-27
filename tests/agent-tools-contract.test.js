@@ -14,8 +14,12 @@
  *
  * Run: npm test
  */
-const { describe, it, after } = require('node:test');
+const { describe, it, after, before, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
+// Zod is needed here to read the RAW schema the tools declare, which is the
+// positive control for the model-facing schema test below: stripping can only be
+// proven to work if the un-stripped form is first shown to contain the keyword.
+const { z } = require('zod');
 const {
   readDefinitions,
   actionDefinitions,
@@ -35,9 +39,38 @@ const { wrapReadDefinition, createTtlCache, clearCache, cacheStats } = require('
 const envConfig = require('../src/config/env');
 const { disconnectRedis } = require('../src/integrations/redis/redisClient');
 
+/**
+ * These tests assert the DEFAULT (read-only) posture, so they PIN the flag
+ * rather than inherit it. A developer .env with AI_AGENT_ALLOW_MUTATIONS=true
+ * otherwise failed the whole file with "40 !== 28" — the suite was reporting the
+ * developer's environment instead of the contract.
+ */
+function pinMutations(value) {
+  const agent = envConfig.aiAgent;
+  const original = agent.allowMutations;
+  agent.allowMutations = value;
+  return () => {
+    agent.allowMutations = original;
+  };
+}
+
+let restoreMutations = null;
+
 // Safety net: if any tool under test touches the cache, close the handle so the
 // runner exits instead of hanging on an unreachable Redis socket.
+before(() => {
+  restoreMutations = pinMutations(false);
+});
+
+afterEach(() => {
+  if (restoreMutations) {
+    restoreMutations();
+    restoreMutations = pinMutations(false);
+  }
+});
+
 after(async () => {
+  if (restoreMutations) restoreMutations();
   await disconnectRedis();
 });
 
@@ -204,6 +237,112 @@ describe('agent tools — LangChain wrapper', () => {
 
   it('returns null for an unknown tool name instead of throwing', () => {
     assert.equal(getDefinition('does_not_exist'), null);
+  });
+});
+
+/**
+ * The model-facing schema must be a JSON Schema Gemini accepts.
+ *
+ * Found live, one keyword at a time: Gemini 400s the WHOLE request — every tool,
+ * every turn — on the first schema keyword it does not know, and the failure looks
+ * like a provider outage rather than a schema bug. So
+ * stripUnsupportedSchemaKeys() runs before the tools are bound to the model.
+ *
+ * The assertions below are a TRANSPORT contract only. execute() still validates
+ * with the tool's own Zod schema, so nothing here weakens a tool.
+ */
+describe('agent tools — model-facing JSON Schema (Gemini transport)', () => {
+  // Every keyword Gemini rejects. `const` and `examples` are included even though no
+  // tool emits them today: they are in the vendor's rejection list, and a future
+  // z.literal()/z.enum() must fail HERE rather than in production.
+  const BANNED_KEYS = ['exclusiveMinimum', 'exclusiveMaximum', 'propertyNames', 'const', 'examples'];
+
+  /** Every object key reachable in a schema, at every depth. */
+  function collectKeys(node, found = []) {
+    if (Array.isArray(node)) {
+      node.forEach((item) => collectKeys(item, found));
+      return found;
+    }
+    if (!node || typeof node !== 'object') return found;
+    for (const [key, value] of Object.entries(node)) {
+      found.push(key);
+      collectKeys(value, found);
+    }
+    return found;
+  }
+
+  const allTools = () => toLangChainTools(listDefinitions({ includeActions: true }));
+
+  it('binds EVERY tool, actions included, so the scan below covers the whole catalogue', () => {
+    const defs = listDefinitions({ includeActions: true });
+    const tools = allTools();
+    assert.equal(tools.length, defs.length, 'one bound tool per definition');
+    assert.ok(defs.some((d) => d.kind === 'action'), 'action tools must be in scope or this proves nothing');
+    assert.ok(defs.length > 30, `expected the full catalogue, got ${defs.length}`);
+  });
+
+  it('leaks no keyword Gemini rejects into the bound schema of any tool', () => {
+    const offenders = [];
+    for (const bound of allTools()) {
+      for (const key of collectKeys(bound.schema)) {
+        if (BANNED_KEYS.includes(key)) offenders.push(`${bound.name}.${key}`);
+      }
+    }
+    assert.deepEqual(offenders, [], `Gemini 400s the whole request on these: ${offenders.join(', ')}`);
+  });
+
+  it('never lists a `required` name the same schema does not define', () => {
+    // Gemini answers 400 "property is not defined" for the whole payload, so a
+    // required entry with no matching property is fatal to the turn.
+    const offenders = [];
+    const walk = (node, toolName, path) => {
+      if (Array.isArray(node)) {
+        node.forEach((item, i) => walk(item, toolName, `${path}[${i}]`));
+        return;
+      }
+      if (!node || typeof node !== 'object') return;
+      if (Array.isArray(node.required)) {
+        for (const name of node.required) {
+          const declared = node.properties && Object.prototype.hasOwnProperty.call(node.properties, name);
+          if (!declared) offenders.push(`${toolName} ${path}.required -> ${name}`);
+        }
+      }
+      for (const [key, value] of Object.entries(node)) walk(value, toolName, `${path}.${key}`);
+    };
+    for (const bound of allTools()) walk(bound.schema, bound.name, '$');
+    assert.deepEqual(offenders, [], `required names with no property: ${offenders.join(', ')}`);
+  });
+
+  // POSITIVE CONTROL. Without this the three tests above pass vacuously: a schema
+  // stripped down to `{"type":"object","properties":{}}` contains no banned keyword
+  // and no dangling `required`, so all three would go green on a schema that tells
+  // the model nothing at all. The control pins that the raw Zod schema the tools
+  // declare really does contain the keywords being stripped.
+  it('POSITIVE CONTROL: the raw Zod schema really does contain the banned keywords', () => {
+    const raw = z.toJSONSchema(getDefinition('grade_essay').schema, { io: 'input' });
+    const keys = collectKeys(raw);
+    // `grade_essay.attemptId` is z.number().int().positive() -> exclusiveMinimum,
+    // and its z.record() args -> propertyNames. Both are real, not synthetic.
+    assert.ok(keys.includes('exclusiveMinimum'), 'the control tool must emit exclusiveMinimum before stripping');
+    assert.ok(keys.includes('propertyNames'), 'the control tool must emit propertyNames before stripping');
+
+    // And the same tool, once bound for the model, carries neither.
+    const [boundEssay] = toLangChainTools([getDefinition('grade_essay')]);
+    const boundKeys = collectKeys(boundEssay.schema);
+    for (const banned of ['exclusiveMinimum', 'propertyNames']) {
+      assert.equal(boundKeys.includes(banned), false, `${banned} must be stripped from the bound schema`);
+    }
+  });
+
+  it('POSITIVE CONTROL: stripping narrows the bounds without erasing the arguments', () => {
+    // The mirror image of the vacuity risk: the strip must REMOVE keywords, never
+    // silently delete the declared arguments. `exclusiveMinimum: 0` is rewritten as
+    // `minimum: 1` (these are 1-based autoincrement ids), not dropped.
+    const [boundEssay] = toLangChainTools([getDefinition('grade_essay')]);
+    const attemptId = boundEssay.schema.properties && boundEssay.schema.properties.attemptId;
+    assert.ok(attemptId, `grade_essay.attemptId vanished from the bound schema: ${JSON.stringify(boundEssay.schema)}`);
+    assert.equal(attemptId.type, 'integer', 'the argument type survives the strip');
+    assert.equal(attemptId.minimum, 1, 'exclusiveMinimum 0 is narrowed to minimum 1');
   });
 });
 
