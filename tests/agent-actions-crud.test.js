@@ -342,5 +342,20 @@ describe('agent CRUD tools — P2b semantics', () => {
     assert.equal(result.data.ok, true);
     assert.ok(result.data.student.slug, 'the created student is identified by slug');
   });
+
+  it('a password passed as a tool argument never reaches the audit trail', async () => {
+    await execute(getDefinition('create_student'), NEW_STUDENT_ARGS, approved(prismaStub()));
+    const recorded = auditCalls.at(-1);
+    assert.equal(recorded.action, 'USER_CREATE');
+    // The audit helper only sanitizes its TOP-LEVEL keys, so a nested args.password
+    // used to be written to AuditLog as plaintext. This is the regression pin: the
+    // tool layer must redact credential arguments before recording them.
+    const recordedArgs = JSON.stringify(recorded.metadata.args);
+    assert.equal(recordedArgs.includes(NEW_STUDENT_ARGS.password), false, `password reached the audit row: ${recordedArgs}`);
+    assert.equal(recorded.metadata.args.password, '[redacted]');
+    // Non-secret arguments must survive, or the trail stops being useful.
+    assert.equal(recorded.metadata.args.email, NEW_STUDENT_ARGS.email);
+    assert.equal(recorded.metadata.args.grade, NEW_STUDENT_ARGS.grade);
+  });
 });
 

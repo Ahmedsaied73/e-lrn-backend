@@ -93,6 +93,37 @@ function cacheKeyFor(name, args) {
   return cache.buildKey('agent', name, cache.shortHash(JSON.stringify(args)));
 }
 
+/**
+ * Argument names that must never be persisted in the audit trail.
+ *
+ * WHY THIS EXISTS: execute() records `metadata.args` for every action, and the
+ * audit helper only sanitizes its TOP-LEVEL keys — so a nested `args.password`
+ * sailed straight into `AuditLog.metadata` as plaintext. The catalogue has a tool
+ * that legitimately takes a password (create_student mirrors the register path),
+ * which is what turned a latent hole into a real one. Redaction happens HERE rather
+ * than in each tool so no future tool can reintroduce it by forgetting.
+ */
+const SECRET_ARG_KEYS = new Set([
+  'password',
+  'newPassword',
+  'currentPassword',
+  'confirmPassword',
+  'token',
+  'accessToken',
+  'refreshToken',
+  'answerKey',
+  'apiKey',
+]);
+
+function auditSafeArgs(args) {
+  if (!args || typeof args !== 'object') return null;
+  const safe = {};
+  for (const [key, value] of Object.entries(args)) {
+    safe[key] = SECRET_ARG_KEYS.has(key) ? '[redacted]' : value;
+  }
+  return safe;
+}
+
 function finalize(payload, def, startedAt) {
   return {
     data: redactPayload(payload),
@@ -165,7 +196,7 @@ async function execute(def, args, ctx = {}) {
         metadata: {
           via: 'agent',
           tool: def.name,
-          args: parsed.data,
+          args: auditSafeArgs(parsed.data),
           ms: Date.now() - startedAt,
           conversationId: runCtx.conversationId,
         },
