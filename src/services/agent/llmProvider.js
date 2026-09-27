@@ -182,9 +182,13 @@ function configReasonOf(err) {
  */
 function modelIdFor(providerName) {
   const agent = config.aiAgent;
-  const order = Array.isArray(agent.providerOrder) && agent.providerOrder.length
-    ? agent.providerOrder
-    : [agent.primary];
+  // An EMPTY order stays empty. Synthesising `[agent.primary]` here made position 0
+  // exist for a provider the order never named, so the tail rule below was
+  // unreachable in exactly the case its own comment describes ("the empty-order case
+  // lands here too, and that is deliberate") — and the empty order is the honest
+  // representation of "nothing is configured", where handing out the primary id is
+  // the 404 this function exists to prevent.
+  const order = Array.isArray(agent.providerOrder) && agent.providerOrder.length ? agent.providerOrder : [];
   const position = order.indexOf(providerName);
   if (position === 0) return agent.primaryModel;
   if (position > 0) return agent.fallbackModel;
