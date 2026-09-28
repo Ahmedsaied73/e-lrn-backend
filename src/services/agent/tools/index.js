@@ -179,6 +179,12 @@ const STOPWORDS = new Set([
  */
 const MAX_SHARED_DESCRIPTION_TOKENS = 6;
 
+// A phone-number lookup is a student_search question even when the
+// wording mentions no name. Any run of 7+ ASCII digits means the admin pasted
+// a phone number (Egyptian mobiles are 11 digits) — boost student_search so
+// the shortlist contains the one tool that can answer it.
+const PHONE_DIGITS_RE = /\d{7,}/;
+
 /** tool -> the distinctive words of its description that a question can match. */
 const TOOL_DESCRIPTION_TOKENS = (() => {
   const tokensByTool = new Map();
@@ -247,6 +253,21 @@ function selectToolSet({
     if (match && match.matched && match.tool) add(match.tool, 'router');
 
     const questionTokens = new Set(tokens);
+    const hasPhoneDigits = PHONE_DIGITS_RE.test(question || '');
+    const wantsStudent =
+      hasPhoneDigits ||
+      [...questionTokens].some(
+        (t) =>
+          t === 'طالب' ||
+          t === 'طلاب' ||
+          t === 'الطالب' ||
+          t === 'الطلاب' ||
+          t === 'طالبه' ||
+          t === 'رقمه' ||
+          t === 'رقم' ||
+          t === 'هات' ||
+          t === 'هاتف'
+      );
     const scored = [];
     for (const def of readDefinitions) {
       // A phrase hit is worth more than a stray word: "Ø§Ø´ØªØ±Ø§ÙƒØ§Øª Ø§Ù„Ø¯ÙˆØ±Ø§Øª" identifies a
@@ -265,6 +286,7 @@ function selectToolSet({
     // Longest phrase wins ("Ø§Ø´ØªØ±Ø§ÙƒØ§Øª Ø§Ù„Ø¯ÙˆØ±Ø§Øª" is a sharper signal than "Ø§Ø´ØªØ±Ø§ÙƒØ§Øª"),
     // and the name breaks ties so two equal questions always get the same surface.
     scored.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+    if (wantsStudent) add('student_search', hasPhoneDigits ? 'phone-digits' : 'student-word');
     for (const hit of scored) add(hit.name, `score:${hit.score}`);
   }
 
@@ -328,6 +350,8 @@ const ACTION_NAMES = new Set(actionDefinitions.map((d) => d.name));
 const WRITE_VERBS = [
   'سجل', 'الغ', 'الغي', 'اعتمد', 'صحح', 'ارسل', 'اعط', 'انشئ', 'اضف', 'حدث',
   'احذف', 'ازل', 'فعل', 'عطل', 'علم', 'ارفع', 'استثن', 'رتب', 'اجعل', 'امنح', 'اقبل', 'اعد',
+  'تضيف', 'تمسح', 'ضيف', 'امسح', 'تحذف', 'تحدث', 'تعدل', 'تغير', 'تسجل',
+  'عدل', 'اضيفي', 'ضيفي', 'امسحي', 'احذفي', 'عدلي', 'حدثي', 'غيري', 'سجلي',
 ];
 
 /**
