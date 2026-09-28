@@ -1,0 +1,73 @@
+[tests] server healthy on http://127.0.0.1:3106 (pid 12656)
+▶ admin guard + leak rule
+  ✔ rejects unauthenticated calls with 401 (739.5959ms)
+  ✔ rejects student calls with 403 on every admin surface (46.0823ms)
+  ✔ validates the user slug: malformed → 400, unknown → 404 (388.0968ms)
+  ✔ serves the admin console to an ADMIN and leaks no secrets (6911.3755ms)
+✔ admin guard + leak rule (9802.0633ms)
+▶ cookie-only auth contract
+  ✔ register from an unauthenticated context sets HttpOnly cookies and no body token (2244.9225ms)
+  ✔ login returns HttpOnly cookies only — never a token in the body (3563.3987ms)
+  ✔ refresh rotates the refresh token and kills the previous one (5331.2975ms)
+  ✔ registering while already authenticated does not overwrite the caller session (1831.8608ms)
+✔ cookie-only auth contract (14349.2396ms)
+▶ auth limiter buckets
+  ✔ login bucket trips without touching the refresh bucket (11334.6277ms)
+✔ auth limiter buckets (11336.433ms)
+▶ createSemaphore
+  ✔ caps concurrent executions and preserves return values (92.9053ms)
+  ✔ never exceeds the cap under interleaved arrivals (wake-race) (189.0057ms)
+  ✔ releases the slot when fn throws (1.02ms)
+✔ createSemaphore (284.8111ms)
+▶ metrics module
+  ✔ renders counters and duration buckets in Prometheus format (1.3488ms)
+✔ metrics module (2.4271ms)
+▶ paymobProvider.toMinorUnits
+  ✔ converts whole EGP to piasters exactly (0.8308ms)
+  ✔ refuses non-integer/zero/negative input instead of rounding (0.6548ms)
+✔ paymobProvider.toMinorUnits (2.7359ms)
+▶ paymobProvider.verifyWebhook
+  ✔ accepts a fixture with the independently computed HMAC (0.872ms)
+  ✔ rejects tampering of ANY single field (1.4832ms)
+  ✔ rejects malformed inputs without throwing (0.2383ms)
+✔ paymobProvider.verifyWebhook (2.9012ms)
+▶ paymobProvider.normalizeEvent
+  ✔ maps success/failure/pending/refund markers to service events (0.4072ms)
+  ✔ correlates our reference + the provider transaction id (0.1916ms)
+✔ paymobProvider.normalizeEvent (0.9054ms)
+▶ provider registry
+  ✔ resolves paymob and only paymob (3.4325ms)
+  ✔ rejects unknown providers with a stable code (0.455ms)
+✔ provider registry (4.2838ms)
+[INFO] payments.event.completed {"paymentId":25,"userId":284,"courseId":1}
+▶ payments lifecycle (simulated provider callbacks)
+  ✔ success callback fulfils exactly once and grants 365-day access (4393.2859ms)
+[WARN] Redis error (#1): read ECONNRESET
+[INFO] payments.event.completed {"paymentId":26,"userId":284,"courseId":1}
+  ✔ a racing pair of success callbacks fulfils only once (1680.7575ms)
+[INFO] payments.event.failed {"paymentId":27,"providerTxnId":"7000005"}
+  ✔ failure callback marks FAILED and grants nothing (matrix 10) (2567.1435ms)
+[INFO] payments.event.failed {"paymentId":28,"providerTxnId":"7000006"}
+[INFO] payments.event.completed {"paymentId":28,"userId":284,"courseId":1}
+[WARN] Redis error (#2): read ECONNRESET
+  ✔ late success heals FAILED into COMPLETED, audited (D6) (2734.1354ms)
+[ERROR] payments.event.amount_mismatch {"paymentId":29,"expected":50000,"got":49900}
+  ✔ tampered amount (valid HMAC shape, wrong cents) is refused and logged (1817.1639ms)
+  ✔ pending:true callback never fails the payment (G5) (1577.1268ms)
+[INFO] payments.event.completed {"paymentId":31,"userId":284,"courseId":1}
+[INFO] payments.event.failure_ignored_terminal {"paymentId":31,"status":"COMPLETED"}
+  ✔ failure after COMPLETED can never downgrade (R3) (3405.6399ms)
+[WARN] payments.event.unmatched {"reference":"crs-ghost-abcdef01","providerTxnId":"7000012"}
+  ✔ unmatched reference is logged and ignored (D9) (785.1049ms)
+  ✔ status read enforces ownership (matrix 17) (1466.1239ms)
+✔ payments lifecycle (simulated provider callbacks) (25035.0181ms)
+[WARN] Redis error (#3): read ECONNRESET
+[WARN] Redis error (#20): read ECONNRESET
+[WARN] Redis error (#40): read ECONNRESET
+[WARN] Redis error (#60): read ECONNRESET
+[WARN] Redis error (#80): read ECONNRESET
+[WARN] Redis error (#100): read ECONNRESET
+[WARN] Redis error (#120): read ECONNRESET
+[WARN] Redis error (#140): read ECONNRESET
+[WARN] Redis error (#160): read ECONNRESET
+[WARN] Redis error (#180): read ECONNRESET

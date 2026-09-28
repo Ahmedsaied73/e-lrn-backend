@@ -1,0 +1,27 @@
+[WARN] SENTRY_DSN not set — backend error tracking disabled (no-op).
+Example app listening at http://localhost:3187 
+CORS enabled for configured origins
+[INFO] video.reconcile.job_started {"schedule":"every 10 minutes","staleThreshold":"30 minutes"}
+[WARN] ai.worker.not_started {"reason":"AI grader disabled or GEMINI_API_KEY missing"}
+Admin already exists: admin@elearning.com
+[ERROR] {"timestamp":"2026-09-19T10:51:02.825Z","method":"POST","path":"/payments/checkout","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":401,"durationMs":698}
+[ERROR] {"timestamp":"2026-09-19T10:51:03.868Z","method":"GET","path":"/payments/status/crs-1-abc","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":401,"durationMs":2}
+[ERROR] {"timestamp":"2026-09-19T10:51:03.875Z","method":"GET","path":"/payments/history","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":401,"durationMs":1}
+[ERROR] Unhandled error: Expected property name or '}' in JSON at position 1 (line 1 column 2) { path: '/webhooks/paymob', method: 'POST' }
+[ERROR] Unhandled error: Expected property name or '}' in JSON at position 1 (line 1 column 2) { path: '/webhooks/paymob', method: 'POST' }
+[ERROR] {"timestamp":"2026-09-19T10:51:03.896Z","method":"POST","path":"/payments/course/1","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":404,"durationMs":1}
+[WARN] paymob.webhook.rejected {"reason":"malformed","ip":"::ffff:127.0.0.1"}
+[WARN] paymob.webhook.rejected {"reason":"invalid_hmac","txnId":1,"ip":"::ffff:127.0.0.1"}
+[WARN] paymob.webhook.rejected {"reason":"invalid_hmac","txnId":1,"ip":"::ffff:127.0.0.1"}
+[WARN] Redis error (#1): read ECONNRESET
+[WARN] Redis error (#2): read ECONNRESET
+[WARN] Redis error (#3): read ECONNRESET
+[WARN] Redis error (#20): read ECONNRESET
+[WARN] Redis error (#40): read ECONNRESET
+[WARN] Redis error (#60): read ECONNRESET
+[WARN] Redis error (#80): read ECONNRESET
+[WARN] Redis error (#100): read ECONNRESET
+[WARN] Redis error (#120): read ECONNRESET
+[WARN] Redis error (#140): read ECONNRESET
+[WARN] Redis error (#160): read ECONNRESET
+[WARN] Redis error (#180): read ECONNRESET

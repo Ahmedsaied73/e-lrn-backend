@@ -1,0 +1,58 @@
+[WARN] SENTRY_DSN not set — backend error tracking disabled (no-op).
+Example app listening at http://localhost:3140 
+CORS enabled for configured origins
+[INFO] video.reconcile.job_started {"schedule":"every 10 minutes","staleThreshold":"30 minutes"}
+[INFO] payment.reconcile.job_started {"schedule":"every 10 minutes"}
+[WARN] ai.worker.not_started {"reason":"AI grader disabled or GEMINI_API_KEY missing"}
+Admin already exists: admin@elearning.com
+[ERROR] {"timestamp":"2026-09-19T12:37:58.849Z","method":"POST","path":"/payments/checkout","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":401,"durationMs":709}
+[ERROR] {"timestamp":"2026-09-19T12:38:00.435Z","method":"POST","path":"/payments/checkout","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":400,"durationMs":1662}
+[WARN] Redis error (#1): read ECONNRESET
+[INFO] payments.checkout.created {"paymentId":57,"userId":354,"courseId":1,"amount":500}
+[RESPONSE] {"timestamp":"2026-09-19T12:38:02.976Z","method":"POST","path":"/payments/checkout","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":201,"durationMs":3768}
+[RESPONSE] {"timestamp":"2026-09-19T12:38:07.107Z","method":"POST","path":"/payments/checkout","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":201,"durationMs":1715}
+[RESPONSE] {"timestamp":"2026-09-19T12:38:08.825Z","method":"GET","path":"/payments/status/crs-57-afa04cdf1883faa7","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":200,"durationMs":682}
+[ERROR] {"timestamp":"2026-09-19T12:38:09.855Z","method":"GET","path":"/payments/status/crs-57-afa04cdf1883faa7","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":404,"durationMs":488}
+[WARN] paymob.webhook.rejected {"reason":"invalid_hmac","txnId":7100001,"ip":"::ffff:127.0.0.1"}
+[ERROR] payments.event.amount_mismatch {"paymentId":57,"expected":50000,"got":49900}
+[WARN] Redis error (#2): read ECONNRESET
+[INFO] payments.event.completed {"paymentId":57,"userId":354,"courseId":1}
+[INFO] payments.event.failure_ignored_terminal {"paymentId":57,"status":"COMPLETED"}
+[ERROR] {"timestamp":"2026-09-19T12:38:19.047Z","method":"GET","path":"/videos/m9zmdcce4sme/playback","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":403,"durationMs":1952}
+[ERROR] {"timestamp":"2026-09-19T12:38:21.357Z","method":"GET","path":"/videos/m9zmdcce4sme/playback","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":403,"durationMs":1434}
+[RESPONSE] {"timestamp":"2026-09-19T12:38:22.792Z","method":"GET","path":"/videos/m9zmdcce4sme/playback","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":200,"durationMs":1383}
+[ERROR] {"timestamp":"2026-09-19T12:38:24.544Z","method":"POST","path":"/enroll/","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":402,"durationMs":538}
+[RESPONSE] {"timestamp":"2026-09-19T12:38:25.085Z","method":"GET","path":"/admin/payments?status=COMPLETED","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":200,"durationMs":1197}
+[ERROR] {"timestamp":"2026-09-19T12:38:26.284Z","method":"GET","path":"/admin/payments","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":403,"durationMs":204}
+[RESPONSE] {"timestamp":"2026-09-19T12:38:26.491Z","method":"GET","path":"/payments/history","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":200,"durationMs":1003}
+[WARN] Redis error (#3): read ECONNRESET
+[ERROR] {"timestamp":"2026-09-19T12:39:50.661Z","method":"POST","path":"/payments/checkout","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":401,"durationMs":191}
+[ERROR] {"timestamp":"2026-09-19T12:39:51.573Z","method":"POST","path":"/payments/checkout","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":400,"durationMs":635}
+[INFO] payments.checkout.created {"paymentId":58,"userId":359,"courseId":1,"amount":500}
+[RESPONSE] {"timestamp":"2026-09-19T12:39:52.916Z","method":"POST","path":"/payments/checkout","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":201,"durationMs":3579}
+[RESPONSE] {"timestamp":"2026-09-19T12:39:56.925Z","method":"POST","path":"/payments/checkout","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":201,"durationMs":1601}
+[RESPONSE] {"timestamp":"2026-09-19T12:39:58.530Z","method":"GET","path":"/payments/status/crs-58-b6b9d155538a0bb8","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":200,"durationMs":699}
+[ERROR] {"timestamp":"2026-09-19T12:39:59.585Z","method":"GET","path":"/payments/status/crs-58-b6b9d155538a0bb8","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":404,"durationMs":495}
+[WARN] paymob.webhook.rejected {"reason":"invalid_hmac","txnId":7100001,"ip":"::ffff:127.0.0.1"}
+[ERROR] payments.event.amount_mismatch {"paymentId":58,"expected":50000,"got":49900}
+[INFO] payments.event.completed {"paymentId":58,"userId":359,"courseId":1}
+[INFO] payments.event.failure_ignored_terminal {"paymentId":58,"status":"COMPLETED"}
+[ERROR] {"timestamp":"2026-09-19T12:40:07.765Z","method":"GET","path":"/videos/m9zmdcce4sme/playback","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":403,"durationMs":1215}
+[ERROR] {"timestamp":"2026-09-19T12:40:09.343Z","method":"GET","path":"/videos/m9zmdcce4sme/playback","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":403,"durationMs":1404}
+[RESPONSE] {"timestamp":"2026-09-19T12:40:10.749Z","method":"GET","path":"/videos/m9zmdcce4sme/playback","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":200,"durationMs":1204}
+[ERROR] {"timestamp":"2026-09-19T12:40:12.307Z","method":"POST","path":"/enroll/","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":402,"durationMs":352}
+[RESPONSE] {"timestamp":"2026-09-19T12:40:12.661Z","method":"GET","path":"/admin/payments?status=COMPLETED","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":200,"durationMs":629}
+[ERROR] {"timestamp":"2026-09-19T12:40:13.292Z","method":"GET","path":"/admin/payments","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":403,"durationMs":0}
+[RESPONSE] {"timestamp":"2026-09-19T12:40:13.294Z","method":"GET","path":"/payments/history","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":200,"durationMs":488}
+[WARN] Redis error (#20): read ECONNRESET
+[WARN] Redis error (#40): read ECONNRESET
+[WARN] payment.reconcile.lookup_failed {"paymentId":67,"error":"Payment gateway lookup failed."}
+[WARN] payment.reconcile.lookup_failed {"paymentId":67,"error":"Payment gateway lookup failed."}
+[WARN] payment.reconcile.lookup_failed {"paymentId":67,"error":"Payment gateway lookup failed."}
+[WARN] Redis error (#60): read ECONNRESET
+[INFO] payment.reconcile.summary {"candidates":1,"expired":1,"checked":0,"settled":0}
+[WARN] Redis error (#80): read ECONNRESET
+[2026-09-19T15:20:09.641Z] [PID: 8204] [32m[NODE-CRON][32m [33m[WARN][0m missed execution at Sat Sep 19 2026 18:20:00 GMT+0300 (Eastern European Summer Time)! Possible blocking IO or high CPU user at the same process used by node-cron.
+[WARN] Redis error (#100): read ECONNRESET
+[WARN] Redis error (#120): read ECONNRESET
+[WARN] Redis error (#140): read ECONNRESET

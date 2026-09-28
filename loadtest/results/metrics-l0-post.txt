@@ -1,0 +1,49 @@
+
+===== 2026-09-22T16:58:03.007Z =====
+--- /metrics ---
+# TYPE http_requests_total counter
+http_requests_total{status="200"} 1
+http_requests_total{status="401"} 162
+# TYPE http_errors_5xx_total counter
+http_errors_5xx_total 0
+# TYPE http_request_duration_ms histogram
+http_request_duration_ms_bucket{le="50"} 76
+http_request_duration_ms_bucket{le="100"} 76
+http_request_duration_ms_bucket{le="250"} 133
+http_request_duration_ms_bucket{le="500"} 162
+http_request_duration_ms_bucket{le="1000"} 162
+http_request_duration_ms_bucket{le="2500"} 163
+http_request_duration_ms_bucket{le="5000"} 163
+http_request_duration_ms_bucket{le="10000"} 163
+http_request_duration_ms_bucket{le="+Inf"} 163
+http_request_duration_ms_sum 21298
+http_request_duration_ms_count 163
+# TYPE process_uptime_seconds gauge
+process_uptime_seconds 209
+
+--- /readyz ---
+{"status":"ok","db":"up","uptime":234,"ms":622}
+
+===== 2026-09-24T11:46:40.577Z =====
+--- /metrics ---
+# TYPE http_requests_total counter
+http_requests_total{status="200"} 172
+# TYPE http_errors_5xx_total counter
+http_errors_5xx_total 0
+# TYPE http_request_duration_ms histogram
+http_request_duration_ms_bucket{le="50"} 0
+http_request_duration_ms_bucket{le="100"} 0
+http_request_duration_ms_bucket{le="250"} 0
+http_request_duration_ms_bucket{le="500"} 55
+http_request_duration_ms_bucket{le="1000"} 66
+http_request_duration_ms_bucket{le="2500"} 138
+http_request_duration_ms_bucket{le="5000"} 171
+http_request_duration_ms_bucket{le="10000"} 172
+http_request_duration_ms_bucket{le="+Inf"} 172
+http_request_duration_ms_sum 279545
+http_request_duration_ms_count 172
+# TYPE process_uptime_seconds gauge
+process_uptime_seconds 610
+
+--- /readyz ---
+{"status":"ok","db":"up","uptime":611,"ms":437}

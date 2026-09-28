@@ -1,0 +1,19 @@
+2026-09-22T19:54:09.6604567+03:00 server PID=4968 (LOAD_TEST=true, DATABASE_CONNECTION_LIMIT=40)
+2026-09-22T19:54:48.4089093+03:00 server healthy after 12s
+2026-09-22T19:54:50.2451853+03:00 [snapshot l0-pre] total_requests=0 5xx=0 GåÆ H:\e-learning-platform\loadtest\results\metrics-l0-pre.txt
+2026-09-22T19:54:50.3481782+03:00 k6 start: k6 run -e STAGE_CAP=1 H:\e-learning-platform\loadtest\scenarios\browse-10k.js
+2026-09-22T19:58:02.8921950+03:00 k6 exit= duration=3.2min
+2026-09-22T19:58:03.8037818+03:00 [snapshot l0-post] total_requests=0 5xx=0 GåÆ H:\e-learning-platform\loadtest\results\metrics-l0-post.txt
+2026-09-22T19:58:04.9747453+03:00 [flush] Redis unreachable GÇö skipping bucket flush (fail-open).
+2026-09-22T19:58:09.6952032+03:00 stage l0 COMPLETE (k6 exit ) - server stopped
+2026-09-24T14:36:27.7918670+03:00 killing leftover listener PID 9876
+2026-09-24T14:36:27.8218689+03:00 killing leftover listener PID 9876
+2026-09-24T14:36:29.9065328+03:00 server PID=8328 (LOAD_TEST=true, DATABASE_CONNECTION_LIMIT=40)
+2026-09-24T14:36:32.9500308+03:00 port ownership verified: PID 8328
+2026-09-24T14:36:34.0977213+03:00 server healthy after 1s
+2026-09-24T14:36:34.6618897+03:00 [snapshot l0-pre] total_requests=0 5xx=0 ? H:\e-learning-platform\loadtest\results\metrics-l0-pre.txt
+2026-09-24T14:36:34.6828827+03:00 k6 start: k6 run -e STAGE_CAP=1 H:\e-learning-platform\loadtest\scenarios\browse-10k.js
+2026-09-24T14:46:39.9391993+03:00 k6 exit= duration=10.1min
+2026-09-24T14:46:41.4280783+03:00 [snapshot l0-post] total_requests=172 5xx=0 ? H:\e-learning-platform\loadtest\results\metrics-l0-post.txt
+2026-09-24T14:46:44.9042138+03:00 [flush] Failed (client.scanIterator(...) is not a function or its return value is not async iterable) — continuing (fail-open).
+2026-09-24T14:46:49.0043777+03:00 stage l0 COMPLETE (k6 exit ) - server stopped

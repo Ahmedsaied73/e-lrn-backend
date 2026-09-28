@@ -1,0 +1,11 @@
+2026-09-22T22:04:33.4248858+03:00 server PID=11904 (LOAD_TEST=true, DATABASE_CONNECTION_LIMIT=40)
+2026-09-22T22:04:36.4744780+03:00 FATAL port 3005 owned by PID  (expected 11904) - aborting stage
+2026-09-22T22:07:15.3163874+03:00 server PID=10040 (LOAD_TEST=true, DATABASE_CONNECTION_LIMIT=40)
+2026-09-22T22:07:23.4857221+03:00 port ownership verified: PID 10040
+2026-09-22T22:07:31.2959822+03:00 server healthy after 2s
+2026-09-22T22:07:32.5206415+03:00 [snapshot l1-pre] total_requests=0 5xx=0 GåÆ H:\e-learning-platform\loadtest\results\metrics-l1-pre.txt
+2026-09-22T22:07:32.5416662+03:00 k6 start: k6 run -e STAGE_CAP=10 H:\e-learning-platform\loadtest\scenarios\browse-10k.js
+2026-09-22T22:18:17.4190378+03:00 k6 exit= duration=10.7min
+2026-09-22T22:18:19.9017167+03:00 [snapshot l1-post] total_requests=1066 5xx=0 GåÆ H:\e-learning-platform\loadtest\results\metrics-l1-post.txt
+2026-09-22T22:18:21.4047447+03:00 [flush] Redis unreachable GÇö skipping bucket flush (fail-open).
+2026-09-22T22:18:26.2189550+03:00 stage l1 COMPLETE (k6 exit ) - server stopped

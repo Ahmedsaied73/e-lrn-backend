@@ -1,0 +1,37 @@
+▶ paymobProvider.toMinorUnits
+  ✔ converts whole EGP to piasters exactly (3.7098ms)
+  ✔ refuses non-integer/zero/negative input instead of rounding (1.1248ms)
+✔ paymobProvider.toMinorUnits (6.8945ms)
+▶ paymobProvider.verifyWebhook
+  ✔ accepts a fixture with the independently computed HMAC (1.0658ms)
+  ✔ rejects tampering of ANY single field (2.0868ms)
+  ✔ rejects malformed inputs without throwing (0.2782ms)
+✔ paymobProvider.verifyWebhook (3.8079ms)
+▶ paymobProvider.normalizeEvent
+  ✔ maps success/failure/pending/refund markers to service events (0.782ms)
+  ✔ correlates our reference + the provider transaction id (0.3151ms)
+✔ paymobProvider.normalizeEvent (2.0711ms)
+▶ provider registry
+  ✔ resolves paymob and only paymob (2.1134ms)
+  ✔ rejects unknown providers with a stable code (0.3071ms)
+✔ provider registry (2.6632ms)
+[INFO] payments.event.completed {"paymentId":17,"userId":278,"courseId":1}
+▶ payments lifecycle (simulated provider callbacks)
+  ✔ success callback fulfils exactly once and grants 365-day access (4481.5788ms)
+[INFO] payments.event.completed {"paymentId":18,"userId":278,"courseId":1}
+  ✔ a racing pair of success callbacks fulfils only once (1717.564ms)
+[INFO] payments.event.failed {"paymentId":19,"providerTxnId":"7000005"}
+  ✔ failure callback marks FAILED and grants nothing (matrix 10) (2100.0745ms)
+[INFO] payments.event.failed {"paymentId":20,"providerTxnId":"7000006"}
+[INFO] payments.event.completed {"paymentId":20,"userId":278,"courseId":1}
+  ✔ late success heals FAILED into COMPLETED, audited (D6) (2721.8592ms)
+[ERROR] payments.event.amount_mismatch {"paymentId":21,"expected":50000,"got":49900}
+  ✔ tampered amount (valid HMAC shape, wrong cents) is refused and logged (1785.45ms)
+  ✔ pending:true callback never fails the payment (G5) (1486.393ms)
+[INFO] payments.event.completed {"paymentId":23,"userId":278,"courseId":1}
+[INFO] payments.event.failure_ignored_terminal {"paymentId":23,"status":"COMPLETED"}
+  ✔ failure after COMPLETED can never downgrade (R3) (2795.9954ms)
+[WARN] payments.event.unmatched {"reference":"crs-ghost-abcdef01","providerTxnId":"7000012"}
+  ✔ unmatched reference is logged and ignored (D9) (699.1282ms)
+  ✔ status read enforces ownership (matrix 17) (1329.2837ms)
+✔ payments lifecycle (simulated provider callbacks) (24500.2535ms)

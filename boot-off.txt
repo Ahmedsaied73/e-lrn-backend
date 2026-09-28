@@ -1,0 +1,90 @@
+[WARN] SENTRY_DSN not set — backend error tracking disabled (no-op).
+Example app listening at http://localhost:3199 
+CORS enabled for configured origins
+[INFO] video.reconcile.job_started {"schedule":"every 10 minutes","staleThreshold":"30 minutes"}
+[INFO] ai.worker.started {"queue":"ai-grading","concurrency":2}
+[WARN] ai.worker.error {"error":"Connection is closed."}
+[WARN] ai.worker.error {"error":"Connection is closed."}
+Admin already exists: admin@elearning.com
+[ERROR] {"timestamp":"2026-09-19T10:30:48.633Z","method":"POST","path":"/payments/checkout","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":404,"durationMs":258}
+[ERROR] {"timestamp":"2026-09-19T10:30:49.206Z","method":"POST","path":"/webhooks/paymob","ip":"::ffff:127.0.0.1","userId":null,"requestId":null,"status":404,"durationMs":59}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}
+[WARN] video.reconcile.lock_release_failed {"error":"ERR max requests limit exceeded. Limit: 500000, Usage: 500003. See https://upstash.com/docs/redis/troubleshooting/max_requests_limit for details"}

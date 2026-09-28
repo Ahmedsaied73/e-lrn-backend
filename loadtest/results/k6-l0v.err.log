@@ -1,0 +1,2 @@
+time="2026-09-22T20:15:42+03:00" level=error msg="TypeError: Cannot read property 'toFixed' of undefined or null\n\tat shortSummary (file:///H:/e-learning-platform/loadtest/scenarios/browse-10k.js:40:63(55))\n\tat handleSummary (file:///H:/e-learning-platform/loadtest/scenarios/browse-10k.js:29:25(13))\n" hint="script exception" source=stacktrace
+time="2026-09-22T20:15:42+03:00" level=error msg="thresholds on metrics 'checks, http_req_duration, http_req_duration{kind:gate}, http_req_failed' have been crossed"

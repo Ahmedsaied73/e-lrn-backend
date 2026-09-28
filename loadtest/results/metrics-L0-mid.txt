@@ -1,0 +1,8 @@
+
+===== 2026-09-22T16:45:42.289Z =====
+--- /metrics --- FETCH FAILED: fetch failed
+
+===== 2026-09-22T16:45:42.289Z =====
+--- /metrics --- FETCH FAILED: fetch failed
+--- /readyz --- FETCH FAILED: fetch failed
+--- /readyz --- FETCH FAILED: fetch failed

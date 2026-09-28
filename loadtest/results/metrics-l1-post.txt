@@ -1,0 +1,24 @@
+
+===== 2026-09-22T19:18:18.568Z =====
+--- /metrics ---
+# TYPE http_requests_total counter
+http_requests_total{status="200"} 1066
+# TYPE http_errors_5xx_total counter
+http_errors_5xx_total 0
+# TYPE http_request_duration_ms histogram
+http_request_duration_ms_bucket{le="50"} 3
+http_request_duration_ms_bucket{le="100"} 8
+http_request_duration_ms_bucket{le="250"} 26
+http_request_duration_ms_bucket{le="500"} 147
+http_request_duration_ms_bucket{le="1000"} 401
+http_request_duration_ms_bucket{le="2500"} 945
+http_request_duration_ms_bucket{le="5000"} 1053
+http_request_duration_ms_bucket{le="10000"} 1064
+http_request_duration_ms_bucket{le="+Inf"} 1066
+http_request_duration_ms_sum 1514746
+http_request_duration_ms_count 1066
+# TYPE process_uptime_seconds gauge
+process_uptime_seconds 655
+
+--- /readyz ---
+{"status":"ok","db":"up","uptime":664,"ms":503}

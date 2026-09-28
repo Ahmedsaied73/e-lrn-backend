@@ -1,0 +1,21 @@
+SEED ERROR: PrismaClientKnownRequestError: 
+Invalid `prisma.course.delete()` invocation in
+H:\e-learning-platform\scripts\seedLoadTestCohort.js:150:31
+
+  147 }
+  148 const legacyCourse = await prisma.course.findUnique({ where: { slug: 'loadtest-quiz' } });
+  149 if (legacyCourse) {
+→ 150   await prisma.course.delete(
+Foreign key constraint violated: `Enrollment_courseId_fkey (index)`
+    at $n.handleRequestError (H:\e-learning-platform\node_modules\@prisma\client\runtime\library.js:121:7315)
+    at $n.handleAndLogRequestError (H:\e-learning-platform\node_modules\@prisma\client\runtime\library.js:121:6623)
+    at $n.request (H:\e-learning-platform\node_modules\@prisma\client\runtime\library.js:121:6307)
+    at async l (H:\e-learning-platform\node_modules\@prisma\client\runtime\library.js:130:9633)
+    at async H:\e-learning-platform\scripts\seedLoadTestCohort.js:150:5 {
+  code: 'P2003',
+  clientVersion: '5.22.0',
+  meta: {
+    modelName: 'Course',
+    field_name: 'Enrollment_courseId_fkey (index)'
+  }
+}
