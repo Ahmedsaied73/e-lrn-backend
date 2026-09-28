@@ -1020,7 +1020,7 @@ const deleteVideo = actionTool({
   },
 });
 
-// ─── Quizzes (P2b) ────────────────────────────────────────────────────────────
+// --- Quizzes (P2b) ---
 //
 // Quiz authoring is the one write whose payload is a whole SurveyJS document, so
 // the tool delegates validation to the SAME two service functions the HTTP
@@ -1194,7 +1194,7 @@ const deleteQuiz = actionTool({
   },
 });
 
-// ─── Deletes (P2b, shipped last by product decision) ──────────────────────────
+// --- Deletes (P2b, shipped last by product decision) ---
 //
 // These four are the only irreversible tools in the catalogue. They mirror their
 // HTTP controllers statement for statement, including the ORDER the controller

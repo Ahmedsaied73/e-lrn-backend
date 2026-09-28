@@ -14,21 +14,22 @@ record the bound surface's measured size per turn in the audit row.
  .env.example                        |  10 +-
  PROJECT_MAP.md                      |   4 +-
  src/services/agent/agentService.js  |  16 +-
- src/services/agent/graph.js         | 135 ++++++--------
- src/services/agent/tools/actions.js |  56 +-----
- src/services/agent/tools/index.js   | 340 ++----------------------------------
+ src/services/agent/graph.js         | 130 +++++--------
+ src/services/agent/tools/actions.js |  60 +-----
+ src/services/agent/tools/index.js   | 352 +++---------------------------------
  tests/agent-actions-crud.test.js    |   1 -
- tests/agent-graph.test.js           | 146 +++++++++-------
+ tests/agent-graph.test.js           | 146 ++++++++-------
  tests/agent-schema-tools.test.js    |  21 ++-
  tests/agent-tools-contract.test.js  | 184 ++++++-------------
- 10 files changed, 246 insertions(+), 667 deletions(-)
- D tests/agent-actions-intent.test.js
+ 10 files changed, plus the deleted tests/agent-actions-intent.test.js
 ```
+(The stat printed here is the measured combined `git diff --stat 0d7f85a`. The committed
+Phase 1 commit `6b079d8` shows its own stat; the correction commit below shows only its delta.)
 
 | Path | Reason |
 |---|---|
 | `src/services/agent/tools/index.js` | the shortlist + write-intent machinery deleted; exports trimmed; router import removed; the surface documented where the selection used to live |
-| `src/services/agent/graph.js` | both gate call sites replaced by "the catalogue"; `surfaceDefs`/`toolsForTurn`; `surfaceFor` replaces `selectFor`; `turnMetrics`; per-turn `modelCalls` counter; two now-unused helpers deleted |
+| `src/services/agent/graph.js` | both gate call sites replaced by "the catalogue"; `surfaceDefs`/`toolsForTurn`; the dead `selectFor` diagnostic removed; `turnMetrics`; per-turn `modelCalls` counter; two now-unused helpers deleted |
 | `src/services/agent/agentService.js` | captures `turnMetrics()` and puts `toolSurface` + `modelCalls` into the turn detail and the `AGENT_TURN` audit row (Q3) |
 | `src/services/agent/tools/actions.js` | `create_video` definition and its export entry deleted (Q6) |
 | `tests/agent-actions-intent.test.js` | **deleted** — its stated purpose was the write-intent gate (see §3) |
@@ -55,9 +56,11 @@ depending on the question) and the `selectFor` diagnostic. From `actions.js`: th
 tool and its export entry.
 
 **Added (source).** `graph.js`: `surfaceDefs()` (the single place the switch is applied),
-`toolsForTurn()` (memoized on the switch alone), `surfaceFor()` (replaces `selectFor`, takes no
-args), `turnMetrics()`, and a per-turn `modelCalls` counter. `agentService.js`: the `turnMetrics()`
-read plus two detail/audit fields. Nothing else — no new tool, no new endpoint, no new config.
+`toolsForTurn()` (memoized on the switch alone), `turnMetrics()`, and a per-turn `modelCalls`
+counter. No dead diagnostic was kept: the old `selectFor(question, historyTools)` is gone, not
+renamed — its two parameters had no referent once the surface stopped depending on the question.
+`agentService.js`: the `turnMetrics()` read plus two detail/audit fields. Nothing else — no new
+tool, no new endpoint, no new config.
 
 **Changed (behaviour).** The model-facing surface is now `listDefinitions()`
 (`AI_AGENT_ALLOW_MUTATIONS` is the only filter) instead of a per-question shortlist of 3–8 reads
@@ -144,9 +147,10 @@ READS  tools=31 chars=10208 tokens=2552
 turnMetrics (no model call yet) = {"modelCalls":0,"toolSurface":null}
 ```
 
-`surfaceFor()` is what `toolsForTurn` would bind under the current switch; the numbers are the same
-ones the audit row now stores (chars are the honest part; tokens are the repo's chars/4 rule of
-thumb).
+`surfaceDefs()` returns what `toolsForTurn` would bind under the current switch; the numbers below
+are the same ones the audit row stores (chars are the honest part; tokens are the repo's chars/4 rule
+of thumb). Measured after the deletion of the `surfaceFor` probe, by calling the same
+`listDefinitions()` + `approximateSchemaTokens()` the graph uses:
 
 ### 4.3 The Q3 measurement, verified end-to-end on a live turn
 
@@ -178,7 +182,7 @@ every edited file, and the BOM + CRLF of `src/services/agent/tools/index.js` wer
 | Criterion (handoff §4 Phase 1 + your GO answers) | Status | Proof |
 |---|---|---|
 | `tools/index.js`: `selectToolSet`, `hasWriteIntent` and their keyword tables removed | **MET** | §3; `git grep` for any of the 16 removed names returns nothing in `src`/`tests`/`scripts` |
-| Both `graph.js` call sites no longer gate on `hasWriteIntent` | **MET** | `graph.js` now has one `surfaceDefs()`: `includeActions ? listDefinitions() : listDefinitions().filter((d) => d.kind === KIND_READ)`; the `selectFor` site became `surfaceFor()` |
+| Both `graph.js` call sites no longer gate on `hasWriteIntent` | **MET** | `graph.js` now has one `surfaceDefs()`: `includeActions ? listDefinitions() : listDefinitions().filter((d) => d.kind === KIND_READ)`; the question-keyed `selectFor` diagnostic was deleted along with its dead parameters |
 | The phase's definition of done: "what can you do?" with mutations enabled surfaces the write capabilities, **asserted via a mocked LLM call capturing the bound tools** | **MET** | §4.1 — `binds the WHOLE catalogue — actions included — for a question with no write verb` asserts on `model.calls[0].toolNames` (scripted model), requires all 52 tools and `delete_user` |
 | Q3: bind everything every turn (no pre-emptive grouping) + per-turn measurement in the audit metadata (surface token size + model calls) | **MET** | §4.2/§4.3 — `toolSurface: {tools, chars, tokens}` and `modelCalls` in the live `AGENT_TURN` rows |
 | Q6: `create_video` deleted from the tool definition **and** the export list; counts updated wherever asserted | **MET** | §4.2 (`has create_video: false`, `tools=52`); `actions.js` export list; both test allowlists; `PROJECT_MAP.md` corrected |
@@ -188,29 +192,43 @@ every edited file, and the BOM + CRLF of `src/services/agent/tools/index.js` wer
 | Lint clean | **MET** | §4.4 — exit 0 |
 | `AI_AGENT_ALLOW_MUTATIONS="true"` set in the **staging** `.env` | **NOT MET (owner action)** | that is a Railway runtime variable, outside this repo. It is already `true` in the local `.env`, so no code depends on me setting it. **You must set `AI_AGENT_ALLOW_MUTATIONS=true` on staging yourself.** |
 
-## 6. Assumptions needing sign-off
+## 6. Assumptions — signed off (owner, this round)
 
-1. **`selectFor` → `surfaceFor` (a diagnostic seam, not an API).** `selectFor(question, historyTools)`
-   reported "which schemas the model would be shown for a given question". With the question no longer
-   an input, those parameters were dead, so I replaced it with `surfaceFor()` (no args) and updated the
-   two test call sites. No production caller exists (`git grep` confirms tests only).
+The five items I put to you, with your decisions. No code in this phase goes beyond them.
+
+1. **`selectFor` was deleted, not replaced.** As you signed off: `surfaceFor()` was my own new code
+   with zero callers, so it is gone rather than renamed (committed below, in the correction commit).
+   `turnMetrics()` — which *is* called by `agentService.js` and asserted by
+   `tests/agent-graph.test.js:253` — is the turn-measurement seam that stays.
 2. **The per-turn memo is now keyed on the switch alone** (`selection.key = 'surface|' + includeActions`).
-   Its purpose (bind one surface per turn instead of re-deriving per model call) is unchanged; the
-   question/history parts of the key were removed with the selection they keyed.
-3. **The `actions.js` section header I rewrote uses ASCII dashes**, where the deleted header used
-   box-drawing characters. Cosmetic only, in the one block I replaced.
-4. **`AI_AGENT_MAX_TOOL_CALLS=20` in the local `.env` is silently clamped to 10** by `env.js:273`
-   (pre-existing). I left your runtime config alone; noting it because it is the real per-turn ceiling
-   behind "up to 11 model calls with the full surface".
+   Kept, per your sign-off. Its purpose (bind one surface per turn instead of re-deriving per model
+   call) is unchanged; the question/history parts of the key were removed with the selection they keyed.
+3. **The `actions.js` section headers are ASCII, and the file is now internally consistent.** Signed
+   off with your instruction to standardise: the file has three `// --- Name (context) ---` banners
+   and no remaining box-drawing characters (was 2 of those). The other agent files were checked and
+   left alone: each uses exactly one banner style throughout, so none of them was mixed.
+4. **`AI_AGENT_MAX_TOOL_CALLS=20` in the local `.env` is silently clamped to 10** by `env.js:273`.
+   Kept, per your sign-off: the clamp stays, and the local `.env` value is your runtime config, which
+   I never commit.
 5. **The Phase-0 convention of pinning `AI_AGENT_MAX_TOOL_RESULT_ROWS=50`** for every run is still what
-   I used (it is what makes the suite green in this checkout).
+   I used (it is what makes the suite green in this checkout). Kept, per your sign-off.
 
 ## 7. Noticed, not touched
 
-- **`tools/index.js` had three double-encoded (mojibake) comment lines** (the router-import note and
-  two lines inside the Phase 4.5 rationale). They sat inside the block this phase deleted, so they are
-  gone, and a byte-level scan now finds **no mojibake in any file under `src/services/agent/`**. Nothing
-  else was re-encoded — the files' Arabic is intact and BOM/CRLF are preserved.
+- **`tools/index.js` had six double-encoded (mojibake) comment lines, now repaired.** A
+  byte-level census (exactly two corrupted 3-code-point sequences —
+  `[226, 8364, 8221] ×6` (em dash) and `[226, 8364, 166] ×1` (ellipsis) — in header/measure/
+  transport comments) proved nothing else in `src/`, `app.js` or `.env.example` was affected.
+  The repair was a deterministic 7-replacement byte mapping (committed below), verified by
+  re-running the census (0 remaining), `node --check`, `eslint src app.js` (exit 0) and the full
+  agent suite (246/246, 0 fail). BOM and CRLF are preserved. Nothing else was re-encoded —
+  the files' Arabic is intact. This repair is the only item in this report and commit that goes
+  beyond the five sign-offs above, and it is reported here on purpose: it touches seven comment
+  lines in a file this phase already owned.
+- **`actions.js` is now internally consistent in its banner style** (all three section headers use
+  `// --- Name (context) ---`; no box-drawing remains) since your sign-off asked for it. The other
+  agent module files were scanned and each uses exactly one banner style throughout, so they were
+  not touched.
 - **`PROJECT_MAP.md` line 42 is stale**: it says `AI_AGENT_CONVERSATION_RETENTION_DAYS` "is still
   resolved and clamped but read by nothing — no retention/pruning job exists yet", while
   `src/jobs/pruneAgentConversations.js` exists, is wired at `app.js:452-456` and runs daily at 03:17.

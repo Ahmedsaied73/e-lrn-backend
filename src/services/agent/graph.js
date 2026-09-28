@@ -295,13 +295,6 @@ function createAgentGraph({ resolveToolContext, checkpointer = sharedCheckpointe
     // what the agent is CAPABLE of (the approval UI, the audit trail).
     toolNames: defs.map((d) => d.name),
     hasMutatingTools: defs.some((d) => d.kind === 'action'),
-    // The per-turn surface, for tests and diagnostics. Phase 1 (v2): it no longer
-    // depends on the question, so it takes no arguments -- it reports what toolsForTurn
-    // would bind under the CURRENT configuration (armed or not).
-    surfaceFor: () => {
-      const defsNow = surfaceDefs();
-      return { names: defsNow.map((d) => d.name), ...approximateSchemaTokens(defsNow) };
-    },
     // Per-turn measurements for the AGENT_TURN audit row (Decision Q3): the size of the
     // model-facing surface the turn bound, and how many model calls it spent. toolSurface
     // is null when no model call ever happened (the deterministic tier answered).

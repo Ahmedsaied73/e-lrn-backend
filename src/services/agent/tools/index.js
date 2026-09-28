@@ -1,7 +1,7 @@
 ﻿'use strict';
 
 /**
- * tools/index.js â€” the agent tool registry (Phase 1).
+ * tools/index.js — the agent tool registry (Phase 1).
  *
  * Why a registry of plain definitions instead of exporting LangChain tools:
  *  - Phase 1 must not depend on any LLM SDK. The repo lazy-requires LangChain
@@ -10,7 +10,7 @@
  *  - Definitions carry metadata the graph needs and LangChain objects hide:
  *    kind (read/action), requiresApproval, audit spec, cache TTL.
  *  - Validation runs at LOAD time. A duplicate name, a missing Arabic
- *    description, or a mutation without an audit spec throws here â€” at boot â€”
+ *    description, or a mutation without an audit spec throws here — at boot —
  *    instead of surfacing as a wrong number in front of an admin.
  */
 
@@ -41,7 +41,7 @@ const readDefinitions = [
 ];
 
 // Action definitions are LOADED but only exposed when the mutation switch is on
-// (config.aiAgent.allowMutations, default false â€” see resolveAiAgent). The
+// (config.aiAgent.allowMutations, default false — see resolveAiAgent). The
 // approval gate inside execute() is a second, independent guard.
 const actionDefinitions = [...require('./actions')];
 
@@ -114,7 +114,7 @@ function getDefinition(name) {
 /**
  * Approximate the schema weight of a tool set, for the measurement recorded in
  * graph.js. `/4` is the usual chars-per-token rule of thumb and is only ever used
- * for a comment and a test bound â€” never for a decision.
+ * for a comment and a test bound — never for a decision.
  */
 function approximateSchemaTokens(defs) {
   const chars = defs.reduce((sum, def) => {
@@ -259,7 +259,7 @@ function stripUnsupportedSchemaKeys(schema) {
 
 /**
  * Convert definitions to LangChain tools. `resolveContext(args, def)` supplies the
- * per-invocation context (at minimum { approved, adminId } for actions) â€” the
+ * per-invocation context (at minimum { approved, adminId } for actions) — the
  * graph passes the approval it just received, which is exactly why the approval
  * gate cannot be bypassed by the model: it is not part of the tool's arguments.
  *
@@ -274,7 +274,7 @@ function toLangChainTools(defs = listDefinitions(), resolveContext = () => ({}))
     // happen somewhere less safe. A non-promise return is awaited harmlessly.
     //
     // Phase 4.5: the per-process micro-cache is installed on the MODEL-FACING copy
-    // only. A direct execute(def, â€¦) caller (the tool unit tests, the DB suites)
+    // only. A direct execute(def, …) caller (the tool unit tests, the DB suites)
     // keeps reaching the database, so an assertion about real query counts stays
     // meaningful instead of being satisfied by a cache nobody expected.
     const bound = def.kind === KIND_READ ? wrapReadDefinition(def) : def;
