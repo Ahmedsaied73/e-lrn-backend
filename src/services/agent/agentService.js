@@ -326,7 +326,8 @@ async function answerQuestion({
   // Running the turn with progress: the graph emits tool lifecycle events, but
   // the grounding check still runs on the final answer before anyone sees it —
   // no token is ever shown before it is validated.
-  const { graph } = graphFactory({ resolveToolContext });
+  const built = graphFactory({ resolveToolContext });
+  const { graph } = built;
   emit({ type: 'tier', tier: 'llm', declinedReason: deterministic.reason });
 
   let run;
@@ -390,12 +391,21 @@ async function answerQuestion({
     }
   }
 
+  // Per-turn measurement (Decision Q3): the weight of the model-facing tool surface this
+  // turn bound, and how many model calls it spent. Read from the graph the turn actually
+  // used, so the number describes THIS turn rather than a re-derivation of it. A graph
+  // double without turnMetrics (an older test seam) reports null instead of failing.
+  const turnMetrics =
+    typeof built.turnMetrics === 'function' ? built.turnMetrics() : { modelCalls: null, toolSurface: null };
+
   const detail = {
     provider: run.provider,
     toolCalls: toolCallSummary(run),
     stopReason: run.stopReason,
     approval: used.approvalId,
     approvalRequested,
+    modelCalls: turnMetrics.modelCalls,
+    toolSurface: turnMetrics.toolSurface,
     latencyMs: Date.now() - startedAt,
   };
 
@@ -424,6 +434,10 @@ async function answerQuestion({
         toolCalls: detail.toolCalls,
         declinedReason: deterministic.reason,
         grounded: true,
+        // Decision Q3: what binding the whole catalogue every turn actually cost, and how
+        // many model calls the turn spent. Read from the audit trail, never guessed.
+        toolSurface: detail.toolSurface,
+        modelCalls: detail.modelCalls,
       },
     }
   );

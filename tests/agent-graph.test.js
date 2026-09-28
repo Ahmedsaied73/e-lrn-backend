@@ -20,7 +20,7 @@ const assert = require('node:assert/strict');
 const { AIMessage, HumanMessage } = require('@langchain/core/messages');
 const config = require('../src/config/env');
 const prisma = require('../src/config/db');
-const { toolNames: allToolNames } = require('../src/services/agent/tools');
+const { readDefinitions, actionDefinitions, toolNames: allToolNames } = require('../src/services/agent/tools');
 const { createAgentGraph, finalAnswerText, toolCallSummary, countToolCalls } = require('../src/services/agent/graph');
 
 let threadCounter = 0;
@@ -188,82 +188,96 @@ test('the tool context resolver is told WHICH tool is asking, so authority can b
 });
 
 /**
- * Phase 4.5 — the tool SURFACE the model is shown.
+ * Phase 1 (v2 rebuild) — the tool SURFACE the model is shown.
  *
- * Binding all 28 read tools shipped ~7k tokens of schema per call against an 8k
- * tokens/minute free tier, so the agentic tier was structurally unable to answer
- * anything. The trim is what makes it work — and these tests exist because a silent
- * re-fattening would not fail anything else: the tier would just start 413ing again
- * in production while every other suite stayed green.
+ * The Phase 4.5 shortlist that used to live here is GONE (handoff 3.1 + Decision #15):
+ * the surface is the catalogue, and AI_AGENT_ALLOW_MUTATIONS is the only filter. The two
+ * tests below pin both directions of that switch; the per-turn measurement the audit row
+ * carries is asserted with them, because that number is what the revisit trigger reads.
  */
-test('the model is shown a SHORT tool surface, not the whole catalogue', async () => {
-  const model = scriptedModel([textAnswer('لا حاجة لأداة.')]);
-  const { graph, toolNames } = createAgentGraph({ resolveToolContext: ctx, invokeModel: model.invokeModel });
+const ACTION_NAMES = new Set(actionDefinitions.map((d) => d.name));
 
-  await graph.invoke(
-    { messages: [new HumanMessage('نظرة عامة')] },
-    { configurable: { thread_id: threadId('trim') } }
-  );
+/** Pins the mutation switch for one test: a developer .env must not decide what this proves. */
+function pinMutations(value) {
+  const original = config.aiAgent.allowMutations;
+  config.aiAgent.allowMutations = value;
+  return () => {
+    config.aiAgent.allowMutations = original;
+  };
+}
 
-  const bound = model.calls[0].toolNames;
-  assert.ok(
-    bound.length < toolNames.length,
-    `the surface was not trimmed at all: ${bound.length} of ${toolNames.length}`
-  );
-  assert.ok(bound.length <= 8, `the surface must stay small, got ${bound.length}: ${bound.join(', ')}`);
-  assert.ok(bound.includes('platform_overview'), 'the core tool must be on the surface');
-  assert.equal(model.calls[0].toolNames.join(','), bound.join(','), 'the surface must be stable within a turn');
+test('binds every read tool and no action while mutations are off', async () => {
+  const restore = pinMutations(false);
+  try {
+    const model = scriptedModel([textAnswer('لا حاجة لأداة.')]);
+    const { graph, toolNames } = createAgentGraph({ resolveToolContext: ctx, invokeModel: model.invokeModel });
+
+    await graph.invoke(
+      { messages: [new HumanMessage('نظرة عامة')] },
+      { configurable: { thread_id: threadId('surface-reads') } }
+    );
+
+    const bound = model.calls[0].toolNames;
+    assert.ok(bound.includes('platform_overview'), 'a read tool must be on the surface');
+    assert.deepEqual(
+      [...bound].sort(),
+      readDefinitions.map((d) => d.name).sort(),
+      'the read catalogue is bound WHOLE — the keyword shortlist is gone'
+    );
+    assert.equal(bound.some((n) => ACTION_NAMES.has(n)), false, 'no action while the switch is off');
+    assert.deepEqual([...toolNames].sort(), [...bound].sort(), 'the executable catalogue follows the same switch');
+  } finally {
+    restore();
+  }
 });
 
-test('a tool the question names is exposed even though it is not core', async () => {
-  const model = scriptedModel([
-    toolCall('payment_issues', { windowDays: 30 }, 'call_pay'),
-    textAnswer('لا توجد مشاكل دفع.'),
-  ]);
-  const { graph, selectFor } = createAgentGraph({ resolveToolContext: ctx, invokeModel: model.invokeModel });
+test('binds the WHOLE catalogue — actions included — for a question with no write verb', async () => {
+  // The definition of done for this phase: «إزيك؟» carries no imperative, and the Phase 4.5
+  // keyword heuristic would have hidden every action tool for exactly this message.
+  const restore = pinMutations(true);
+  try {
+    const model = scriptedModel([textAnswer('أهلاً!')]);
+    const { graph, turnMetrics } = createAgentGraph({ resolveToolContext: ctx, invokeModel: model.invokeModel });
 
-  const result = await graph.invoke(
-    { messages: [new HumanMessage('مشاكل الدفع')] },
-    { configurable: { thread_id: threadId('surface') } }
-  );
+    await graph.invoke(
+      { messages: [new HumanMessage('إزيك؟')] },
+      { configurable: { thread_id: threadId('surface-armed') } }
+    );
 
-  assert.ok(
-    model.calls[0].toolNames.includes('payment_issues'),
-    `the model must be shown the tool the question is about, got: ${model.calls[0].toolNames.join(', ')}`
-  );
-  assert.deepEqual(toolCallSummary(result), ['payment_issues'], 'and it must actually run');
-  // WHY it was on the surface matters as much as that it was: 'router' (the fast
-  // path would have chosen it) or a lexical score both mean "chosen for THIS
-  // question", whereas 'core' would mean it was only there by accident.
-  assert.notEqual(
-    selectFor('مشاكل الدفع').reasons.payment_issues,
-    'core',
-    'payment_issues must be selected because the question is about it'
-  );
+    const bound = model.calls[0].toolNames;
+    assert.equal(bound.length, readDefinitions.length + actionDefinitions.length, 'reads + actions, every turn');
+    assert.ok(bound.includes('delete_user'), 'even a destructive action is on the surface — the confirm gate is what stops it');
+    assert.ok(bound.every((n) => allToolNames().includes(n)), 'the model is never shown a tool outside the catalogue');
+
+    // The per-turn measurement the AGENT_TURN audit row carries (Decision Q3).
+    const metrics = turnMetrics();
+    assert.equal(metrics.modelCalls, 1, 'one text answer is one model call');
+    assert.equal(metrics.toolSurface.tools, bound.length, 'the measured surface is the bound surface');
+    assert.ok(metrics.toolSurface.chars > 0 && metrics.toolSurface.tokens > 0, 'the surface has a measured weight');
+  } finally {
+    restore();
+  }
 });
 
-test('trimming the surface does not shrink the execution authority', async () => {
-  // The shortlist is a DISPLAY decision; the ToolNode still holds the full
-  // catalogue, so the guards (row caps, redaction, the approval gate) apply to
-  // every tool exactly as before. If this ever fails, the surface has started
-  // deciding what is executable — which would make a prompt an authority.
-  const model = scriptedModel([
-    toolCall('admin_audit_recent', { windowDays: 7 }, 'call_audit'),
-    textAnswer('تم.'),
-  ]);
-  const { graph, selectFor } = createAgentGraph({ resolveToolContext: ctx, invokeModel: model.invokeModel });
+test('the mutation switch, not the display surface, decides what the ToolNode can execute', async () => {
+  // Replaces "trimming the surface does not shrink the execution authority": the trim is
+  // gone, so the invariant is stated where it still bites — with the switch OFF an action is
+  // neither offered to the model nor present in the executable catalogue.
+  const restore = pinMutations(false);
+  try {
+    const model = scriptedModel([textAnswer('لا.')]);
+    const { graph, tools, toolNames } = createAgentGraph({ resolveToolContext: ctx, invokeModel: model.invokeModel });
 
-  const exposed = selectFor('مرحبا').names;
-  assert.equal(
-    exposed.includes('admin_audit_recent'),
-    false,
-    'precondition: this tool is NOT on the surface for an unrelated question'
-  );
+    await graph.invoke(
+      { messages: [new HumanMessage('مرحبا')] },
+      { configurable: { thread_id: threadId('authority') } }
+    );
 
-  const result = await graph.invoke(
-    { messages: [new HumanMessage('مرحبا')] },
-    { configurable: { thread_id: threadId('authority') } }
-  );
-  assert.deepEqual(toolCallSummary(result), ['admin_audit_recent'], 'the tool node still executes it');
+    assert.equal(toolNames.some((n) => ACTION_NAMES.has(n)), false, 'the switch keeps actions out of the catalogue');
+    assert.equal(tools.some((t) => ACTION_NAMES.has(t.name)), false, 'and out of the bound ToolNode');
+    assert.ok(model.calls[0].toolNames.every((n) => toolNames.includes(n)), 'never offer what cannot run');
+  } finally {
+    restore();
+  }
 });
 

@@ -27,7 +27,8 @@ const { Annotation, StateGraph, START, END, MemorySaver } = require('@langchain/
 const { ToolNode } = require('@langchain/langgraph/prebuilt');
 const { SystemMessage, ToolMessage } = require('@langchain/core/messages');
 const config = require('../../config/env');
-const { listDefinitions, selectToolSet, toLangChainTools, hasWriteIntent } = require('./tools');
+const { listDefinitions, toLangChainTools, approximateSchemaTokens } = require('./tools');
+const { KIND_READ } = require('./tools/_kit');
 const { invokeWithFailover, safeMessage } = require('./llmProvider');
 
 const SYSTEM_PROMPT = `أنت مساعد إداري لمنصة تعليمية إلكترونية. مهمتك إدارة المنصة بالكامل: أن تجيب عن أسئلة المشرفين بالاعتماد على الأدوات المتاحة، وأن تنفّذ الإجراءات التي يطلبها المشرف عليها.
@@ -74,39 +75,6 @@ const AgentState = Annotation.Root({
 function countToolCalls(message) {
   const calls = message && message.tool_calls;
   return Array.isArray(calls) ? calls.length : 0;
-}
-
-/**
- * The newest human message in this state — the question the shortlist is built from.
- * Phase 4.5: read per turn, not once per graph, because a conversation's surface has
- * to follow the question that is actually being asked (see toolsForTurn).
- */
-function latestQuestionText(state) {
-  const messages = (state && state.messages) || [];
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i];
-    const role = message && (message.getType ? message.getType() : message.role);
-    if (role === 'human' || role === 'user') {
-      return typeof message.content === 'string' ? message.content : '';
-    }
-  }
-  return '';
-}
-
-/**
- * Tool names already used in this conversation, so a follow-up turn keeps them
- * available: "وماذا عن الدفع؟" matches almost nothing on its own, and dropping the
- * tool the previous turn used would break the thread.
- */
-function historyToolNames(state) {
-  const messages = (state && state.messages) || [];
-  const names = new Set();
-  for (const message of messages) {
-    for (const call of (message && message.tool_calls) || []) {
-      if (call && call.name) names.add(call.name);
-    }
-  }
-  return [...names];
 }
 
 // One checkpointer for the process, keyed by conversation id. It is shared so a
@@ -206,44 +174,46 @@ function createAgentGraph({ resolveToolContext, checkpointer = sharedCheckpointe
   const maxToolCalls = config.aiAgent.maxToolCalls;
   const timeoutMs = config.aiAgent.turnTimeoutMs;
 
-  // ── Phase 4.5: the per-turn tool SURFACE (what the model is shown) ──────────
+  // --- Phase 1 (v2 rebuild): the per-turn tool SURFACE (what the model is shown) ---
   //
-  // Measured, not guessed: binding all 28 read tools shipped ~25.8k characters
-  // (~7,000 tokens) of schema on every model call, while this deployment's Groq
-  // free tier allows 8,000 tokens per MINUTE. The tier was therefore structurally
-  // dead — no model id fixes a 2-call turn that needs 14k of schema — and the fix
-  // is to stop sending the whole catalogue. tools/index.js documents the selection;
-  // it is deterministic, costs no I/O, and is recomputed from the question and the
-  // tools this conversation already used.
+  // The Phase 4.5 per-question shortlist is GONE (handoff 3.1 + Decision #15). It was a
+  // size fix for an 8k-tokens/minute free tier, and it cost more than it bought: every
+  // mutating tool was hidden behind an Arabic imperative heuristic, and a false negative
+  // in that heuristic is indistinguishable from the agent simply having no such tool --
+  // the exact bug this rebuild exists to fix.
   //
-  // Selection is memoized per (question + history) so a multi-step turn binds the
-  // same shortlist on every model call instead of re-deriving it per step.
+  // The surface is now the catalogue: every read tool on every turn, plus the action
+  // tools iff AI_AGENT_ALLOW_MUTATIONS is true. That switch is a global WRITE
+  // KILL-SWITCH, not a per-message filter -- it is the only thing that hides an action
+  // from the model, and env.js keeps it false whenever the agent itself is off.
+  //
+  // The memo stays, now keyed on the switch alone: a turn binds ONE surface, and the
+  // measurement it records is per turn rather than per model call.
   let selection = null;
-  function toolsForTurn(state) {
-    const question = latestQuestionText(state);
-    const history = historyToolNames(state);
-    // P3: the mutation switch is now NECESSARY but not sufficient. Binding the 12 action
-    // tools costs ~1,333-1,461 tokens of model-facing schema per call (chars/4) against
-    // ~508-636 for the read surface — a ~2.5-3x bill on EVERY model call of EVERY turn,
-    // including "كم عدد الطلاب؟", which the reads answer on their own. So the actions are
-    // bound only for a turn that LOOKS like a write (hasWriteIntent: an imperative, a
-    // verbal noun, an enabling phrase in front of one, or a conversation that already
-    // called an action). Intent is a pure function of question + history, so the memo key
-    // below already covers it; the flag is repeated in the key anyway so a later change to
-    // the gate can never serve a stale surface inside one turn.
-    const includeActions = config.aiAgent.allowMutations && hasWriteIntent(question, history);
-    const key = `${question}|${history.join(',')}|${config.aiAgent.allowMutations}|${includeActions}`;
+  /** Model calls spent by THIS turn (the graph is built per turn), for the audit row. */
+  let modelCalls = 0;
+
+  /** The definitions the model may be shown right now: reads always, actions if armed. */
+  function surfaceDefs() {
+    const includeActions = Boolean(config.aiAgent.allowMutations);
+    return includeActions ? listDefinitions() : listDefinitions().filter((d) => d.kind === KIND_READ);
+  }
+
+  function toolsForTurn() {
+    const includeActions = Boolean(config.aiAgent.allowMutations);
+    const key = 'surface|' + includeActions;
     if (selection && selection.key === key) return selection.tools;
-    // includeActions is the flag that decides whether the MODEL is shown the
-    // mutating tools at all. It is not implied by the ToolNode's catalogue: that
-    // node is the execution authority and is deliberately kept complete, so a
-    // conversation can still reach a tool whose schema dropped off this turn's
-    // shortlist. Without passing it here the action surface was hard-wired
-    // read-only and AI_AGENT_ALLOW_MUTATIONS could never actually arm the model —
-    // the tools existed, but no schema ever reached the prompt.
-    const chosen = selectToolSet({ question, historyTools: history, includeActions });
-    const bound = toLangChainTools(chosen.defs, resolver);
-    selection = { key, tools: bound, names: chosen.defs.map((d) => d.name), reasons: chosen.reasons };
+    const chosenDefs = surfaceDefs();
+    const bound = toLangChainTools(chosenDefs, resolver);
+    selection = {
+      key,
+      tools: bound,
+      names: chosenDefs.map((d) => d.name),
+      // The measured weight of the surface the model is shown this turn: written into
+      // the AGENT_TURN audit row, so an over-large surface is a number an operator can
+      // read instead of an opinion (Decision Q3).
+      surface: approximateSchemaTokens(chosenDefs),
+    };
     return bound;
   }
 
@@ -269,7 +239,9 @@ function createAgentGraph({ resolveToolContext, checkpointer = sharedCheckpointe
     // The model is shown the COMPACTED history; the state keeps every payload, so
     // grounding validation and approval detection are unaffected by this trim.
     const messages = [new SystemMessage(SYSTEM_PROMPT), ...compactToolPayloads(state.messages)];
-    const { result, provider } = await callModel(messages, toolsForTurn(state));
+    // Counted for the turn audit row: how many model calls this turn actually cost.
+    modelCalls += 1;
+    const { result, provider } = await callModel(messages, toolsForTurn());
     return { messages: [result], toolCalls: countToolCalls(result), provider };
   }
 
@@ -323,19 +295,20 @@ function createAgentGraph({ resolveToolContext, checkpointer = sharedCheckpointe
     // what the agent is CAPABLE of (the approval UI, the audit trail).
     toolNames: defs.map((d) => d.name),
     hasMutatingTools: defs.some((d) => d.kind === 'action'),
-    // The per-turn surface, for tests and diagnostics: which schemas the model would
-    // be shown for a given question, and why each one was chosen.
-    selectFor: (question, historyTools = []) => {
-      // Mirrors toolsForTurn's gate (mutations armed AND write intent) so this diagnostic
-      // keeps its stated contract — "which schemas the model would be shown" — instead of
-      // reporting a surface no turn would ever see.
-      const chosen = selectToolSet({
-        question,
-        historyTools,
-        includeActions: config.aiAgent.allowMutations && hasWriteIntent(question, historyTools),
-      });
-      return { names: chosen.defs.map((d) => d.name), reasons: Object.fromEntries(chosen.reasons) };
+    // The per-turn surface, for tests and diagnostics. Phase 1 (v2): it no longer
+    // depends on the question, so it takes no arguments -- it reports what toolsForTurn
+    // would bind under the CURRENT configuration (armed or not).
+    surfaceFor: () => {
+      const defsNow = surfaceDefs();
+      return { names: defsNow.map((d) => d.name), ...approximateSchemaTokens(defsNow) };
     },
+    // Per-turn measurements for the AGENT_TURN audit row (Decision Q3): the size of the
+    // model-facing surface the turn bound, and how many model calls it spent. toolSurface
+    // is null when no model call ever happened (the deterministic tier answered).
+    turnMetrics: () => ({
+      modelCalls,
+      toolSurface: selection ? { tools: selection.names.length, ...selection.surface } : null,
+    }),
   };
 }
 

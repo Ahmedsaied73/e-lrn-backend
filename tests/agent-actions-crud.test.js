@@ -36,7 +36,6 @@ const CRUD_TOOLS = [
   { name: 'update_student', audit: 'USER_UPDATE', target: 'user' },
   { name: 'create_course', audit: 'COURSE_CREATE', target: 'course' },
   { name: 'update_course', audit: 'COURSE_UPDATE', target: 'course' },
-  { name: 'create_video', audit: 'VIDEO_CREATE', target: 'video' },
   { name: 'upsert_quiz', audit: 'QUIZ_UPSERT', target: 'quiz' },
   { name: 'delete_video', audit: 'VIDEO_DELETE', target: 'video', irreversible: true },
   { name: 'delete_quiz', audit: 'QUIZ_DELETE', target: 'quiz', irreversible: true },

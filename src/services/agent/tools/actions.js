@@ -973,56 +973,13 @@ const updateCourse = actionTool({
   },
 });
 
-// ─── Videos (P2b) ─────────────────────────────────────────────────────────────
+// --- Videos (P2b) ---
 //
-// create_video REUSES bunnyVideoService.createVideo instead of re-implementing it:
-// that function owns the ordering (the Bunny object is created first because its
-// GUID is needed for the local row), the compensating remote delete when the local
-// write fails, and the next `position` under the per-course unique constraint.
-// Restating that here would be a second, subtly different copy of a stateful
-// procedure — and the differences would only show up in production.
-const createVideo = actionTool({
-  name: 'create_video',
-  description:
-    'إنشاء فيديو جديد داخل دورة (يُنشأ على Bunny Stream ويُضاف في نهاية ترتيب فيديوهات الدورة بحالة PENDING). يُستخدم عند طلب «أضف فيديو للدورة». لا ينفّذ إلا بعد موافقة المشرف، ويعيد معرّف الفيديو (slug) وترتيبه وحالته.',
-  schema: z.object({
-    courseSlug: slugArg('الدورة'),
-    title: z.string().min(3).max(200).describe('عنوان الفيديو'),
-  }),
-  audit: { action: 'VIDEO_CREATE', targetType: 'video' },
-  run: async (args, ctx) => {
-    const bunnyVideoService = require('../../bunnyVideoService');
-    try {
-      const video = await bunnyVideoService.createVideo({
-        courseSlug: args.courseSlug,
-        title: args.title.trim(),
-        // Always the approving admin, exactly as the HTTP controller takes it from
-        // the JWT and never from the request body.
-        requestedByUserId: ctx.adminId,
-      });
-      return {
-        ok: true,
-        targetId: video.id,
-        video: {
-          slug: video.slug,
-          title: video.title,
-          position: video.position,
-          status: video.status,
-        },
-        note:
-          'الفيديو أُنشئ بحالة PENDING — يبقى رفع ملف الفيديو من لوحة التحكم لبدء المعالجة.',
-      };
-    } catch (err) {
-      // The service reports its expected outcomes as AppError with a code. Each is
-      // a fact the model can act on, so none of them may surface as a throw.
-      const code = err && err.code;
-      if (code === 'COURSE_NOT_FOUND') return { ok: false, reason: 'COURSE_NOT_FOUND' };
-      if (code === 'BUNNY_API_ERROR') return { ok: false, reason: 'BUNNY_UNAVAILABLE' };
-      throw err;
-    }
-  },
-});
-
+// NOTE (v2 rebuild, Decision #18): the create_video tool was REMOVED from this catalogue.
+// Creating a video is a two-step flow -- create the Bunny object, then upload the binary
+// through POST /videos/:videoId/upload -- and video creation stays out of chat. The HTTP
+// route and its VIDEO_CREATE audit action are untouched; only the chat-callable tool is
+// gone. delete_video, reorder_course_videos and mark_video_failed remain.
 const deleteVideo = actionTool({
   name: 'delete_video',
   description:
@@ -1427,7 +1384,6 @@ module.exports = [
   updateStudent,
   createCourse,
   updateCourse,
-  createVideo,
   deleteVideo,
   upsertQuiz,
   deleteQuiz,
