@@ -67,6 +67,13 @@ const WRITE_QUESTIONS = [
   'فعّل اشتراك الطالب',
   'حدّث بيانات الطالب',
   'أضف طالباً إلى الدورة',
+  // Egyptian-dialect / conjugated forms (production bug: «تقدر تضيف او تمسح
+  // طالب؟» stayed read-only, so the model could never reach create/delete).
+  'تقدر تضيف او تمسح طالب؟',
+  'امسح الطالب',
+  'ضيف طالب جديد',
+  'عدل بيانات طالب',
+  'غير سعر الكورس',
 ];
 
 /**
