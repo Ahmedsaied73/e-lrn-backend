@@ -287,6 +287,11 @@ function resolveAiAgent() {
     // client gives up. Clamp bounds are unchanged (5s floor / 120s ceiling).
     turnTimeoutMs: clampAgentInt(process.env.AI_AGENT_TURN_TIMEOUT_MS, 25000, 5000, 120000),
     approvalTtlMs: clampAgentInt(process.env.AI_AGENT_APPROVAL_TTL_MS, 5 * 60 * 1000, 30 * 1000, 30 * 60 * 1000),
+    // Phase 3 (handoff 3.3): lifetime of a preview-then-confirm token for the
+    // destructive tools (deletes, broadcast). The token is an AgentApproval row;
+    // the ceiling is approvals.js MAX_TTL_MS (30 min) — requestApproval rejects
+    // anything larger, so the clamp must never exceed it.
+    confirmationTtlMinutes: clampAgentInt(process.env.AI_AGENT_CONFIRMATION_TTL_MINUTES, 15, 1, 30),
     dailyTurnBudget: clampAgentInt(process.env.AI_AGENT_DAILY_TURN_BUDGET, 500, 1, 100000),
     conversationRetentionDays: clampAgentInt(process.env.AI_AGENT_CONVERSATION_RETENTION_DAYS, 30, 7, 3650),
   };

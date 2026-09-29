@@ -97,16 +97,19 @@ function collectToolPayloads(result) {
 /**
  * Build the per-tool context resolver for one turn.
  *
- * `approved` is granted only for a tool call matching a consumed approval's tool
- * name AND canonical arguments hash. Everything else is refused downstream by
- * tools/_kit.js, so an unapproved action cannot run even if the model insists.
+ * Phase 3 (Decision #1) left this as a LEGACY shim: the tool layer no longer
+ * reads an `approved` flag at all — plain actions execute on call (attributed to
+ * `adminId`) and destructive tools gate on a confirmationToken their own preview
+ * issued. An explicit `approvalId` (the older REST/socket decision flow) is still
+ * CONSUMED here when it matches the tool call exactly, so a queued decision is
+ * never silently left spendable, but it grants nothing by itself anymore.
  */
 function createApprovalResolver({ prisma, adminId, conversationId, approval }) {
   const used = { approvalId: null, consumedAt: null };
 
   async function resolveToolContext(args, def) {
     const base = { prisma, adminId, conversationId };
-    if (!approval || !def || def.kind !== 'action') return base;
+    if (!approval || !def || (def.kind !== 'action' && def.kind !== 'confirm')) return base;
 
     const matchesTool = approval.toolName === def.name;
     const matchesArgs = approval.argsHash === canonicalArgsHash(def.name, args);
@@ -167,7 +170,11 @@ async function runAgentTurn(graph, question, conversationId, emit) {
             emit({
               type: 'tool_result',
               name: message.name || null,
-              ok: /error|invalid|approval_required|fail/i.test(String(message.content || '')) === false,
+              // A preview awaiting confirmation is NOT a failure; an error, a
+              // typed refusal, or a confirmation-gate miss IS shown as not-ok.
+              ok: /error|invalid|approval_required|confirmation_(not_found|mismatch|expired)|fail/i.test(
+                String(message.content || ''),
+              ) === false,
             });
           }
         }

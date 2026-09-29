@@ -8,14 +8,14 @@
  *    everywhere (see src/services/aiGrader/provider.js) and this keeps that
  *    property: the SDK is only touched inside toLangChainTools().
  *  - Definitions carry metadata the graph needs and LangChain objects hide:
- *    kind (read/action), requiresApproval, audit spec, cache TTL.
+ *    kind (read/action/confirm), audit spec, cache TTL, preview function.
  *  - Validation runs at LOAD time. A duplicate name, a missing Arabic
  *    description, or a mutation without an audit spec throws here — at boot —
  *    instead of surfacing as a wrong number in front of an admin.
  */
 
 const config = require('../../../config/env');
-const { KIND_READ, KIND_ACTION, execute } = require('./_kit');
+const { KIND_READ, KIND_ACTION, KIND_CONFIRM, execute } = require('./_kit');
 
 // Phase 1 (v2 rebuild): the router import went with the shortlist it fed. Nothing in
 // this file derives the tool surface from INTENTS/route() any more -- see the surface
@@ -41,8 +41,10 @@ const readDefinitions = [
 ];
 
 // Action definitions are LOADED but only exposed when the mutation switch is on
-// (config.aiAgent.allowMutations, default false — see resolveAiAgent). The
-// approval gate inside execute() is a second, independent guard.
+// (config.aiAgent.allowMutations, default false — see resolveAiAgent). Since the
+// Phase 3 rebuild the second guard is different per kind: plain actions must be
+// attributable to the admin, and confirm tools cannot mutate without a token
+// their own preview issued (both enforced inside execute()).
 const actionDefinitions = [...require('./actions')];
 
 const NAME_RE = /^[a-z][a-z0-9_]{2,63}$/;
@@ -67,11 +69,23 @@ function validate(defs, seen) {
     if (typeof def.run !== 'function') throw new Error(`[agent/tools] ${where}: run must be a function`);
 
     if (def.kind === KIND_ACTION) {
-      if (def.requiresApproval !== true) throw new Error(`[agent/tools] ${where}: actions require approval`);
+      // Phase 3 (Decision #1): actions execute on call. Asserting requiresApproval
+      // is FALSE is the structural pin — a tool claiming a human approval gate
+      // could only mean the removed flag is sneaking back in.
+      if (def.requiresApproval !== false) throw new Error(`[agent/tools] ${where}: actions execute immediately — requiresApproval must be false`);
       if (!def.audit || typeof def.audit.action !== 'string') {
         throw new Error(`[agent/tools] ${where}: actions must declare an audit action`);
       }
       if (def.cacheTtlSeconds !== 0) throw new Error(`[agent/tools] ${where}: actions must never be cached`);
+    } else if (def.kind === KIND_CONFIRM) {
+      // Two-step tools (handoff 3.3): the preview is as mandatory as the audit —
+      // a confirm tool you cannot preview is a delete you must take on faith.
+      if (def.requiresApproval !== false) throw new Error(`[agent/tools] ${where}: confirm tools never use the approval flag`);
+      if (typeof def.preview !== 'function') throw new Error(`[agent/tools] ${where}: confirm tools must declare a read-only preview`);
+      if (!def.audit || typeof def.audit.action !== 'string') {
+        throw new Error(`[agent/tools] ${where}: confirm tools must declare an audit action`);
+      }
+      if (def.cacheTtlSeconds !== 0) throw new Error(`[agent/tools] ${where}: confirm tools must never be cached`);
     } else if (def.kind === KIND_READ) {
       if (!Number.isSafeInteger(def.cacheTtlSeconds) || def.cacheTtlSeconds < 0) {
         throw new Error(`[agent/tools] ${where}: cacheTtlSeconds must be a non-negative integer`);
@@ -259,12 +273,12 @@ function stripUnsupportedSchemaKeys(schema) {
 
 /**
  * Convert definitions to LangChain tools. `resolveContext(args, def)` supplies the
- * per-invocation context (at minimum { approved, adminId } for actions) — the
- * graph passes the approval it just received, which is exactly why the approval
- * gate cannot be bypassed by the model: it is not part of the tool's arguments.
+ * per-invocation context (at minimum { adminId } for mutations) — the graph
+ * resolves the calling admin SERVER-SIDE, which is exactly why the authority to
+ * mutate cannot be bypassed by the model: it is not part of the tool's arguments.
  *
  * `def` is passed as the second argument so a resolver can bind a decision to a
- * SPECIFIC tool (an approval for one action must not authorise another).
+ * SPECIFIC tool (a confirmation token for one action must not authorise another).
  */
 function toLangChainTools(defs = listDefinitions(), resolveContext = () => ({})) {
   const { tool } = require('@langchain/core/tools');

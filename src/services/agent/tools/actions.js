@@ -21,7 +21,7 @@
 const { z } = require('zod');
 const bcrypt = require('bcrypt');
 const cache = require('../../../integrations/redis/cache');
-const { actionTool } = require('./_kit');
+const { actionTool, confirmableActionTool } = require('./_kit');
 const { isValidSlug, randomBase36Slug } = require('../../../utils/slugs');
 
 const GRADE_VALUES = ['FIRST_SECONDARY', 'SECOND_SECONDARY', 'THIRD_SECONDARY'];
@@ -88,7 +88,7 @@ async function invalidateEnrollmentCaches(userId, courseId) {
 const enrollStudent = actionTool({
   name: 'enroll_student',
   description:
-    'تسجيل طالب في دورة بصلاحية إدارية (بدون دفع). يُستخدم عند طلب «سجّل الطالب في الدورة». لا ينفّذ إلا بعد موافقة المشرف، ويعيد حالة التسجيل بعد التنفيذ.',
+    'تسجيل طالب في دورة بصلاحية إدارية (بدون دفع). يُستخدم عند طلب «سجّل الطالب في الدورة». ينفّذ فوراً عند استدعاء الأداة، ويعيد حالة التسجيل بعد التنفيذ.',
   schema: z.object({ userSlug: slugArg('الطالب'), courseSlug: slugArg('الدورة') }),
   audit: { action: 'ENROLL_CREATE', targetType: 'enrollment' },
   run: async (args, ctx) => {
@@ -150,7 +150,7 @@ const enrollStudent = actionTool({
 const unenrollStudent = actionTool({
   name: 'unenroll_student',
   description:
-    'إلغاء تسجيل طالب من دورة (حذف سجل الاشتراك) بصلاحية إدارية. يُستخدم عند طلب «الغِ تسجيل الطالب» أو «اشِل الطالب من الدورة». لا ينفّذ إلا بعد موافقة المشرف.',
+    'إلغاء تسجيل طالب من دورة (حذف سجل الاشتراك) بصلاحية إدارية. يُستخدم عند طلب «الغِ تسجيل الطالب» أو «اشِل الطالب من الدورة». ينفّذ فوراً عند استدعاء الأداة بالمعرّفات الدقيقة.',
   schema: z.object({ userSlug: slugArg('الطالب'), courseSlug: slugArg('الدورة') }),
   audit: { action: 'ENROLL_DELETE', targetType: 'enrollment' },
   run: async (args, ctx) => {
@@ -197,7 +197,7 @@ const unenrollStudent = actionTool({
 const markEnrollmentPaid = actionTool({
   name: 'mark_enrollment_paid',
   description:
-    'تحويل اشتراك طالب إلى «مدفوع» يدوياً مع تحديد مدة الصلاحية بالأيام (افتراضياً 365 يوماً). يُستخدم عند طلب «خلّي اشتراك الطالب مدفوع». لا ينشئ سجل دفع مالي ولا ينفّذ إلا بعد موافقة المشرف.',
+    'تحويل اشتراك طالب إلى «مدفوع» يدوياً مع تحديد مدة الصلاحية بالأيام (افتراضياً 365 يوماً). يُستخدم عند طلب «خلّي اشتراك الطالب مدفوع». لا ينشئ سجل دفع مالي وينفّذ فوراً عند استدعاء الأداة بالمعرّفات الدقيقة.',
   schema: z.object({
     userSlug: slugArg('الطالب'),
     courseSlug: slugArg('الدورة'),
@@ -266,7 +266,7 @@ const markEnrollmentPaid = actionTool({
 const grantGateExemption = actionTool({
   name: 'grant_gate_exemption',
   description:
-    'منح استثناء من بوابة الاختبار المتسلسل: يسمح لطالب بتخطي شرط النجاح في اختبار فيديو محدد. يُستخدم عند طلب «اعمل استثناء للطالب من الاختبار» أو «عدّيه من الفيديو». لا ينفّذ إلا بعد موافقة المشرف.',
+    'منح استثناء من بوابة الاختبار المتسلسل: يسمح لطالب بتخطي شرط النجاح في اختبار فيديو محدد. يُستخدم عند طلب «اعمل استثناء للطالب من الاختبار» أو «عدّيه من الفيديو». ينفّذ فوراً عند استدعاء الأداة بالمعرّفات الدقيقة.',
   schema: z.object({
     userSlug: slugArg('الطالب'),
     videoSlug: slugArg('الفيديو'),
@@ -322,7 +322,7 @@ const grantGateExemption = actionTool({
 const revokeGateExemption = actionTool({
   name: 'revoke_gate_exemption',
   description:
-    'إلغاء استثناء بوابة اختبار سابق (برقم الاستثناء أو بمعرّفي الطالب والفيديو). يُستخدم عند طلب «الغِ الاستثناء». لا ينفّذ إلا بعد موافقة المشرف.',
+    'إلغاء استثناء بوابة اختبار سابق (برقم الاستثناء أو بمعرّفي الطالب والفيديو). يُستخدم عند طلب «الغِ الاستثناء». ينفّذ فوراً عند استدعاء الأداة بالمعرّفات الدقيقة.',
   schema: z
     .object({
       exemptionId: z.number().int().positive().optional().describe('رقم الاستثناء'),
@@ -377,7 +377,7 @@ const revokeGateExemption = actionTool({
 const resetQuizAttempt = actionTool({
   name: 'reset_quiz_attempt',
   description:
-    'حذف محاولة اختبار لطالب لإتاحة إعادة المحاولة (تُحذف الإجابات والنتيجة معها). يُستخدم عند طلب «صفّر محاولة الطالب» أو «خلّيه يعيد الاختبار». لا ينفّذ إلا بعد موافقة المشرف.',
+    'حذف محاولة اختبار لطالب لإتاحة إعادة المحاولة (تُحذف الإجابات والنتيجة معها). يُستخدم عند طلب «صفّر محاولة الطالب» أو «خلّيه يعيد الاختبار». ينفّذ فوراً عند استدعاء الأداة بالمعرّفات الدقيقة.',
   schema: z.object({ attemptId: z.number().int().positive().describe('رقم المحاولة') }),
   audit: { action: 'QUIZ_ATTEMPT_RESET', targetType: 'attempt' },
   run: async (args, ctx) => {
@@ -421,7 +421,7 @@ const resetQuizAttempt = actionTool({
 const gradeEssay = actionTool({
   name: 'grade_essay',
   description:
-    'تصحيح الأسئلة المقالية في محاولة اختبار: يحدّد درجة كل سؤال وملاحظة التصحيح ثم يعيد حساب النتيجة الإجمالية. يُستخدم عند طلب «صحّح مقالي الطالب». لا ينفّذ إلا بعد موافقة المشرف.',
+    'تصحيح الأسئلة المقالية في محاولة اختبار: يحدّد درجة كل سؤال وملاحظة التصحيح ثم يعيد حساب النتيجة الإجمالية. يُستخدم عند طلب «صحّح مقالي الطالب». ينفّذ فوراً عند استدعاء الأداة بالمعرّفات الدقيقة.',
   schema: z.object({
     attemptId: z.number().int().positive().describe('رقم المحاولة'),
     essayScores: z.record(z.string(), z.number().min(0)).describe('خريطة اسم السؤال إلى الدرجة'),
@@ -470,7 +470,7 @@ const gradeEssay = actionTool({
 const retryAiGrading = actionTool({
   name: 'retry_ai_grading',
   description:
-    'إعادة إرسال محاولات فشل تصحيحها الآلي إلى طابور التصحيح الذكي (الأسئلة المقالية). يمكن تحديد محاولات بعينها أو تركها فارغة لإعادة كل الفاشلة (بحد أقصى 10 محاولات في الطلب). لا ينفّذ إلا بعد موافقة المشرف.',
+    'إعادة إرسال محاولات فشل تصحيحها الآلي إلى طابور التصحيح الذكي (الأسئلة المقالية). يمكن تحديد محاولات بعينها أو تركها فارغة لإعادة كل الفاشلة (بحد أقصى 10 محاولات في الطلب). ينفّذ فوراً عند استدعاء الأداة بالمعرّفات الدقيقة.',
   schema: z.object({
     attemptIds: z
       .array(z.number().int().positive())
@@ -523,10 +523,10 @@ const retryAiGrading = actionTool({
   },
 });
 
-const broadcastNotification = actionTool({
+const broadcastNotification = confirmableActionTool({
   name: 'broadcast_notification',
   description:
-    'إرسال إشعار جماعي داخلي يظهر في صندوق إشعارات المنصة فقط (لا بريد ولا رسائل خارجية). يتطلّب تحديد الجمهور و«عدد المستلمين المتوقّع»، ويُرفض التنفيذ إذا اختلف العدد الفعلي عن المتوقّع أو تجاوز الحد الأقصى — حماية من إرسال جماعي غير مقصود. لا ينفّذ إلا بعد موافقة المشرف.',
+    'إرسال إشعار جماعي داخلي يظهر في صندوق إشعارات المنصة فقط (لا بريد ولا رسائل خارجية). يتطلّب تحديد الجمهور و«عدد المستلمين المتوقّع»، ويُرفض التنفيذ إذا اختلف العدد الفعلي عن المتوقّع أو تجاوز الحد الأقصى — حماية من إرسال جماعي غير مقصود. يُرسل على خطوتين: استدعاء بلا توكن يعيد معاينة بعدد المستلمين، ثم إرسال بعد تأكيد المشرف بتوكن المعاينة.',
   schema: z.object({
     title: z.string().min(3).max(200).describe('عنوان الإشعار'),
     body: z.string().max(5000).optional().describe('نص الإشعار'),
@@ -540,6 +540,46 @@ const broadcastNotification = actionTool({
     maxRecipients: z.number().int().min(1).max(500).optional().describe('الحد الأقصى المسموح، افتراضياً 500'),
   }),
   audit: { action: 'NOTIFICATION_BROADCAST', targetType: 'notification' },
+  // Preview-only: resolves the audience and reports the REAL recipient count.
+  // run() re-resolves at execution and still enforces expectedRecipients + the
+  // cap, so audience drift between preview and confirm cannot over-send.
+  preview: async (args) => {
+    const config = require('../../../config/env');
+    if (config.features && config.features.notifications === false) {
+      return { ok: false, reason: 'NOTIFICATIONS_DISABLED' };
+    }
+
+    const notificationService = require('../../notifications/notificationService');
+
+    let userIds;
+    try {
+      userIds = await notificationService.resolveAudience(args.audience);
+    } catch (error) {
+      return {
+        ok: false,
+        reason: error && error.statusCode === 404 ? 'AUDIENCE_NOT_FOUND' : 'INVALID_AUDIENCE',
+        detail: error ? error.message : null,
+      };
+    }
+
+    const cap = Number.isSafeInteger(args.maxRecipients) ? args.maxRecipients : 500;
+    const actual = userIds.length;
+
+    if (actual === 0) return { ok: false, reason: 'NO_RECIPIENTS', audience: args.audience };
+    if (actual > cap) {
+      return { ok: false, reason: 'TOO_MANY_RECIPIENTS', actual, cap, hint: 'حدّد الجمهور بدقة أكثر أو قسّم البث.' };
+    }
+
+    return {
+      ok: true,
+      recipients: actual,
+      audience: args.audience,
+      title: args.title,
+      body: args.body ?? null,
+      linkUrl: args.linkUrl ?? null,
+      warning: 'بعد التأكيد سيصل هذا الإشعار لكل مستلم من هؤلاء في صندوق إشعاراتهم.',
+    };
+  },
   run: async (args) => {
     const config = require('../../../config/env');
     if (config.features && config.features.notifications === false) {
@@ -600,7 +640,7 @@ const broadcastNotification = actionTool({
 const markVideoFailed = actionTool({
   name: 'mark_video_failed',
   description:
-    'تعليم فيديو عالق في المعالجة كـ«فاشل» مع ذكر السبب، ليظهر في قائمة الفيديوهات الفاشلة وتتاح إعادة رفعه من لوحة التحكم. يُستخدم عند طلب «علّم الفيديو ده فاشل» أو لإنهاء حالة معالجة عالقة. لا ينفّذ إلا بعد موافقة المشرف.',
+    'تعليم فيديو عالق في المعالجة كـ«فاشل» مع ذكر السبب، ليظهر في قائمة الفيديوهات الفاشلة وتتاح إعادة رفعه من لوحة التحكم. يُستخدم عند طلب «علّم الفيديو ده فاشل» أو لإنهاء حالة معالجة عالقة. ينفّذ فوراً عند استدعاء الأداة بالمعرّفات الدقيقة.',
   schema: z.object({
     videoSlug: slugArg('الفيديو'),
     reason: z.string().min(3).max(300).describe('سبب التعليم كفاشل (يُحفظ للمراجعة)'),
@@ -643,7 +683,7 @@ const markVideoFailed = actionTool({
 const reorderCourseVideos = actionTool({
   name: 'reorder_course_videos',
   description:
-    'إعادة ترتيب فيديوهات دورة بالكامل: يجب تمرير معرّفات كل فيديوهات الدورة بالترتيب المطلوب (بدون نقص أو تكرار). يُستخدم عند طلب «رتّب الفيديوهات» أو «خلّي الفيديو ده الأول». لا ينفّذ إلا بعد موافقة المشرف.',
+    'إعادة ترتيب فيديوهات دورة بالكامل: يجب تمرير معرّفات كل فيديوهات الدورة بالترتيب المطلوب (بدون نقص أو تكرار). يُستخدم عند طلب «رتّب الفيديوهات» أو «خلّي الفيديو ده الأول». ينفّذ فوراً عند استدعاء الأداة بالمعرّفات الدقيقة.',
   schema: z.object({
     courseSlug: slugArg('الدورة'),
     videoSlugs: z
@@ -679,7 +719,7 @@ const reorderCourseVideos = actionTool({
 const updateCoursePrice = actionTool({
   name: 'update_course_price',
   description:
-    'تحديث سعر دورة بالجنيه المصري (رقم صحيح بدون كسور، و0 تعني مجانية). يُستخدم عند طلب «غيّر سعر الدورة». الاشتراكات الحالية لا تتأثر. لا ينفّذ إلا بعد موافقة المشرف.',
+    'تحديث سعر دورة بالجنيه المصري (رقم صحيح بدون كسور، و0 تعني مجانية). يُستخدم عند طلب «غيّر سعر الدورة». الاشتراكات الحالية لا تتأثر. ينفّذ فوراً عند استدعاء الأداة بالمعرّفات الدقيقة.',
   schema: z.object({
     courseSlug: slugArg('الدورة'),
     priceEgp: z.number().int().min(0).max(1000000).describe('السعر بالجنيه المصري كرقم صحيح'),
@@ -720,7 +760,7 @@ const updateCoursePrice = actionTool({
 const createStudent = actionTool({
   name: 'create_student',
   description:
-    'إنشاء حساب طالب جديد بالاسم والبريد الإلكتروني وكلمة المرور (٨ أحرف على الأقل) ورقم الهاتف والصف الدراسي. يُستخدم عند طلب «أضف طالباً» أو «أنشئ حساب طالب». يفشل إذا كان البريد أو الهاتف مستخدماً من قبل، ولا ينفّذ إلا بعد موافقة المشرف، ويعيد معرّف الطالب (slug) وبياناته دون أي بيانات دخول.',
+    'إنشاء حساب طالب جديد بالاسم والبريد الإلكتروني وكلمة المرور (٨ أحرف على الأقل) ورقم الهاتف والصف الدراسي. يُستخدم عند طلب «أضف طالباً» أو «أنشئ حساب طالب». يفشل إذا كان البريد أو الهاتف مستخدماً من قبل، وينفّذ فوراً عند استدعاء الأداة، ويعيد معرّف الطالب (slug) وبياناته دون أي بيانات دخول.',
   schema: z.object({
     name: z.string().min(2).max(120).describe('اسم الطالب كاملاً'),
     email: z.string().email().max(190).describe('البريد الإلكتروني للطالب (فريد)'),
@@ -785,7 +825,7 @@ const createStudent = actionTool({
 const updateStudent = actionTool({
   name: 'update_student',
   description:
-    'تعديل بيانات طالب: الاسم أو الصف الدراسي أو رقم الهاتف (حقل واحد على الأقل). يُستخدم عند طلب «عدّل بيانات الطالب» أو «انقل الطالب للصف الثالث». لا يغيّر البريد أو كلمة المرور، ولا ينفّذ إلا بعد موافقة المشرف، ويعيد الحقول المتغيّرة.',
+    'تعديل بيانات طالب: الاسم أو الصف الدراسي أو رقم الهاتف (حقل واحد على الأقل). يُستخدم عند طلب «عدّل بيانات الطالب» أو «انقل الطالب للصف الثالث». لا يغيّر البريد أو كلمة المرور، وينفّذ فوراً عند استدعاء الأداة، ويعيد الحقول المتغيّرة.',
   schema: z
     .object({
       userSlug: slugArg('الطالب'),
@@ -843,7 +883,7 @@ const updateStudent = actionTool({
 const createCourse = actionTool({
   name: 'create_course',
   description:
-    'إنشاء دورة جديدة بالعنوان والوصف والسعر بالجنيه المصري والصف الدراسي (والتصنيف والصورة اختياريان). تُنسب الدورة إلى المشرف الذي وافق عليها. لا ينفّذ إلا بعد موافقة المشرف، ويعيد معرّف الدورة (slug) وسعرها وصفّها.',
+    'إنشاء دورة جديدة بالعنوان والوصف والسعر بالجنيه المصري والصف الدراسي (والتصنيف والصورة اختياريان). تُنسب الدورة إلى المشرف الذي وافق عليها. ينفّذ فوراً عند استدعاء الأداة، ويعيد معرّف الدورة (slug) وسعرها وصفّها.',
   schema: z.object({
     title: z.string().min(3).max(200).describe('عنوان الدورة'),
     description: z.string().min(10).max(5000).describe('وصف الدورة'),
@@ -909,7 +949,7 @@ const createCourse = actionTool({
 const updateCourse = actionTool({
   name: 'update_course',
   description:
-    'تعديل بيانات دورة: العنوان أو الوصف أو السعر بالجنيه المصري أو الصف الدراسي أو التصنيف أو الصورة (حقل واحد على الأقل). يُستخدم عند طلب «عدّل بيانات الدورة». لا ينفّذ إلا بعد موافقة المشرف، ويعيد الحقول المتغيّرة.',
+    'تعديل بيانات دورة: العنوان أو الوصف أو السعر بالجنيه المصري أو الصف الدراسي أو التصنيف أو الصورة (حقل واحد على الأقل). يُستخدم عند طلب «عدّل بيانات الدورة». ينفّذ فوراً عند استدعاء الأداة، ويعيد الحقول المتغيّرة.',
   schema: z
     .object({
       courseSlug: slugArg('الدورة'),
@@ -980,16 +1020,46 @@ const updateCourse = actionTool({
 // through POST /videos/:videoId/upload -- and video creation stays out of chat. The HTTP
 // route and its VIDEO_CREATE audit action are untouched; only the chat-callable tool is
 // gone. delete_video, reorder_course_videos and mark_video_failed remain.
-const deleteVideo = actionTool({
+const deleteVideo = confirmableActionTool({
   name: 'delete_video',
   description:
-    'حذف فيديو نهائياً من Bunny Stream ومن قاعدة البيانات مع تقدّم الطلاب واختباره المرتبط به. إجراء غير قابل للتراجع ويتطلب معرّف الفيديو بدقة. لا ينفّذ إلا بعد موافقة المشرف.',
-  // No `confirm: true` argument on purpose: the approval IS the confirmation, and
-  // a model-supplied flag would be a second gate that means nothing.
+    'حذف فيديو نهائياً من Bunny Stream ومن قاعدة البيانات مع تقدّم الطلاب واختباره المرتبط به. إجراء غير قابل للتراجع ويتطلب معرّف الفيديو بدقة. يتم على خطوتين: استدعاء بلا توكن يعيد معاينة مما سيُحذف، ثم تنفيذ بعد تأكيد المشرف الصريح باستخدام توكن المعاينة.',
+  // Phase 3 (handoff 3.3): no client-side "are you sure" flag — the server-issued
+  // preview token is the confirmation, and it binds the exact arguments previewed.
   schema: z.object({
     videoSlug: slugArg('الفيديو'),
   }),
   audit: { action: 'VIDEO_DELETE', targetType: 'video' },
+  preview: async (args, ctx) => {
+    const video = await ctx.prisma.bunnyVideo.findUnique({
+      where: { slug: args.videoSlug },
+      select: {
+        id: true,
+        slug: true,
+        title: true,
+        status: true,
+        course: { select: { title: true } },
+        quiz: { select: { title: true } },
+        _count: { select: { progress: true } },
+      },
+    });
+    if (!video) return { ok: false, reason: 'VIDEO_NOT_FOUND' };
+    return {
+      ok: true,
+      target: {
+        video: {
+          slug: video.slug,
+          title: video.title,
+          status: video.status,
+          course: video.course ? video.course.title : null,
+          quiz: video.quiz ? video.quiz.title : null,
+          studentProgressRows: video._count.progress,
+        },
+      },
+      irreversible: true,
+      warning: 'الحذف نهائي: سيُحذف الفيديو من Bunny Stream مع تقدّم الطلاب المرتبط به واختباره المرتبط.',
+    };
+  },
   run: async (args, ctx) => {
     const prisma = ctx.prisma;
     const bunnyVideoService = require('../../bunnyVideoService');
@@ -1046,7 +1116,7 @@ async function invalidateQuizCaches(bunnyVideoId) {
 const upsertQuiz = actionTool({
   name: 'upsert_quiz',
   description:
-    'إنشاء أو تحديث اختبار فيديو: العنوان وتعريف أسئلة SurveyJS ومفتاح الإجابات ودرجة النجاح وعدد المحاولات والحد الزمني. يُستخدم عند طلب «أضف اختباراً للفيديو» أو «عدّل اختبار الفيديو». يُرفض أي تعريف أسئلة أو مفتاح إجابات غير صالح. لا ينفّذ إلا بعد موافقة المشرف.',
+    'إنشاء أو تحديث اختبار فيديو: العنوان وتعريف أسئلة SurveyJS ومفتاح الإجابات ودرجة النجاح وعدد المحاولات والحد الزمني. يُستخدم عند طلب «أضف اختباراً للفيديو» أو «عدّل اختبار الفيديو». يُرفض أي تعريف أسئلة أو مفتاح إجابات غير صالح. ينفّذ فوراً عند استدعاء الأداة بالمعرّفات الدقيقة.',
   schema: z.object({
     videoSlug: slugArg('الفيديو'),
     title: z.string().min(2).max(200).describe('عنوان الاختبار'),
@@ -1148,14 +1218,39 @@ const upsertQuiz = actionTool({
   },
 });
 
-const deleteQuiz = actionTool({
+const deleteQuiz = confirmableActionTool({
   name: 'delete_quiz',
   description:
-    'حذف اختبار نهائياً مع كل محاولات الطلاب المسجّلة عليه. إجراء غير قابل للتراجع ويتطلب معرّف الاختبار بدقة. لا ينفّذ إلا بعد موافقة المشرف.',
+    'حذف اختبار نهائياً مع كل محاولات الطلاب المسجّلة عليه. إجراء غير قابل للتراجع ويتطلب معرّف الاختبار بدقة. يتم على خطوتين: استدعاء بلا توكن يعيد معاينة بما سيُحذف وعدد المحاولات، ثم تنفيذ بعد تأكيد المشرف الصريح باستخدام توكن المعاينة.',
   schema: z.object({
     quizSlug: slugArg('الاختبار'),
   }),
   audit: { action: 'QUIZ_DELETE', targetType: 'quiz' },
+  preview: async (args, ctx) => {
+    const quiz = await ctx.prisma.quiz.findUnique({
+      where: { slug: args.quizSlug },
+      select: {
+        id: true,
+        title: true,
+        bunnyVideo: { select: { title: true } },
+        _count: { select: { attempts: true } },
+      },
+    });
+    if (!quiz) return { ok: false, reason: 'QUIZ_NOT_FOUND' };
+    return {
+      ok: true,
+      target: {
+        quiz: {
+          slug: args.quizSlug,
+          title: quiz.title,
+          video: quiz.bunnyVideo ? quiz.bunnyVideo.title : null,
+          attemptRowsToDelete: quiz._count.attempts,
+        },
+      },
+      irreversible: true,
+      warning: 'الحذف نهائي: ستُحذف كل محاولات الطلاب على هذا الاختبار ولا يمكن استرجاع درجاتها.',
+    };
+  },
   run: async (args, ctx) => {
     const prisma = ctx.prisma;
     const quiz = await prisma.quiz.findUnique({
@@ -1201,14 +1296,42 @@ const deleteQuiz = actionTool({
 // uses, because that order is what makes the operation survivable: the database
 // work happens first and the remote/storage cleanup after it, best-effort, so a
 // Bunny or Supabase outage can never leave a half-deleted course behind.
-const deleteCourse = actionTool({
+const deleteCourse = confirmableActionTool({
   name: 'delete_course',
   description:
-    'حذف دورة نهائياً: الفيديوهات وتسجيلات الطلاب والشهادات والاختبارات المرتبطة بها، مع حذف فيديوهاتها من Bunny Stream وصور اختباراتها من التخزين. إجراء غير قابل للتراجع ويتطلب معرّف الدورة بدقة. لا ينفّذ إلا بعد موافقة المشرف.',
+    'حذف دورة نهائياً: الفيديوهات وتسجيلات الطلاب والشهادات والاختبارات المرتبطة بها، مع حذف فيديوهاتها من Bunny Stream وصور اختباراتها من التخزين. إجراء غير قابل للتراجع ويتطلب معرّف الدورة بدقة. يتم على خطوتين: استدعاء بلا توكن يعيد معاينة بعدد الفيديوهات والاشتراكات والشهادات المتأثرة، ثم تنفيذ بعد تأكيد المشرف الصريح باستخدام توكن المعاينة.',
   schema: z.object({
     courseSlug: slugArg('الدورة'),
   }),
   audit: { action: 'COURSE_DELETE', targetType: 'course' },
+  preview: async (args, ctx) => {
+    const course = await ctx.prisma.course.findUnique({
+      where: { slug: args.courseSlug },
+      select: {
+        id: true,
+        slug: true,
+        title: true,
+        _count: { select: { videos: true, enrollments: true, certificates: true } },
+      },
+    });
+    if (!course) return { ok: false, reason: 'COURSE_NOT_FOUND' };
+    const bunnyVideoRows = await ctx.prisma.bunnyVideo.count({ where: { courseId: course.id } });
+    return {
+      ok: true,
+      target: {
+        course: {
+          slug: course.slug,
+          title: course.title,
+          legacyVideos: course._count.videos,
+          bunnyVideos: bunnyVideoRows,
+          enrollments: course._count.enrollments,
+          certificates: course._count.certificates,
+        },
+      },
+      irreversible: true,
+      warning: 'الحذف نهائي: الفيديوهات من Bunny Stream، والاشتراكات، والشهادات، والاختبارات وكل محاولات طلابها — كلها ستُحذف مع الدورة.',
+    };
+  },
   run: async (args, ctx) => {
     const prisma = ctx.prisma;
     const bunnyClient = require('../../../integrations/bunny/bunnyStreamClient');
@@ -1309,14 +1432,37 @@ const deleteCourse = actionTool({
   },
 });
 
-const deleteUser = actionTool({
+const deleteUser = confirmableActionTool({
   name: 'delete_user',
   description:
-    'حذف حساب مستخدم نهائياً مع تسجيلاته في الدورات ومدفوعاته وشهاداته ومحاولاته. إجراء غير قابل للتراجع، ولا يمكن حذف حساب المشرف الذي وافق على الطلب نفسه، ولا حساب يملك دورات. لا ينفّذ إلا بعد موافقة المشرف.',
+    'حذف حساب مستخدم نهائياً مع تسجيلاته في الدورات ومدفوعاته وشهاداته ومحاولاته. إجراء غير قابل للتراجع، ولا يمكن حذف حساب المشرف نفسه، ولا حساب يملك دورات. يتم على خطوتين: استدعاء بلا توكن يعيد معاينة بالحساب وعدد اشتراكاته، ثم تنفيذ بعد تأكيد المشرف الصريح باستخدام توكن المعاينة.',
   schema: z.object({
     userSlug: slugArg('المستخدم'),
   }),
   audit: { action: 'USER_DELETE', targetType: 'user' },
+  preview: async (args, ctx) => {
+    const user = await ctx.prisma.user.findUnique({
+      where: { slug: args.userSlug },
+      select: { id: true, slug: true, name: true, role: true, grade: true },
+    });
+    if (!user) return { ok: false, reason: 'USER_NOT_FOUND' };
+    // The same refusals run() makes, surfaced BEFORE the confirmation token:
+    // previewing a delete that can never execute would only waste the admin's
+    // confirmation on a guaranteed failure.
+    if (user.id === ctx.adminId) return { ok: false, reason: 'CANNOT_DELETE_SELF' };
+    const ownedCourses = await ctx.prisma.course.count({ where: { teacherId: user.id } });
+    if (ownedCourses > 0) return { ok: false, reason: 'USER_OWNS_COURSES', ownedCourses };
+    const enrollments = await ctx.prisma.enrollment.count({ where: { userId: user.id } });
+    return {
+      ok: true,
+      target: {
+        user: { slug: user.slug, name: user.name, role: user.role, grade: user.grade ?? null },
+        enrollments,
+      },
+      irreversible: true,
+      warning: 'الحذف نهائي: اشتراكات الطالب ومدفوعاته وشهاداته ومحاولاته كلها ستُحذف مع الحساب.',
+    };
+  },
   run: async (args, ctx) => {
     const prisma = ctx.prisma;
 

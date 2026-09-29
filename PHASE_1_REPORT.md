@@ -194,10 +194,12 @@ every edited file, and the BOM + CRLF of `src/services/agent/tools/index.js` wer
 
 ## 6. Assumptions — signed off (owner, this round)
 
-The five items I put to you, with your decisions. No code in this phase goes beyond them.
+The five items I put to you, with your decisions. Four were accepted as proposed; item 1 was
+corrected by evidence before sign-off rather than signed as written.
 
 1. **`selectFor` was deleted, not replaced.** As you signed off: `surfaceFor()` was my own new code
-   with zero callers, so it is gone rather than renamed (committed below, in the correction commit).
+   with zero callers, so it is gone rather than renamed (change in this commit). The old
+   `selectFor(question, historyTools)` is likewise deleted, not kept in any form.
    `turnMetrics()` — which *is* called by `agentService.js` and asserted by
    `tests/agent-graph.test.js:253` — is the turn-measurement seam that stays.
 2. **The per-turn memo is now keyed on the switch alone** (`selection.key = 'surface|' + includeActions`).
@@ -226,9 +228,11 @@ The five items I put to you, with your decisions. No code in this phase goes bey
   beyond the five sign-offs above, and it is reported here on purpose: it touches seven comment
   lines in a file this phase already owned.
 - **`actions.js` is now internally consistent in its banner style** (all three section headers use
-  `// --- Name (context) ---`; no box-drawing remains) since your sign-off asked for it. The other
-  agent module files were scanned and each uses exactly one banner style throughout, so they were
-  not touched.
+  ASCII `// --- Name (context) ---`; no box-drawing remains) since your sign-off asked for it. The
+  other agent module files were scanned and each uses exactly one banner style throughout, so they
+  were not touched.
+- The committed Phase 1 commit `6b079d8` carries the original report and code; this correction
+  (the diff-stat correction included) is a separate commit on top, as you ordered.
 - **`PROJECT_MAP.md` line 42 is stale**: it says `AI_AGENT_CONVERSATION_RETENTION_DAYS` "is still
   resolved and clamped but read by nothing — no retention/pruning job exists yet", while
   `src/jobs/pruneAgentConversations.js` exists, is wired at `app.js:452-456` and runs daily at 03:17.
