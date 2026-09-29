@@ -510,6 +510,9 @@ async function answerQuestion({
     toolSurface: turnMetrics.toolSurface,
     latencyMs: Date.now() - startedAt,
     unverifiedFigures,
+    // Why Tier 2 ran at all. A `null` here means the turn never needed a reason —
+    // only a turn that first heard "no" from Tier 1 gets here.
+    declinedReason: deterministic.reason,
   };
 
   await persistTurn(groundedAnswer, {

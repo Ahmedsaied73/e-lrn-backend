@@ -185,6 +185,25 @@ test('the router is pure: identical input, identical output, no side effects', (
   assert.equal(JSON.stringify(first), snapshot);
 });
 
+
+/**
+ * Phase 6 (Decision #12) — a router miss is a handoff, never a dead end.
+ *
+ * The router has no Arabic to say back when nothing matches: the ONLY honest reply
+ * is `{ matched: false }`, and the CALLER (agentService, Tier 1 → Tier 2) owns the
+ * fallthrough. Pinning it here means a future "helpful" default message in route()
+ * cannot quietly become the dead end Decision #12 forbids.
+ */
+test('a miss is a handoff: the router returns nothing to show, not something to show', () => {
+  // Arab-world politics is not one of the 28 catalogue topics; neither the router nor
+  // the engine may answer it — the reply must come from Tier 2.
+  const outOfCatalogue = route('مين الرئيس الحالي لمصر؟');
+  assert.equal(outOfCatalogue.matched, false);
+  assert.equal(outOfCatalogue.reason, 'NO_INTENT');
+  assert.deepEqual(outOfCatalogue.candidates, []);
+  assert.ok(!('answer' in outOfCatalogue) && !('template' in outOfCatalogue), 'no answer shape escapes the router');
+});
+
 test('every intent declares a tool, a template and at least one sample', () => {
   for (const intent of INTENTS) {
     assert.match(intent.id, /^[a-z][a-z0-9_]*$/, `intent id ${intent.id}`);

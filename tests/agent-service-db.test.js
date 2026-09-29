@@ -99,6 +99,41 @@ test('a catalogued question is answered without ever building a graph', async ()
   assert.deepEqual(messages[1].metadata.toolCalls, ['students_count_by_grade']);
 });
 
+/**
+ * Phase 6 (Decision #12) — a miss always hands off to the full graph.
+ *
+ * The two halves the handoff demands in one place: a catalogued question is answered
+ * WITHOUT the model (the test above), and a question the catalogue cannot name
+ * REACHES the model even though the deterministic call declined with NO_INTENT.
+ * Whatever stands in for Tier 2 — here a scripted graph — must be built and run,
+ * and its answer must be the turn's answer.
+ */
+test('a question matching none of the 28 intents invokes the full graph', async () => {
+  let graphInvocations = 0;
+  const scripted = scriptedGraphFactory([
+    new (require('@langchain/core/messages').AIMessage)({
+      content: 'حاضر، أنا معاك. اسألني عن المنصة أو أي حاجة تانية.',
+    }),
+  ]);
+  const result = await answerQuestion({
+    question: 'اشرحلي نظرية النسبية ببساطة',
+    adminId: ADMIN_ID,
+    prisma,
+    graphFactory: (options) => {
+      graphInvocations += 1;
+      return scripted.factory(options);
+    },
+  });
+
+  assert.equal(graphInvocations, 1, 'the miss must reach the model, not a dead end');
+  assert.equal(result.ok, true);
+  assert.equal(result.source, 'llm');
+  assert.equal(result.detail.declinedReason, 'NO_INTENT', 'the tier-1 decline is recorded, not hidden');
+  assert.match(result.answer, /حاضر/);
+  await trackConversation(result.conversationId);
+});
+
+
 test('the kill switch stops the service before anything else happens', async () => {
   const original = config.aiAgent.enabled;
   config.aiAgent.enabled = false;
