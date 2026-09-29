@@ -7,10 +7,12 @@
  *   2. Read-only is the default: action tools exist but are NOT exposed to the
  *      model unless AI_AGENT_ALLOW_MUTATIONS is on.
  *   3. execute() validates arguments before doing anything else.
- *   4. execute() REFUSES any action without explicit, attributable approval —
- *      the guard behind the graph interrupt.
+ *   4. execute() REFUSES any mutation that cannot be attributed to an admin
+ *      (ADMIN_REQUIRED), and the destructive tools (kind 'confirm') never mutate
+ *      until they spend a confirmationToken their own preview issued (Phase 3).
  *   5. Every payload leaving a tool is email-redacted and carries meta.
- *   6. The LangChain wrapper keeps the approval gate (it is not a bypass).
+ *   6. The LangChain wrapper keeps the attribution/confirmation gates (it is not
+ *      a bypass).
  *
  * Run: npm test
  */
@@ -96,9 +98,9 @@ describe('agent tools — registry contract', () => {
     // when the CRUD tools landed and again when the deletes did — and turned this
     // suite red for reasons that had nothing to do with the contract).
     // Default posture: read-only. A mutation switch that is off must not leak
-    // mutating tools into the model's tool list.
+    // ANY mutating tool — neither an immediate action nor a confirm tool.
     assert.equal(listDefinitions().length, readDefinitions.length, 'actions hidden by default');
-    assert.equal(listDefinitions().some((d) => d.kind === 'action'), false, 'no action in the default list');
+    assert.equal(listDefinitions().some((d) => d.kind !== 'read'), false, 'no mutation in the default list');
     // Derived from the catalogue rather than hardcoded: the exact membership is
     // pinned by the allowlist test above, so a second literal count here only
     // produced churn (it was missed when the CRUD tools landed and turned this
@@ -122,12 +124,23 @@ describe('agent tools — registry contract', () => {
     }
   });
 
-  it('every action declares approval + an audit action and is never cached', () => {
+  it('every mutation is immediate-or-confirmable, audited, and never cached', () => {
     for (const def of actionDefinitions) {
-      assert.equal(def.kind, 'action', `${def.name} kind`);
-      assert.equal(def.requiresApproval, true, `${def.name} requiresApproval`);
+      assert.ok(
+        def.kind === 'action' || def.kind === 'confirm',
+        `${def.name} must be an action or a confirm tool, got ${def.kind}`
+      );
+      // Phase 3 (Decision #1): the static requiresApproval gate is GONE. Pinning
+      // it to false is a regression pin — a resurrected `true` here would quietly
+      // re-introduce the "tools exist but never execute" failure class.
+      assert.equal(def.requiresApproval, false, `${def.name} must not claim the removed approval gate`);
       assert.equal(def.cacheTtlSeconds, 0, `${def.name} must not be cached`);
       assert.match(def.audit.action, /^[A-Z][A-Z0-9_]+$/, `${def.name} audit action shape`);
+      if (def.kind === 'confirm') {
+        // A confirm tool without a read-only preview is not a confirm tool.
+        assert.equal(typeof def.preview, 'function', `${def.name} needs a read-only preview`);
+        assert.ok(def.schema.shape.confirmationToken, `${def.name} model schema must expose confirmationToken`);
+      }
     }
   });
 
@@ -163,31 +176,33 @@ describe('agent tools — execute() guards', () => {
   it('rejects invalid arguments before touching anything', async () => {
     const gradeEssay = getDefinition('grade_essay');
     await assert.rejects(
-      () => execute(gradeEssay, {}, { prisma: prismaStub(), approved: true, adminId: 1 }),
+      () => execute(gradeEssay, {}, { prisma: prismaStub(), adminId: 1 }),
       (err) => err instanceof AgentToolError && err.code === 'INVALID_ARGS'
     );
   });
 
-  it('refuses an action with no approval, and one that cannot be attributed', async () => {
+  it('refuses every mutation that cannot be attributed to an admin', async () => {
     const enroll = getDefinition('enroll_student');
-    // Well-formed slugs on purpose: the schema must accept them so the APPROVAL
+    // Well-formed slugs on purpose: the schema must accept them so the ATTRIBUTION
     // gate — not argument validation — is what refuses the call.
     const args = { userSlug: 'abc123abc123', courseSlug: 'def456def456' };
 
     await assert.rejects(
       () => execute(enroll, args, { prisma: prismaStub() }),
-      (err) => err.code === 'APPROVAL_REQUIRED',
-      'unapproved action must refuse'
+      (err) => err.code === 'ADMIN_REQUIRED',
+      'an unattributable action must refuse'
     );
     await assert.rejects(
-      () => execute(enroll, args, { prisma: prismaStub(), approved: true }),
-      (err) => err.code === 'APPROVAL_REQUIRED',
-      'approval without an admin id must refuse'
-    );
-    await assert.rejects(
-      () => execute(enroll, args, { prisma: prismaStub(), approved: true, adminId: '1' }),
-      (err) => err.code === 'APPROVAL_REQUIRED',
+      () => execute(enroll, args, { prisma: prismaStub(), adminId: '1' }),
+      (err) => err.code === 'ADMIN_REQUIRED',
       'a string admin id is not attributable'
+    );
+    // The same gate covers the destructive kind, and it fires BEFORE any DB call
+    // or preview row is possible: only agentApproval exists on this stub.
+    await assert.rejects(
+      () => execute(getDefinition('delete_video'), { videoSlug: 'abc123abc123' }, { prisma: prismaStub() }),
+      (err) => err.code === 'ADMIN_REQUIRED',
+      'an unattributable confirm call must refuse before even previewing'
     );
   });
 
@@ -208,7 +223,10 @@ describe('agent tools — execute() guards', () => {
     assert.equal(result.data.rows[0].name, 'أحمد', 'name allowed');
     assert.equal(result.data.rows[0].phoneNumber, '01001234567', 'phone allowed');
     assert.equal(result.meta.tool, '_redaction_probe');
-    assert.equal(result.meta.cappedAt, 50, 'read tools advertise the active row cap');
+    // The ACTIVE cap, not the factory default: this developer .env may pin a
+    // different AI_AGENT_MAX_TOOL_RESULT_ROWS, and the contract is that meta
+    // reports whatever the running config enforces (same lesson as pinMutations).
+    assert.equal(result.meta.cappedAt, envConfig.aiAgent.maxToolResultRows, 'read tools advertise the active row cap');
     assert.ok(!Number.isNaN(Date.parse(result.meta.asOf)), 'asOf is a timestamp');
   });
 
@@ -221,7 +239,7 @@ describe('agent tools — execute() guards', () => {
     assert.equal(result.data.users.students, 7, 'student count passes through');
     assert.equal(result.data.enrollments.unpaid, 0, 'paid/unpaid derived correctly');
     assert.equal(result.data.videos.byStatus.GRADED, 5, 'groupBy map built');
-    assert.equal(result.meta.cappedAt, 50, 'cap advertised even for aggregates');
+    assert.equal(result.meta.cappedAt, envConfig.aiAgent.maxToolResultRows, 'cap advertised even for aggregates');
   });
 
   it('rejects an argument the tool does not declare (no silently ignored filters)', async () => {
@@ -268,12 +286,12 @@ describe('agent tools — LangChain wrapper', () => {
     assert.deepEqual(names, [...readDefinitions.map((d) => d.name)].sort());
   });
 
-  it('cannot be used to bypass the approval gate', async () => {
+  it('cannot be used to bypass the attribution gate', async () => {
     const [enrollTool] = toLangChainTools([getDefinition('enroll_student')]);
     await assert.rejects(
       () => enrollTool.invoke({ userSlug: 'abc123abc123', courseSlug: 'def456def456' }),
-      (err) => /APPROVAL_REQUIRED|requires human approval/.test(String(err.message)),
-      'the wrapper must not swallow the approval refusal'
+      (err) => /ADMIN_REQUIRED/.test(String(err.message)),
+      'the wrapper must not swallow the attribution refusal'
     );
   });
 

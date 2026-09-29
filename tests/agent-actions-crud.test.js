@@ -1,13 +1,13 @@
 'use strict';
-/* Agent CRUD action contract tests (P2a: students + courses, NO deletes) — pure:
- * no DB, no Redis, no network.
+/* Agent CRUD action contract tests — pure: no DB, no Redis, no network.
  *
  * WHY this file is separate from agent-tools-contract.test.js: that suite pins the
- * CROSS-CUTTING contract (registry shape, approval gate, redaction) and the exact
- * approved catalogue. These four tools have per-tool semantics worth pinning one
- * by one — the field sets mirrored from the HTTP controllers, the structured
- * refusals (taken email/phone, unknown student/course, a vanished admin row) and
- * the hard rule that no credential material can ever leave a tool payload.
+ * CROSS-CUTTING contract (registry shape, attribution/confirmation gates, redaction)
+ * and the catalogue. These tools have per-tool semantics worth pinning one by one —
+ * the field sets mirrored from the HTTP controllers, the structured refusals (taken
+ * email/phone, unknown student/course), the two-step preview→confirm flow of the
+ * destructive tools (Phase 3), and the hard rule that no credential material can
+ * ever leave a tool payload.
  *
  * Run: npm test
  */
@@ -28,8 +28,9 @@ const COURSE_SLUG = 'crs123abc456';
 /**
  * Every mutating tool this phase added, with the audit action it must declare. The
  * deletes are listed LAST and kept in one block on purpose: they are the only
- * irreversible tools in the catalogue, and a reviewer scanning this file should see
- * immediately which ones they are.
+ * irreversible tools in the catalogue, and Phase 3 makes that structural — kind
+ * 'confirm' means the tool previews first and only executes with a token its own
+ * preview issued.
  */
 const CRUD_TOOLS = [
   { name: 'create_student', audit: 'USER_CREATE', target: 'user' },
@@ -37,10 +38,10 @@ const CRUD_TOOLS = [
   { name: 'create_course', audit: 'COURSE_CREATE', target: 'course' },
   { name: 'update_course', audit: 'COURSE_UPDATE', target: 'course' },
   { name: 'upsert_quiz', audit: 'QUIZ_UPSERT', target: 'quiz' },
-  { name: 'delete_video', audit: 'VIDEO_DELETE', target: 'video', irreversible: true },
-  { name: 'delete_quiz', audit: 'QUIZ_DELETE', target: 'quiz', irreversible: true },
-  { name: 'delete_course', audit: 'COURSE_DELETE', target: 'course', irreversible: true },
-  { name: 'delete_user', audit: 'USER_DELETE', target: 'user', irreversible: true },
+  { name: 'delete_video', audit: 'VIDEO_DELETE', target: 'video', irreversible: true, kind: 'confirm' },
+  { name: 'delete_quiz', audit: 'QUIZ_DELETE', target: 'quiz', irreversible: true, kind: 'confirm' },
+  { name: 'delete_course', audit: 'COURSE_DELETE', target: 'course', irreversible: true, kind: 'confirm' },
+  { name: 'delete_user', audit: 'USER_DELETE', target: 'user', irreversible: true, kind: 'confirm' },
 ];
 
 const NEW_STUDENT_ARGS = {
@@ -155,7 +156,11 @@ function prismaStub(overrides = {}) {
   };
 }
 
-const approved = (prisma) => ({ prisma, approved: true, adminId: ADMIN_ID });
+// Phase 3 (Decision #1): an attributable admin id is the ONLY precondition a plain
+// action needs — the legacy `approved: true` flag is gone from the tool layer. The
+// destructive (kind 'confirm') tools additionally require a confirmationToken their
+// own preview issued; those flows build their ctx explicitly below.
+const approved = (prisma) => ({ prisma, adminId: ADMIN_ID });
 
 describe('agent CRUD tools — catalogue contract', () => {
   it('registers the whole CRUD surface, deletes included', () => {
@@ -175,17 +180,26 @@ describe('agent CRUD tools — catalogue contract', () => {
     }
   });
 
-  it('every CRUD tool is an approval-gated, uncached, Arabic, audited action', () => {
-    for (const { name, audit, target } of CRUD_TOOLS) {
+  it('every CRUD tool is immediate-or-confirmable, uncached, Arabic, audited', () => {
+    for (const { name, audit, target, kind = 'action' } of CRUD_TOOLS) {
       const def = getDefinition(name);
       assert.ok(def, `${name} not registered`);
-      assert.equal(def.kind, 'action', `${name} kind`);
-      assert.equal(def.requiresApproval, true, `${name} requiresApproval`);
+      assert.equal(def.kind, kind, `${name} kind`);
+      // Phase 3: the static approval gate is GONE. Pinning its absence keeps the
+      // "tools exist but no schema ever reached the model" door closed — a
+      // resurrected requiresApproval:true would again make mutations silently dead.
+      assert.equal(def.requiresApproval, false, `${name} must not claim the removed approval gate`);
       assert.equal(def.cacheTtlSeconds, 0, `${name} must never be cached`);
       assert.equal(def.audit.action, audit, `${name} audit action`);
       assert.equal(def.audit.targetType, target, `${name} audit target type`);
       assert.match(def.description, ARABIC_RE, `${name} description must be Arabic`);
       assert.ok(def.description.length >= 20, `${name} description must be explanatory`);
+      if (kind === 'confirm') {
+        // The two-step contract lives IN the definition: a read-only preview, and
+        // a token field the model is allowed to carry back.
+        assert.equal(typeof def.preview, 'function', `${name} must expose a read-only preview`);
+        assert.ok(def.schema.shape.confirmationToken, `${name} model schema must expose confirmationToken`);
+      }
       // A tool the model cannot understand is a tool it will not call correctly:
       // every argument carries its own Arabic hint.
       for (const [key, field] of Object.entries(def.schema.shape || {})) {
@@ -194,9 +208,18 @@ describe('agent CRUD tools — catalogue contract', () => {
     }
   });
 
-  it('every new tool states in Arabic that admin approval is required', () => {
-    for (const { name } of CRUD_TOOLS) {
-      assert.match(getDefinition(name).description, /موافقة المشرف/, `${name} must announce the gate`);
+  it('descriptions state the Phase 3 contract: immediate for actions, two steps for deletes', () => {
+    for (const { name, irreversible } of CRUD_TOOLS) {
+      const desc = getDefinition(name).description;
+      // The removed approval flow must not be PROMISED anywhere: a description
+      // telling the model to wait for an approval gate re-creates the old dead end
+      // where the tool existed but the flow never completed.
+      assert.equal(desc.includes('موافقة المشرف'), false, `${name} must not promise the removed approval gate`);
+      if (irreversible) {
+        assert.match(desc, /خطوتين/, `${name} must announce the two-step preview/confirm flow`);
+      } else {
+        assert.match(desc, /ينفّذ فورا/, `${name} must announce immediate execution`);
+      }
     }
   });
 });
@@ -246,13 +269,236 @@ describe('agent CRUD tools — P2b semantics', () => {
     delete_user: { userSlug: STUDENT_SLUG },
   };
 
-  it('every delete refuses without approval BEFORE it resolves its target', async () => {
+  it('every delete refuses an unattributable call BEFORE it resolves its target', async () => {
+    // Phase 3 replaced the approval flag with ATTRIBUTION: a mutation with no real
+    // admin behind it is not allowed to happen — and the refusal must precede every
+    // query, so even the read-only preview never runs against an unknown caller.
     for (const [name, args] of Object.entries(DELETE_ARGS)) {
       await assert.rejects(
         () => execute(getDefinition(name), args, { prisma: forbiddenPrisma() }),
-        (err) => err instanceof AgentToolError && err.code === 'APPROVAL_REQUIRED',
-        `${name} must refuse an unapproved call`
+        (err) => err instanceof AgentToolError && err.code === 'ADMIN_REQUIRED',
+        `${name} must refuse a call it cannot attribute to an admin`
       );
+    }
+  });
+
+  /**
+   * AgentApproval stand-in for the confirm flow — the same CAS state machine
+   * Postgres runs (only one caller can flip PENDING), with no database. Rows are
+   * created through the REAL requestApproval() the preview path calls, so
+   * argsHash/expiresAt come from production code, not from hand-written fixtures.
+   */
+  function approvalStub() {
+    const rows = new Map();
+    let nextId = 901;
+    return {
+      rows,
+      agentApproval: {
+        async create({ data }) {
+          const row = { id: nextId, ...data };
+          rows.set(nextId, row);
+          nextId += 1;
+          return row;
+        },
+        async findUnique({ where }) {
+          return rows.get(where.id) || null;
+        },
+        async updateMany({ where, data }) {
+          const row = rows.get(where.id);
+          if (!row || (where.status !== undefined && row.status !== where.status)) return { count: 0 };
+          Object.assign(row, data);
+          return { count: 1 };
+        },
+      },
+    };
+  }
+
+  /** Prisma whose ONLY reachable model is agentApproval: a refused confirmation
+   *  that went on to resolve its target would throw instead of passing. */
+  function gateOnlyPrisma(stub) {
+    return new Proxy(stub, {
+      get: (target, prop) =>
+        prop in target
+          ? target[prop]
+          : () => {
+              throw new Error('a refused confirmation must never resolve its target');
+            },
+    });
+  }
+
+  const VIDEO_ARGS = { videoSlug: 'vid123abc456' };
+  const previewableVideo = {
+    id: 5,
+    slug: VIDEO_ARGS.videoSlug,
+    title: 'فيديو',
+    status: 'READY',
+    course: { title: 'دورة' },
+    quiz: { title: 'اختبار' },
+    _count: { progress: 12 },
+  };
+
+  /** Preview delete_video through the real path and hand back the stub, token, result. */
+  async function issuedVideoToken() {
+    const stub = approvalStub();
+    const prisma = { ...stub, bunnyVideo: { findUnique: async () => previewableVideo } };
+    const result = await execute(getDefinition('delete_video'), VIDEO_ARGS, { prisma, adminId: ADMIN_ID });
+    return { stub, token: result.data.confirmationToken, result };
+  }
+
+  it('a no-token call PREVIEWs, issues one PENDING token, and mutates nothing', async () => {
+    const { stub, token, result } = await issuedVideoToken();
+    assert.match(token, /^\d+$/, 'the token is the AgentApproval row id as a string');
+    assert.equal(result.data.ok, true);
+    assert.equal(result.data.stage, 'PREVIEW');
+    assert.equal(result.data.confirmationRequired, true);
+    assert.ok(Date.parse(result.data.confirmationExpiresAt) > Date.now(), 'the token carries a future expiry');
+    assert.equal(result.data.preview.target.video.studentProgressRows, 12, 'the admin sees the real blast radius');
+    assert.equal(result.data.preview.irreversible, true);
+    assert.equal(stub.rows.size, 1, 'exactly one row becomes pending');
+    assert.equal(stub.rows.get(Number(token)).status, 'PENDING');
+    assert.equal(stub.rows.get(Number(token)).adminId, ADMIN_ID, 'the token is bound to the requesting admin');
+    assert.equal(auditCalls.at(-1).metadata.stage, 'preview', 'the preview itself is evidence');
+  });
+
+  it('a preview refusal is the answer: no token, nothing pending', async () => {
+    const stub = approvalStub();
+    const result = await execute(getDefinition('delete_video'), { videoSlug: 'missing123ab' }, {
+      prisma: { ...stub, bunnyVideo: { findUnique: async () => null } },
+      adminId: ADMIN_ID,
+    });
+    assert.equal(result.data.ok, false);
+    assert.equal(result.data.reason, 'VIDEO_NOT_FOUND');
+    assert.equal(result.data.confirmationToken, undefined);
+    assert.equal(stub.rows.size, 0, 'there is nothing to confirm, so no token may exist');
+  });
+
+  it('confirming the exact previewed args executes exactly once, and the spent token cannot replay', async () => {
+    const bunnyVideoService = require('../src/services/bunnyVideoService');
+    const original = bunnyVideoService.deleteVideo;
+    let destructiveCalls = 0;
+    bunnyVideoService.deleteVideo = async () => {
+      destructiveCalls += 1;
+      return { id: 5, bunnyVideoId: 'bunny-9' };
+    };
+    try {
+      const stub = approvalStub();
+      const ctx = {
+        prisma: { ...stub, bunnyVideo: { findUnique: async () => previewableVideo } },
+        adminId: ADMIN_ID,
+      };
+      const preview = await execute(getDefinition('delete_video'), VIDEO_ARGS, ctx);
+      assert.equal(destructiveCalls, 0, 'the preview call must not delete');
+
+      const done = await execute(
+        getDefinition('delete_video'),
+        { ...VIDEO_ARGS, confirmationToken: preview.data.confirmationToken },
+        ctx
+      );
+      assert.equal(done.data.ok, true);
+      assert.equal(done.data.video.bunnyVideoId, 'bunny-9');
+      assert.equal(destructiveCalls, 1);
+      assert.equal(auditCalls.at(-1).metadata.stage, 'confirmed');
+      assert.equal(stub.rows.get(Number(preview.data.confirmationToken)).status, 'CONSUMED');
+
+      const replay = await execute(
+        getDefinition('delete_video'),
+        { ...VIDEO_ARGS, confirmationToken: preview.data.confirmationToken },
+        ctx
+      );
+      assert.equal(replay.data.ok, false);
+      assert.equal(replay.data.reason, 'CONFIRMATION_MISMATCH');
+      assert.equal(destructiveCalls, 1, 'a spent token must never delete twice');
+    } finally {
+      bunnyVideoService.deleteVideo = original;
+    }
+  });
+
+  it('the confirm path refuses every stale token BEFORE resolving the target', async () => {
+    // Foreign admin and unknown id → NOT_FOUND (no ownership oracle; and the
+    // gate-only prisma THROWS if a refused call dares to look the video up).
+    const { stub, token } = await issuedVideoToken();
+    const foreign = await execute(getDefinition('delete_video'), { ...VIDEO_ARGS, confirmationToken: token }, {
+      prisma: gateOnlyPrisma(stub),
+      adminId: 777,
+    });
+    assert.equal(foreign.data.reason, 'CONFIRMATION_NOT_FOUND');
+
+    const ghost = await execute(getDefinition('delete_video'), { ...VIDEO_ARGS, confirmationToken: '999999' }, {
+      prisma: gateOnlyPrisma(stub),
+      adminId: ADMIN_ID,
+    });
+    assert.equal(ghost.data.reason, 'CONFIRMATION_NOT_FOUND');
+
+    // A token issued for a DIFFERENT tool must not authorise this one.
+    const crossed = await issuedVideoToken();
+    crossed.stub.rows.get(Number(crossed.token)).toolName = 'delete_course';
+    const hijack = await execute(getDefinition('delete_video'), { ...VIDEO_ARGS, confirmationToken: crossed.token }, {
+      prisma: gateOnlyPrisma(crossed.stub),
+      adminId: ADMIN_ID,
+    });
+    assert.equal(hijack.data.reason, 'CONFIRMATION_MISMATCH');
+
+    // Expiry: refused, and the row's bookkeeping still flips to EXPIRED.
+    const stale = await issuedVideoToken();
+    stale.stub.rows.get(Number(stale.token)).expiresAt = new Date(Date.now() - 1000);
+    const expired = await execute(getDefinition('delete_video'), { ...VIDEO_ARGS, confirmationToken: stale.token }, {
+      prisma: gateOnlyPrisma(stale.stub),
+      adminId: ADMIN_ID,
+    });
+    assert.equal(expired.data.reason, 'CONFIRMATION_EXPIRED');
+    assert.equal(stale.stub.rows.get(Number(stale.token)).status, 'EXPIRED');
+
+    // Args drift: the token authorises the HASH of what was previewed, nothing else.
+    const drifted = await issuedVideoToken();
+    const moved = await execute(
+      getDefinition('delete_video'),
+      { videoSlug: 'oth123abc456', confirmationToken: drifted.token },
+      { prisma: gateOnlyPrisma(drifted.stub), adminId: ADMIN_ID }
+    );
+    assert.equal(moved.data.reason, 'CONFIRMATION_MISMATCH');
+
+    // A malformed token never reaches the gate at all — the schema refuses it first.
+    await assert.rejects(
+      () =>
+        execute(getDefinition('delete_video'), { ...VIDEO_ARGS, confirmationToken: 'abc' }, {
+          prisma: gateOnlyPrisma(approvalStub()),
+          adminId: ADMIN_ID,
+        }),
+      (err) => err instanceof AgentToolError && err.code === 'INVALID_ARGS',
+      'a non-numeric token must be rejected as an argument error'
+    );
+  });
+
+  it('broadcast_notification previews the REAL audience and only tokens a sendable one', async () => {
+    const notificationService = require('../src/services/notifications/notificationService');
+    const original = notificationService.resolveAudience;
+    notificationService.resolveAudience = async () => [1, 2, 3];
+    try {
+      const args = { title: 'صيانة الأسبوع', audience: { kind: 'all' }, expectedRecipients: 3 };
+      const ctx = { prisma: approvalStub(), adminId: ADMIN_ID };
+
+      const preview = await execute(getDefinition('broadcast_notification'), args, ctx);
+      assert.equal(preview.data.stage, 'PREVIEW');
+      assert.equal(preview.data.preview.recipients, 3, 'the admin confirms against the real count');
+
+      // Audience drift is NOT a blank cheque: run() re-resolves the audience and
+      // still enforces expectedRecipients, so a preview token cannot over-send.
+      notificationService.resolveAudience = async () => [1, 2, 3, 4];
+      const drift = await execute(
+        getDefinition('broadcast_notification'),
+        { ...args, confirmationToken: preview.data.confirmationToken },
+        ctx
+      );
+      assert.equal(drift.data.ok, false);
+      assert.equal(drift.data.reason, 'RECIPIENT_COUNT_MISMATCH');
+
+      // The cap: an audience over the stated ceiling never earns a token at all.
+      const capped = await execute(getDefinition('broadcast_notification'), { ...args, maxRecipients: 2 }, ctx);
+      assert.equal(capped.data.ok, false);
+      assert.equal(capped.data.reason, 'TOO_MANY_RECIPIENTS');
+      assert.equal(capped.data.confirmationToken, undefined);
+    } finally {
+      notificationService.resolveAudience = original;
     }
   });
 

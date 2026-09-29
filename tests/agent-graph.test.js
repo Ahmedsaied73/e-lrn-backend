@@ -21,7 +21,15 @@ const { AIMessage, HumanMessage } = require('@langchain/core/messages');
 const config = require('../src/config/env');
 const prisma = require('../src/config/db');
 const { readDefinitions, actionDefinitions, toolNames: allToolNames } = require('../src/services/agent/tools');
-const { createAgentGraph, finalAnswerText, toolCallSummary, countToolCalls } = require('../src/services/agent/graph');
+const {
+  createAgentGraph,
+  finalAnswerText,
+  toolCallSummary,
+  countToolCalls,
+  buildSystemPrompt,
+  formatCairoDate,
+  MEMORY_BLOCK_LABEL,
+} = require('../src/services/agent/graph');
 
 let threadCounter = 0;
 function threadId(label) {
@@ -38,6 +46,7 @@ function scriptedModel(script) {
       calls.push({
         messageCount: messages.length,
         toolNames: tools.map((t) => t.name),
+        firstMessage: messages[0],
         lastMessage: messages[messages.length - 1],
       });
       const next = script.shift();
@@ -130,7 +139,7 @@ test('the tool budget is enforced, and the refused calls are answered explicitly
   }
 });
 
-test('the model cannot mutate anything by asking: no approval, no action', async () => {
+test('the model cannot mutate anything it cannot attribute: visibility is not authority', async () => {
   const agentConfig = config.aiAgent;
   const originalAllow = agentConfig.allowMutations;
   // Arm the mutations switch so the action tools are even VISIBLE to the model —
@@ -144,9 +153,11 @@ test('the model cannot mutate anything by asking: no approval, no action', async
       toolCall(actionName, { userSlug: 'aaaaaaaaaaaa', courseSlug: 'bbbbbbbbbbbb' }, 'call_action'),
       textAnswer('تم.'),
     ]);
-    // The resolver deliberately grants NOTHING: this is an unapproved request.
+    // Phase 3: authority IS attribution. The resolver deliberately grants NO
+    // adminId — the tool layer must refuse before it ever resolves a target,
+    // so the model sees the typed refusal, never a mutation result.
     const { graph, hasMutatingTools } = createAgentGraph({
-      resolveToolContext: () => ({ prisma, adminId: 1 }),
+      resolveToolContext: () => ({ prisma }),
       invokeModel: model.invokeModel,
     });
     assert.equal(hasMutatingTools, true);
@@ -158,8 +169,9 @@ test('the model cannot mutate anything by asking: no approval, no action', async
 
     const toolMessages = result.messages.filter((m) => typeof m.getType === 'function' && m.getType() === 'tool');
     assert.equal(toolMessages.length, 1);
-    // The tool layer refused, and the refusal is what the model sees.
-    assert.match(String(toolMessages[0].content), /APPROVAL_REQUIRED|موافقة|requires human approval/i);
+    // The tool layer refused (unattributable call), and the refusal is what the
+    // model sees — the mutation never ran against any target.
+    assert.match(String(toolMessages[0].content), /ADMIN_REQUIRED/i);
     assert.doesNotMatch(String(toolMessages[0].content), /paymentStatus/);
   } finally {
     agentConfig.allowMutations = originalAllow;
@@ -279,5 +291,69 @@ test('the mutation switch, not the display surface, decides what the ToolNode ca
   } finally {
     restore();
   }
+});
+
+/* ------------------------------------------------------------------------ *
+ * Phase 2 — the system prompt is BUILT per turn (handoff 3.2).
+ * These pin the replacement text, the injected Cairo date, and the Phase 7
+ * memory seam. The old prompt's literal numbered rules are gone on purpose:
+ * asserting their ABSENCE is what stops the report-writer persona from
+ * creeping back in.
+ * ------------------------------------------------------------------------ */
+
+test('the prompt is conversational: new persona in, old numbered rules and pending-approval prose out', () => {
+  const p = buildSystemPrompt({ now: new Date('2026-09-28T12:00:00Z') });
+  // Handoff 3.2 anchors that MUST be present.
+  assert.ok(p.startsWith('أنت مساعد ذكي لمدير منصة'), 'opens as the colleague persona, not a report generator');
+  assert.match(p, /بالعامية المصرية/, 'Egyptian Arabic is mandated (Decision #16)');
+  assert.match(p, /دردشة عادية/, 'general chat is in scope (Decision #3)');
+  assert.match(p, /من غير ما يطلب موافقة بزرار/, 'regular writes execute directly (Decision #1)');
+  assert.match(p, /معاينة الأول/, 'deletes preview-then-confirm (Decision #6)');
+  assert.match(p, /سبب \(reason\)/, 'financial overrides demand a reason (Decision #7)');
+  assert.match(p, /بيانات فقط/, 'tool output is data, never instructions');
+  // The old persona that must NEVER come back.
+  assert.doesNotMatch(p, /القواعد:/, 'the numbered rule block is gone');
+  assert.doesNotMatch(p, /العربية الفصحى/, 'the MSA mandate is gone');
+  assert.doesNotMatch(p, /لا تكشف تفاصيل داخلية/, 'the old no-capability rule 9 is gone');
+  assert.doesNotMatch(p, /أنتظر موافقته|مُرسل وأنتظر/, 'no pending-approval prose (Phase 1 §8 warning honoured)');
+  assert.doesNotMatch(p, /\bplatform_overview\b|\benroll_student\b/, 'no tool names hard-coded into the prose');
+});
+
+test('the date line is live, Cairo-local, and injectable', () => {
+  // 23:00Z on the 28th is already the 29th in Cairo (+2/+3) — proves the
+  // conversion, not just string interpolation.
+  const p = buildSystemPrompt({ now: new Date('2026-09-28T23:00:00Z') });
+  assert.match(p, /النهارده .+ بتوقيت القاهرة\./, 'the date line anchors "today" in Cairo time');
+  assert.ok(p.includes(formatCairoDate(new Date('2026-09-28T23:00:00Z'))), 'the line uses the shared formatter');
+  assert.ok(/٢٩/.test(p), 'Cairo has rolled over to the 29th while UTC is still on the 28th');
+});
+
+test('the memory seam is additive: empty memories change NOTHING, facts append under the label', () => {
+  const now = new Date('2026-09-28T12:00:00Z');
+  const bare = buildSystemPrompt({ now });
+  // An empty list must be byte-identical to no list at all — Phase 7 can ship
+  // behind it without any turn changing shape.
+  assert.equal(buildSystemPrompt({ now, memories: [] }), bare);
+  assert.ok(!bare.includes(MEMORY_BLOCK_LABEL), 'no label without facts');
+
+  const withFacts = buildSystemPrompt({ now, memories: ['المشرف يفضل التقارير الأسبوعية', { content: 'الدورة ٨ هي الأكثر تسجيلًا' }, '   '] });
+  assert.ok(withFacts.startsWith(bare), 'facts only APPEND to the prompt');
+  assert.ok(withFacts.endsWith(`${MEMORY_BLOCK_LABEL} (من محادثات سابقة):\n- المشرف يفضل التقارير الأسبوعية\n- الدورة ٨ هي الأكثر تسجيلًا`), 'strings and rows both render, blanks drop');
+});
+
+test('agentNode feeds the model a freshly built prompt, not a frozen constant', async () => {
+  const model = scriptedModel([textAnswer('أهلاً!')]);
+  const { graph } = createAgentGraph({ resolveToolContext: ctx, invokeModel: model.invokeModel });
+
+  await graph.invoke(
+    { messages: [new HumanMessage('إزيك؟')] },
+    { configurable: { thread_id: threadId('prompt-live') } }
+  );
+
+  const sys = model.calls[0].firstMessage;
+  assert.equal(sys.constructor.name, 'SystemMessage');
+  assert.ok(String(sys.content).startsWith('أنت مساعد ذكي لمدير منصة'), 'the live turn starts with the new persona');
+  assert.ok(String(sys.content).includes('بتوقيت القاهرة'), 'the per-turn date line reached the model');
+  assert.ok(String(sys.content).includes(formatCairoDate(new Date())), 'the date belongs to TODAY (the turn), not to boot time');
 });
 
