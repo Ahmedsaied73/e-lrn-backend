@@ -1,11 +1,12 @@
 'use strict';
 
 /**
- * Phase 3 — the orchestrator, end to end against the real database.
+ * Phase 4 — the orchestrator, end to end against the real database.
  *
  * The three claims worth an integration test:
  *   1. A catalogued question never builds a graph (no model, no cost).
- *   2. A model answer that quotes a figure no tool returned is refused, not shown.
+ *   2. A model answer whose figures no tool returned is SHOWN with a caveat, and
+ *      the figures are recorded on the turn (handoff 3.4 — the old refusal is gone).
  *   3. An action runs only under an approval bound to ITS OWN tool and arguments —
  *      and that approval is then spent, so it cannot be replayed.
  */
@@ -153,10 +154,12 @@ test('a model answer is accepted only when its figures trace to tool output', as
   });
   await trackConversation(result.conversationId);
 
-  assert.equal(result.ok, true, `expected a grounded answer, got ${result.code || ''} ${result.ungrounded || ''}`);
+  assert.equal(result.ok, true, `expected a grounded answer, got ${result.code || ''}`);
   assert.equal(result.source, 'llm');
   assert.equal(result.detail.provider, 'scripted');
   assert.deepEqual(result.detail.toolCalls, ['platform_overview']);
+  assert.deepEqual(result.detail.unverifiedFigures, [], 'a clean turn records an empty findings list');
+  assert.ok(!result.answer.includes('مش متأكد إنه من بيانات المنصة'), 'and appends no caveat');
 
   // The model-answered turn is persisted and audited (the deterministic tier is
   // reproducible from the catalogue; a model turn is not).
@@ -172,7 +175,10 @@ test('a model answer is accepted only when its figures trace to tool output', as
   assert.equal(auditRow.actorId, ADMIN_ID);
 });
 
-test('a fabricated statistic is refused, and nothing is persisted', async () => {
+test('a fabricated statistic is shown WITH a caveat, and the figures are recorded', async () => {
+  // Phase 4 (handoff 3.4, Decision #13): the old `GROUNDING_FAILED` refusal is gone.
+  // The answer the model wrote is the answer the admin sees — intact, with one honest
+  // caveat — and the turn carries the figures the guard could not trace.
   const fabricated = scriptedGraphFactory([
     toolCall('platform_overview', {}, 'call_overview'),
     new AIMessage({ content: 'عدد الطلاب 999,999 طالباً.' }),
@@ -185,23 +191,27 @@ test('a fabricated statistic is refused, and nothing is persisted', async () => 
   });
   await trackConversation(result.conversationId);
 
-  assert.equal(result.ok, false);
-  assert.equal(result.code, 'GROUNDING_FAILED');
-  assert.deepEqual(result.ungrounded, ['999,999']);
-  // Phase 4.5: a refused FIRST turn has no conversation to count messages in, because
-  // nothing is created at all any more (the sibling test below pins the row count).
-  // Prisma also refuses a null filter, so the id itself is the assertion: it proves no
-  // transcript was ever opened. A refused FOLLOW-UP turn still has a conversation,
-  // and that path is covered by the successful-turn history assertion below.
-  assert.equal(result.conversationId, null, 'a rejected first answer must not open a conversation');
+  assert.equal(result.ok, true, 'a flagged answer is shown, never discarded');
+  assert.match(result.answer, /^عدد الطلاب 999,999 طالباً\./, 'the model text itself is untouched');
+  assert.deepEqual(result.detail.unverifiedFigures, ['999,999']);
+  assert.match(result.answer, /\(الرقم ده مش متأكد إنه من بيانات المنصة، اتأكد منه لو مهم\)/);
+
+  // Phase 4.5's guarantee survives the inversion: a shown turn is a stored turn, so
+  // the conversation holds its question + answer pair — and the flag is queryable.
+  const messages = await prisma.agentMessage.findMany({
+    where: { conversationId: result.conversationId },
+    orderBy: { id: 'asc' },
+    select: { role: true, content: true, metadata: true },
+  });
+  assert.deepEqual(messages.map((m) => m.role), ['USER', 'ASSISTANT']);
+  assert.match(messages[1].content, /999,999/);
+  assert.match(messages[1].content, /مش متأكد إنه من بيانات المنصة/);
+  assert.deepEqual(messages[1].metadata.unverifiedFigures, ['999,999']);
 });
 
-test('a refused turn leaves NO conversation row behind (the sidebar-orphan defect)', async () => {
-  // Phase 4.5. Before this, the conversation row was created BEFORE the turn was
-  // answered, so every failed turn left a titless, message-less conversation in the
-  // admin's sidebar — 25 of 70 rows in one diagnostic session. A conversation is now
-  // written together with the turn that gives it meaning, so a turn with nothing to
-  // store must leave nothing at all.
+test('a flagged turn leaves a conversation WITH its answer (nothing is dropped)', async () => {
+  // Phase 4.5's orphan rule, re-pinned for the advisory world: with no discard
+  // path left, every turn has something to store, so every turn stores it.
   const before = await prisma.agentConversation.count({ where: { adminId: ADMIN_ID } });
 
   const fabricated = scriptedGraphFactory([
@@ -214,11 +224,12 @@ test('a refused turn leaves NO conversation row behind (the sidebar-orphan defec
     prisma,
     graphFactory: fabricated.factory,
   });
-  assert.equal(result.ok, false);
+  assert.equal(result.ok, true, 'there is no refusal path left to trigger');
 
   const after = await prisma.agentConversation.count({ where: { adminId: ADMIN_ID } });
-  assert.equal(after, before, 'a refused turn must not create a conversation');
-  assert.equal(result.conversationId, null, 'and it must not hand out an id for one');
+  assert.equal(after, before + 1, 'a shown turn must create its conversation');
+  assert.ok(result.conversationId, 'and it must hand out an id for it');
+  assert.deepEqual(result.detail.unverifiedFigures, ['888,888']);
 });
 
 test('a new conversation is created WITH its first turn, titled from that question', async () => {

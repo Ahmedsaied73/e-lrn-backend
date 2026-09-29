@@ -29,7 +29,7 @@ const { randomUUID } = require('node:crypto');
 const { HumanMessage } = require('@langchain/core/messages');
 const { answerDeterministic } = require('./engine');
 const { createAgentGraph, finalAnswerText, toolCallSummary } = require('./graph');
-const { collectAllowed, checkGrounded } = require('./answerGuard');
+const { collectAllowed, checkGrounded, withGroundingNote } = require('./answerGuard');
 const { canonicalArgsHash, consumeApproval, getApproval, requestApproval } = require('./approvals');
 const conversations = require('./conversationService');
 const audit = require('../auditLog');
@@ -92,6 +92,27 @@ function collectToolPayloads(result) {
     }
   }
   return payloads;
+}
+
+/**
+ * Tool-call arguments the model sent this turn, as plain objects.
+ *
+ * A number that rode inside a request (a slug, a window, a take, an id) is not
+ * invented, so echoing it back is never a fabrication — the guard needs these
+ * separately from the results. Structural content stays out: args are tiny and
+ * already model-visible, but the exemption is numeric-only by construction (the
+ * guard only ever collects canonical numbers).
+ */
+function collectToolCallArgs(result) {
+  const messages = (result && result.messages) || [];
+  const args = [];
+  for (const message of messages) {
+    const calls = (message && message.tool_calls) || [];
+    for (const call of calls) {
+      if (call && call.args !== undefined && call.args !== null) args.push(call.args);
+    }
+  }
+  return args;
 }
 
 /**
@@ -375,17 +396,20 @@ async function answerQuestion({
     };
   }
 
-  // ── Grounding: the answer may not contain figures no tool returned ──────────
-  const grounding = checkGrounded(answer, collectToolPayloads(run));
-  if (!grounding.ok) {
-    return {
-      ok: false,
-      code: 'GROUNDING_FAILED',
-      message: 'تم تجاهل الإجابة لأنها تحتوي أرقاماً لا يمكن تتبّعها إلى بيانات المنصة.',
-      ungrounded: grounding.ungrounded,
-      conversationId: conversation.id,
-    };
-  }
+  // ── Grounding: advisory, never destructive (Phase 4, handoff 3.4) ─────────
+  //
+  // A figure no tool returned is a warning, not a verdict: the answer is shown,
+  // the figures are recorded on the turn, and one short Arabic caveat is
+  // appended — once, and only when something was actually flagged. The guard
+  // itself evaluates the three exemptions (numbers the admin typed, numbers in
+  // this turn's tool-call arguments, a turn in which no tool ran at all), so the
+  // worst case for any turn is an answer with a trailing note.
+  const grounding = checkGrounded(answer, collectToolPayloads(run), {
+    question,
+    toolArgs: collectToolCallArgs(run),
+  });
+  const groundedAnswer = withGroundingNote(answer, grounding);
+  const unverifiedFigures = grounding.ungrounded;
 
   // ── The interactive hinge: a refused mutation becomes an approval REQUEST ───
   // When the model asked for a mutation and the tool layer refused it for lack of
@@ -426,9 +450,10 @@ async function answerQuestion({
     modelCalls: turnMetrics.modelCalls,
     toolSurface: turnMetrics.toolSurface,
     latencyMs: Date.now() - startedAt,
+    unverifiedFigures,
   };
 
-  await persistTurn(answer, {
+  await persistTurn(groundedAnswer, {
     llm: true,
     provider: run.provider,
     // The model that actually answered, resolved through the provider ORDER so it
@@ -436,6 +461,7 @@ async function answerQuestion({
     model: require('./llmProvider').modelIdFor(run.provider),
     toolCalls: detail.toolCalls,
     latencyMs: detail.latencyMs,
+    unverifiedFigures,
   });
 
   // One audit row per model-answered turn: the deterministic tier is reproducible
@@ -452,7 +478,10 @@ async function answerQuestion({
         provider: run.provider,
         toolCalls: detail.toolCalls,
         declinedReason: deterministic.reason,
-        grounded: true,
+        // Phase 4: "the turn was flagged" is the fact, not "the turn was clean".
+        // An empty list means the guard had nothing to say; a populated one means
+        // the answer the admin saw ends with the caveat line.
+        unverifiedFigures,
         // Decision Q3: what binding the whole catalogue every turn actually cost, and how
         // many model calls the turn spent. Read from the audit trail, never guessed.
         toolSurface: detail.toolSurface,
@@ -461,13 +490,14 @@ async function answerQuestion({
     }
   );
 
-  return { ok: true, source: 'llm', answer, conversationId: conversation.id, detail };
+  return { ok: true, source: 'llm', answer: groundedAnswer, conversationId: conversation.id, detail };
 }
 
 module.exports = {
   AgentServiceError,
   answerQuestion,
   collectToolPayloads,
+  collectToolCallArgs,
   createApprovalResolver,
   allowedFromPayloads: collectAllowed,
 };

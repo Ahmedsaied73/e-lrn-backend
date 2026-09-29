@@ -45,6 +45,11 @@ const MESSAGES_TAKE_MAX = 100;
 
 const METADATA_STRING_MAX = 96;
 const TOOL_CALLS_MAX = 20;
+// Phase 4: the grounding check no longer discards an answer — it names the figures
+// it could not trace, and those names are stored on the turn. Same doctrine as the
+// other metadata caps: keep the fact, drop the volume.
+const UNVERIFIED_FIGURES_MAX = 20;
+const UNVERIFIED_FIGURE_MAX = 32;
 
 // Cap on one prune statement. Conversations are small (a transcript, not a blob),
 // so a few hundred per tick is plenty to keep up with organic growth while keeping
@@ -219,6 +224,20 @@ function sanitizeTurnMetadata(metadata) {
   // Checked against undefined explicitly: toolCalls: 0 is a fact ("no tool ran"),
   // and a falsy check would silently drop it.
   if (toolCalls !== undefined) safe.toolCalls = toolCalls;
+
+  // Phase 4: the advisory grounding check's findings. Sanitized like tool names —
+  // a short list of short figure strings, or nothing at all — because the stored
+  // metadata answers "was this turn flagged?" without smuggling answer content
+  // into the transcript.
+  if (Array.isArray(metadata.unverifiedFigures)) {
+    const figures = [];
+    for (const figure of metadata.unverifiedFigures.slice(0, UNVERIFIED_FIGURES_MAX)) {
+      const text = typeof figure === 'string' ? figure : figure !== null && figure !== undefined ? String(figure) : '';
+      if (text.trim() !== '') figures.push(text.slice(0, UNVERIFIED_FIGURE_MAX));
+      if (figures.length >= UNVERIFIED_FIGURES_MAX) break;
+    }
+    if (figures.length > 0) safe.unverifiedFigures = figures;
+  }
 
   if (metadata.deterministic !== undefined && metadata.deterministic !== null) {
     safe.deterministic = Boolean(metadata.deterministic);
