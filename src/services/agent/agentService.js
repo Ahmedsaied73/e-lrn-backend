@@ -225,6 +225,10 @@ async function runAgentTurn(graph, question, conversationId, emit) {
  * { type: 'thinking' | 'tier' | 'tool_call' | 'tool_result' } objects. It is
  * best-effort by contract — a listener exception never fails an answer, and the
  * events carry progress (tool names, tiers), never secrets or full payloads.
+ *
+ * `graphFactory` and `answerFactory` are the two test seams: the graph builder, and
+ * the deterministic router (needed since Phase 5, because the provider-outage path
+ * consults the fast path a second time and a test must be able to count those calls).
  */
 async function answerQuestion({
   question,
@@ -234,6 +238,7 @@ async function answerQuestion({
   persist = true,
   prisma,
   graphFactory = createAgentGraph,
+  answerFactory = answerDeterministic,
   onEvent = null,
 }) {
   const startedAt = Date.now();
@@ -311,7 +316,7 @@ async function answerQuestion({
   }
 
   // ── Tier 1: deterministic ───────────────────────────────────────────────────
-  const deterministic = await answerDeterministic(question, {
+  const deterministic = await answerFactory(question, {
     prisma: db,
     adminId,
     conversationId: conversation.id,
@@ -375,10 +380,60 @@ async function answerQuestion({
     const turn = await runAgentTurn(graph, question, turnConversationId, emit);
     run = turn;
   } catch (err) {
+    // A provider outage (Decision #17) is handled differently from a real bug: the
+    // fast path gets ONE last look (below), and the admin is told plainly what
+    // happened. Anything else — a bad key, a malformed request — is a different fact
+    // and must not be reported as "the service is down".
+    if (!err || err.code !== 'ALL_PROVIDERS_FAILED') {
+      return {
+        ok: false,
+        code: 'LLM_ERROR',
+        message: 'حصل خطأ أثناء توليد الرد. جرّب تاني، ولو كررت نفسها راجع إعدادات مزوّد الذكاء الاصطناعي.',
+        declinedReason: deterministic.reason,
+        conversationId: conversation.id,
+      };
+    }
+
+    // §3.5 / Decision #17: try the fast-path router against the SAME question before
+    // giving up — a single deterministic check, never a retry loop with hidden backoff.
+    // In today's tier order the fast path already ran and declined (that is how the turn
+    // reached the model at all), so this second look only matters if that order ever
+    // changes; its cost is one route() call and its value is that the guarantee stays
+    // true without anyone remembering to re-add it.
+    const lastChance = await answerFactory(question, {
+      prisma: db,
+      adminId,
+      conversationId: conversation.id,
+    });
+    if (lastChance.matched) {
+      emit({ type: 'tier', tier: 'deterministic', intent: lastChance.intent });
+      await persistTurn(lastChance.answer, {
+        deterministic: true,
+        latencyMs: lastChance.latencyMs,
+        toolCalls: lastChance.tool ? [lastChance.tool] : 0,
+      });
+      return {
+        ok: true,
+        source: 'deterministic',
+        answer: lastChance.answer,
+        conversationId: conversation.id,
+        detail: {
+          intent: lastChance.intent,
+          tool: lastChance.tool,
+          latencyMs: Date.now() - startedAt,
+          declinedReason: deterministic.reason,
+        },
+      };
+    }
+
+    // Nothing left to try: say so, in the admin's own dialect, with the real cause —
+    // the model tier is unavailable. No silent retry ever ran behind this answer.
     return {
       ok: false,
-      code: err && err.code === 'ALL_PROVIDERS_FAILED' ? 'LLM_UNAVAILABLE' : 'LLM_ERROR',
-      message: 'تعذّر الوصول إلى مزوّد الذكاء الاصطناعي. حاول مرة أخرى.',
+      code: 'PROVIDER_UNAVAILABLE',
+      message:
+        'مزوّد الذكاء الاصطناعي مش مستجيب دلوقتي (ضغط على الخدمة أو مشكلة مؤقتة عنده). جرّب تاني بعد شوية؛ ' +
+        'ولو محتاج رقم أو تقرير بسرعة، اسأل عن حاجة من التقارير الجاهزة زي عدد الطلاب أو اشتراكات الشهر.',
       declinedReason: deterministic.reason,
       conversationId: conversation.id,
     };
@@ -443,6 +498,10 @@ async function answerQuestion({
 
   const detail = {
     provider: run.provider,
+    // WHICH model answered, taken from the failover that actually ran rather than
+    // re-derived from config (Phase 5): with two attempts on one vendor, a
+    // provider-name-only record cannot tell the operator which tier answered.
+    model: run.model || null,
     toolCalls: toolCallSummary(run),
     stopReason: run.stopReason,
     approval: used.approvalId,
@@ -456,9 +515,9 @@ async function answerQuestion({
   await persistTurn(groundedAnswer, {
     llm: true,
     provider: run.provider,
-    // The model that actually answered, resolved through the provider ORDER so it
-    // cannot be wrong when the primary/fallback pairing changes.
-    model: require('./llmProvider').modelIdFor(run.provider),
+    // The model that actually answered — the failover wrapper reports it, so this can
+    // never disagree with what the provider layer tried (Phase 5).
+    model: run.model || null,
     toolCalls: detail.toolCalls,
     latencyMs: detail.latencyMs,
     unverifiedFigures,

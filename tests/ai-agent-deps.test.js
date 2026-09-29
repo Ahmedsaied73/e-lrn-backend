@@ -45,11 +45,21 @@ describe('AI Admin Agent — dependency contract', () => {
     );
   });
 
-  it('installs the Groq provider at 1.x together with its SDK', () => {
-    const groq = pkgJson('@langchain/groq');
-    assert.ok(Number(groq.version.split('.')[0]) >= 1, `@langchain/groq must be 1.x, found ${groq.version}`);
-    assert.ok(groq.dependencies['groq-sdk'], 'groq-sdk transport dependency present');
-    assert.equal(typeof require('@langchain/groq').ChatGroq, 'function', 'ChatGroq export');
+  it('installs exactly one provider: Gemini, and the removed vendor is not present', () => {
+    // Phase 5 (handoff 3.5): the second provider was removed from package.json, so the
+    // package must not exist in node_modules at all. Asserting the ABSENCE is the point:
+    // an unused-but-installed dependency is a supply-chain surface nobody is watching,
+    // and a lazy `require('@langchain/groq')` left somewhere would throw at runtime
+    // rather than at boot. This test turns that into a suite failure.
+    assert.throws(
+      () => pkgJson('@langchain/groq'),
+      /ENOENT/,
+      'the removed provider must not be installed'
+    );
+
+    const gemini = pkgJson('@langchain/google-genai');
+    assert.ok(Number(gemini.version.split('.')[0]) >= 2, `@langchain/google-genai must be 2.x, found ${gemini.version}`);
+    assert.equal(typeof require('@langchain/google-genai').ChatGoogleGenerativeAI, 'function', 'ChatGoogleGenerativeAI export');
   });
 
   it('exposes the exact LangGraph API the agent graph is built on', () => {
@@ -62,7 +72,7 @@ describe('AI Admin Agent — dependency contract', () => {
     assert.equal(
       typeof require('@langchain/google-genai').ChatGoogleGenerativeAI,
       'function',
-      'Gemini fallback provider'
+      'the only configured provider'
     );
   });
 

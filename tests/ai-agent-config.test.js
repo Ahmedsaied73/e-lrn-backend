@@ -1,9 +1,9 @@
-'use strict';
-/* AI Admin Agent — config + kill-switch contract (Phase 0).
+﻿'use strict';
+/* AI Admin Agent â€” config + kill-switch contract (Phase 0).
  *
  * Pins the invariants that make the agent safe to ship, BEFORE any agent code
  * exists. The resolver is pure env parsing (no DB, no Redis, no network), so
- * each case runs in its own node process — src/config/env.js is module-cached
+ * each case runs in its own node process â€” src/config/env.js is module-cached
  * and warns once per process.
  *
  * Invariants under test:
@@ -11,7 +11,7 @@
  *   2. allowMutations can NEVER be true while `enabled` is false.
  *   3. A missing or placeholder key is never "configured".
  *   4. Primary provider is chosen by preference order over configured keys.
- *   5. Every numeric budget is clamped — a typo cannot create unbounded spend.
+ *   5. Every numeric budget is clamped â€” a typo cannot create unbounded spend.
  *   6. A misconfiguration warns but never fails boot (spawn exits 0).
  *
  * Net-zero: reads process env only; touches no database or cache.
@@ -23,7 +23,7 @@ const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 
 // Boot-critical vars env.js refuses to start without (JWTSECRET, ADMIN_PASSWORD,
-// the four Bunny keys). Agent vars are pinned to '' — an empty *value* shields
+// the four Bunny keys). Agent vars are pinned to '' â€” an empty *value* shields
 // every case from a developer's own .env, because dotenv never overrides a key
 // that is already present in process.env.
 const BASE_ENV = {
@@ -39,7 +39,6 @@ const BASE_ENV = {
   AI_AGENT_MODEL_PRIMARY: '',
   AI_AGENT_MODEL_FALLBACK: '',
   AI_AGENT_PROVIDER_ORDER: '',
-  GROQ_API_KEY: '',
   GEMINI_API_KEY: '',
   AI_AGENT_MAX_TOOL_CALLS: '',
   AI_AGENT_MAX_TOOL_RESULT_ROWS: '',
@@ -60,7 +59,7 @@ function resolveConfig(overrides = {}) {
   return JSON.parse(stdout);
 }
 
-describe('AI Admin Agent — config + kill switch', () => {
+describe('AI Admin Agent â€” config + kill switch', () => {
   it('is OFF by default and mutations cannot outlive the agent switch', () => {
     const off = resolveConfig();
     assert.equal(off.features.aiAgent, false, 'default: features.aiAgent must be false');
@@ -75,101 +74,66 @@ describe('AI Admin Agent — config + kill switch', () => {
   });
 
   it('mirrors the switch into features.aiAgent when enabled', () => {
-    const on = resolveConfig({ AI_AGENT_ENABLED: 'yes', GROQ_API_KEY: 'gsk_live_looking_key' });
+    const on = resolveConfig({ AI_AGENT_ENABLED: 'yes', GEMINI_API_KEY: 'gemini_live_looking_key' });
     assert.equal(on.features.aiAgent, true, 'features.aiAgent follows the switch');
     assert.equal(on.aiAgent.enabled, true, 'enabled');
     assert.equal(on.aiAgent.allowMutations, false, 'read-only unless explicitly armed');
   });
 
-  it('warns (never crashes) when enabled without any provider key', () => {
+  it('warns (never crashes) when enabled without a provider key', () => {
     // execFileSync throws on a non-zero exit, so a boot failure here fails the test.
     const bare = resolveConfig({ AI_AGENT_ENABLED: 'true' });
     assert.equal(bare.aiAgent.configured, false, 'no key means not configured');
     assert.equal(bare.aiAgent.primary, null, 'no provider selected');
     assert.deepEqual(
       bare.aiAgent.providers,
-      { groq: { configured: false }, gemini: { configured: false } },
-      'both providers report unconfigured'
+      { gemini: { configured: false } },
+      'the single vendor reports unconfigured'
     );
   });
 
-  it('selects the primary provider by preference order over configured keys', () => {
-    const both = resolveConfig({
-      AI_AGENT_ENABLED: 'true',
-      GROQ_API_KEY: 'gsk_live_key',
-      GEMINI_API_KEY: 'gemini_live_key',
-    });
-    // CHANGED: the default order is gemini-first (AI_AGENT_PROVIDER_ORDER). This used
-    // to assert 'groq', back when primary was a hardcoded
-    // `providers.groq.configured ? 'groq' : 'gemini'`. Primary is now the first
-    // CONFIGURED name IN THE ORDER, so with both keys present Gemini leads.
-    assert.deepEqual(both.aiAgent.providerOrder, ['gemini', 'groq'], 'default order is gemini-first');
-    assert.equal(both.aiAgent.primary, 'gemini', 'the first name in the default order leads');
-    assert.equal(both.aiAgent.configured, true, 'configured');
+  it('selects the primary provider from the configured key', () => {
+    // Phase 5 (handoff 3.5): there is exactly one vendor left, so "preference order"
+    // can only ever name it â€” the order mechanism survives as the seam the failover
+    // walks, and unknown names are still DROPPED rather than inventing a provider.
+    const on = resolveConfig({ AI_AGENT_ENABLED: 'true', GEMINI_API_KEY: 'gemini_live_key' });
+    assert.deepEqual(on.aiAgent.providerOrder, ['gemini'], 'the only vendor leads');
+    assert.equal(on.aiAgent.primary, 'gemini', 'the configured vendor is the primary');
+    assert.equal(on.aiAgent.configured, true, 'configured');
 
-    // The order picks the primary, it does not filter availability: the first
-    // CONFIGURED name wins, so an unconfigured leader falls through to the next.
-    const groqOnly = resolveConfig({ AI_AGENT_ENABLED: 'true', GROQ_API_KEY: 'gsk_live_key' });
-    assert.equal(groqOnly.aiAgent.primary, 'groq', 'Groq leads once it is the first configured name');
-    assert.equal(groqOnly.aiAgent.providers.gemini.configured, false, 'gemini unconfigured');
-
-    const geminiOnly = resolveConfig({ AI_AGENT_ENABLED: 'true', GEMINI_API_KEY: 'gemini_live_key' });
-    assert.equal(geminiOnly.aiAgent.primary, 'gemini', 'Gemini is configured and leads');
-    assert.equal(geminiOnly.aiAgent.providers.groq.configured, false, 'groq unconfigured');
+    // A key for the removed vendor configures NOTHING: the env var is inert, which is
+    // the honest behaviour for a credential no code path reads any more.
+    const staleVendor = resolveConfig({ AI_AGENT_ENABLED: 'true', GROQ_API_KEY: 'gsk_leftover_key' });
+    assert.equal(staleVendor.aiAgent.configured, false, 'a key for a removed vendor does not configure the agent');
+    assert.equal(staleVendor.aiAgent.primary, null, 'and it cannot become the primary');
   });
 
-  it('resolves the provider order from AI_AGENT_PROVIDER_ORDER', () => {
-    // Reversing the order flips the primary — with no code change, which is the whole
-    // point of making the order env-driven.
-    const reversed = resolveConfig({
-      AI_AGENT_ENABLED: 'true',
-      GROQ_API_KEY: 'gsk_live_key',
-      GEMINI_API_KEY: 'gemini_live_key',
-      AI_AGENT_PROVIDER_ORDER: 'groq,gemini',
-    });
-    assert.deepEqual(reversed.aiAgent.providerOrder, ['groq', 'gemini'], 'the order is respected verbatim');
-    assert.equal(reversed.aiAgent.primary, 'groq', 'reversing the order flips the primary');
-
-    // Unknown names are DROPPED, so a typo cannot invent a provider. Casing and
-    // padding are normalised, because a hand-edited .env carries both.
+  it('drops provider names the config does not define, whatever the order says', () => {
+    // Casing and padding are normalised, because a hand-edited .env carries both, and
+    // a name with no config entry cannot be selected â€” the rule that stops a typo from
+    // inventing a provider.
     const typo = resolveConfig({
       AI_AGENT_ENABLED: 'true',
-      GROQ_API_KEY: 'gsk_live_key',
       GEMINI_API_KEY: 'gemini_live_key',
-      AI_AGENT_PROVIDER_ORDER: ' GROQ , mistral ,openai ',
+      AI_AGENT_PROVIDER_ORDER: ' GEMINI , mistral ,openai ',
     });
-    assert.deepEqual(
-      typo.aiAgent.providerOrder,
-      ['groq', 'gemini'],
-      'unknown names dropped, casing and padding normalised'
-    );
+    assert.deepEqual(typo.aiAgent.providerOrder, ['gemini'], 'unknown names dropped, casing normalised');
+    assert.equal(typo.aiAgent.primary, 'gemini');
 
-    // A configured provider the order FORGOT is still appended, so a partially
-    // specified order can never leave `configured` false while a key exists.
-    const partial = resolveConfig({
-      AI_AGENT_ENABLED: 'true',
-      GROQ_API_KEY: 'gsk_live_key',
-      GEMINI_API_KEY: 'gemini_live_key',
-      AI_AGENT_PROVIDER_ORDER: 'gemini',
-    });
-    assert.deepEqual(partial.aiAgent.providerOrder, ['gemini', 'groq'], 'the unlisted provider is appended');
-    assert.equal(partial.aiAgent.primary, 'gemini', 'the listed provider still leads');
-    assert.equal(partial.aiAgent.configured, true, 'the appended provider is still reachable');
-
-    // An order naming nothing real leaves the real providers reachable rather than
+    // An order naming nothing real leaves the real vendor reachable rather than
     // producing an empty order that nothing can be resolved against.
     const nonsense = resolveConfig({
       AI_AGENT_ENABLED: 'true',
-      GROQ_API_KEY: 'gsk_live_key',
+      GEMINI_API_KEY: 'gemini_live_key',
       AI_AGENT_PROVIDER_ORDER: 'openai,mistral',
     });
-    assert.deepEqual(nonsense.aiAgent.providerOrder, ['groq'], 'only real providers survive');
-    assert.equal(nonsense.aiAgent.primary, 'groq', 'primary is still resolved');
+    assert.deepEqual(nonsense.aiAgent.providerOrder, ['gemini'], 'only real providers survive');
+    assert.equal(nonsense.aiAgent.primary, 'gemini', 'primary is still resolved');
   });
 
   it('never treats a placeholder key as configured', () => {
-    const placeholder = resolveConfig({ AI_AGENT_ENABLED: 'true', GROQ_API_KEY: 'your_groq_api_key' });
-    assert.equal(placeholder.aiAgent.providers.groq.configured, false, 'placeholder rejected');
+    const placeholder = resolveConfig({ AI_AGENT_ENABLED: 'true', GEMINI_API_KEY: 'your_gemini_api_key' });
+    assert.equal(placeholder.aiAgent.providers.gemini.configured, false, 'placeholder rejected');
     assert.equal(placeholder.aiAgent.primary, null, 'no provider to select');
 
     const bracketed = resolveConfig({ AI_AGENT_ENABLED: 'true', GEMINI_API_KEY: '[PROJECT-REF]-key' });
@@ -227,15 +191,19 @@ describe('AI Admin Agent — config + kill switch', () => {
     assert.equal(silly.aiAgent.confirmationTtlMinutes, 1, 'zero confirm window clamps up to a minute');
   });
 
-  it('ships model defaults that are known-good in this codebase', () => {
+  it('ships model defaults that are verified live on this key', () => {
     const cfg = resolveConfig({ AI_AGENT_ENABLED: 'true' });
-    // Both ids verified LIVE with tool calling on this project's keys (Phase 4.5).
-    // The default pairing follows the default provider ORDER (gemini first), so
-    // the primary id is a Gemini model and the fallback is the Groq one. Asserted
-    // against providerOrder rather than hardcoded, so changing the preference does
-    // not require editing this test to keep it meaningful.
-    assert.equal(cfg.aiAgent.providerOrder[0], 'gemini', 'gemini is the default first choice');
-    assert.equal(cfg.aiAgent.primaryModel, 'gemini-3.6-flash', 'primary default is a verified tool-calling model');
-    assert.equal(cfg.aiAgent.fallbackModel, 'openai/gpt-oss-120b', 'fallback is the verified Groq tool-caller');
+    // Phase 5: both ids are Flash-tier Gemini models, and both were verified against
+    // this project's key by listing the vendor catalogue (models/gemini-3.7-flash and
+    // models/gemini-3.6-flash are present) — handoff 3.5 makes that check a condition
+    // of becoming a default, so it is pinned here rather than left to a README.
+    assert.equal(cfg.aiAgent.providerOrder[0], 'gemini', 'gemini is the only vendor');
+    assert.equal(cfg.aiAgent.primaryModel, 'gemini-3.7-flash', 'primary default is the current Flash tier');
+    assert.equal(cfg.aiAgent.fallbackModel, 'gemini-3.6-flash', 'fallback default is the older Flash tier');
+    assert.notEqual(
+      cfg.aiAgent.primaryModel,
+      cfg.aiAgent.fallbackModel,
+      'two distinct ids, or the fallback attempt would be a copy of the primary'
+    );
   });
 });

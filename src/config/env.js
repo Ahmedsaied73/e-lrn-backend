@@ -169,9 +169,13 @@ function resolveAiGrader() {
 
 // ── AI Admin Agent (admin copilot: analytics + guarded, approved mutations) ──
 // NEVER boot-critical (same doctrine as resolveAiGrader above): a missing
-// GROQ_API_KEY only removes the primary provider (Gemini remains available),
-// and a missing key on both leaves the module `configured: false` so the routes
-// can answer with a clear Arabic configuration error instead of crashing boot.
+// GEMINI_API_KEY leaves the module `configured: false`, so the routes can answer
+// with a clear Arabic configuration error instead of crashing boot.
+//
+// Phase 5 (handoff 3.5): a single vendor — Gemini, via @langchain/google-genai. The
+// second provider and its key were removed entirely, so "failover" is no longer
+// vendor-level: AI_AGENT_MODEL_PRIMARY answers, and AI_AGENT_MODEL_FALLBACK is the
+// same vendor's older Flash tier for a transient failure. See llmProvider.js.
 //
 // Two INDEPENDENT switches, deliberately:
 //   AI_AGENT_ENABLED         (default FALSE) — kill switch, checked at mount
@@ -200,31 +204,35 @@ function clampAgentInt(rawValue, fallback, min, max) {
   if (!Number.isSafeInteger(n)) return fallback;
   return Math.min(Math.max(n, min), max);
 }
-/** House preference when AI_AGENT_PROVIDER_ORDER is absent: Gemini, then Groq. */
-const DEFAULT_PROVIDER_ORDER = Object.freeze(['gemini', 'groq']);
+/**
+ * House preference when AI_AGENT_PROVIDER_ORDER is absent.
+ *
+ * Phase 5 (handoff 3.5): Gemini is the ONLY vendor, so the order has exactly one
+ * real value. The mechanism is kept rather than deleted because it is the seam the
+ * failover walks (llmProvider.providerOrder()) and because unknown names still have
+ * to be DROPPED rather than inventing a provider — but with one vendor the env var
+ * can no longer change anything, which is worth knowing before debugging it.
+ */
+const DEFAULT_PROVIDER_ORDER = Object.freeze(['gemini']);
 
 function resolveAiAgent() {
   const enabled = resolveFlag(process.env.AI_AGENT_ENABLED, false);
-  const groqApiKey = agentSecret('GROQ_API_KEY');
   const geminiApiKey = agentSecret('GEMINI_API_KEY');
 
   const providers = {
-    groq: { configured: Boolean(groqApiKey) },
     gemini: { configured: Boolean(geminiApiKey) },
   };
-  // Primary = first CONFIGURED provider in preference order. The Phase 3 failover
-  // wrapper walks this list on 429/5xx, so adding a provider later is a one-line
-  // change here — never a change inside the agent graph.
+  // Primary = first CONFIGURED provider in preference order. The failover wrapper
+  // walks this list on 429/5xx, so adding a vendor later is a one-line change here —
+  // never a change inside the agent graph.
   //
-  // The order is env-driven (AI_AGENT_PROVIDER_ORDER) rather than a hardcoded
-  // `groq ? 'groq' : 'gemini'` so the preference can be changed without a code
-  // edit, and so a provider added later cannot silently be pinned last. Default
-  // is gemini-first: it is the model family the AI grader already runs in
-  // production here, and its tool-calling is steadier on this schema than the
-  // Groq free tier, which intermittently answers a turn without emitting a single
-  // tool call. Unknown names are DROPPED, so a typo cannot invent a provider.
-  // No env value at all means "use the house preference" (gemini first); an env
-  // value is authoritative even when every name in it is garbage.
+  // The order is env-driven (AI_AGENT_PROVIDER_ORDER) rather than hardcoded so a
+  // provider added later cannot silently be pinned last — but with Gemini the only
+  // vendor (Phase 5) this list can only ever resolve to ['gemini']. Unknown names are
+  // DROPPED, so a typo cannot invent a provider, and the installed-model sentence
+  // that used to live here is now moot: there is no second vendor to compare against.
+  // No env value at all means "use the house preference"; an env value is
+  // authoritative even when every name in it is garbage.
   const rawOrder = String(process.env.AI_AGENT_PROVIDER_ORDER ?? '').trim();
   const requestedOrder = (rawOrder || DEFAULT_PROVIDER_ORDER.join(','))
     .split(',')
@@ -242,7 +250,7 @@ function resolveAiAgent() {
   const configured = primary !== null;
 
   if (enabled && !configured) {
-    console.warn('[WARN] AI_AGENT_ENABLED=true but neither GROQ_API_KEY nor GEMINI_API_KEY is set — the agent will answer with a configuration error (no boot failure).');
+    console.warn('[WARN] AI_AGENT_ENABLED=true but GEMINI_API_KEY is not set — the agent will answer with a configuration error (no boot failure).');
   }
 
   return {
@@ -255,19 +263,17 @@ function resolveAiAgent() {
     // The resolved failover order, published so llmProvider.js walks THIS list
     // instead of keeping its own copy of the preference.
     providerOrder: requestedOrder,
-    groqApiKey,
     geminiApiKey,
-    // Model ids are paired with the provider order above: the PRIMARY id belongs
-    // to the primary provider and the FALLBACK id to the other one. Both were
-    // verified live with tool calling on this project's keys (Phase 4.5).
-    // Do not "restore" the older Groq default `llama-3.3-70b-versatile` — it
-    // returns 404 model_not_found, which made the whole tier answer LLM_ERROR.
-    // Verified tool-calling ids: Gemini `gemini-3.6-flash` / `gemini-3.8-flash`,
-    // Groq `openai/gpt-oss-120b` (131k ctx). `qwen/qwen3.8-27b` also calls tools
-    // but its 7k ITPM limit 413s this schema, and `allam-2-7b` is Arabic-native
-    // with NO tool support — neither may be used as a default.
-    primaryModel: process.env.AI_AGENT_MODEL_PRIMARY || 'gemini-3.6-flash',
-    fallbackModel: process.env.AI_AGENT_MODEL_FALLBACK || 'openai/gpt-oss-120b',
+    // Model ids are the two ATTEMPTS of the single vendor (Phase 5), in order:
+    // primary first, then the older Flash tier for a transient failure. Both ids were
+    // verified LIVE against this project's key by listing the vendor catalogue
+    // (models/gemini-3.7-flash and models/gemini-3.6-flash are both present), which
+    // is the check handoff 3.5 asks for before a model id may become a default.
+    // Do not "restore" a non-Flash or long-retired id: a retired one answers
+    // 404 model_not_found, which the provider layer retires for the process and the
+    // admin then sees as an outage.
+    primaryModel: process.env.AI_AGENT_MODEL_PRIMARY || 'gemini-3.7-flash',
+    fallbackModel: process.env.AI_AGENT_MODEL_FALLBACK || 'gemini-3.6-flash',
     // Budgets/caps — every one CLAMPED, because a typo in an env var must never
     // be able to turn one admin question into unbounded LLM/DB spend.
     maxToolCalls: clampAgentInt(process.env.AI_AGENT_MAX_TOOL_CALLS, 6, 1, 10),

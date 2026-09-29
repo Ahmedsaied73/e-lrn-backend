@@ -157,9 +157,8 @@ function approximateSchemaTokens(defs) {
  *   const / examples  ← z.literal(), z.enum()'s examples
  * That last one matters most: a single tool in a 15-tool payload carrying one bad
  * keyword made the agent answer "تعذّر الوصول إلى مزوّد الذكاء الاصطناعي" to
- * EVERY question. Groq tolerates all of it, which is why this stayed invisible
- * while Groq was primary — the two vendors disagree about the dialect, not about
- * the tools.
+ * EVERY question — which is why this runs over the WHOLE catalogue at boot rather
+ * than over whatever a turn happens to bind.
  *
  * This is a WHITELIST for the same reason: enumerating the rejected keywords
  * means the next Zod release that emits something new breaks the agent silently

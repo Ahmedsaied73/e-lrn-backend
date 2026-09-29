@@ -232,6 +232,113 @@ test('a flagged turn leaves a conversation WITH its answer (nothing is dropped)'
   assert.deepEqual(result.detail.unverifiedFigures, ['888,888']);
 });
 
+/**
+ * §3.5 / Decision #17 — the provider-outage contract, end to end.
+ *
+ * The provider layer is pinned to "two attempts, then ONE typed failure" in
+ * tests/agent-llm-provider.test.js; what is pinned HERE is the turn handler: the fast
+ * path gets one last deterministic look before giving up, and the admin is told
+ * plainly that the model tier is down — no silent retry behind the answer.
+ *
+ * `answerFactory` is the seam that makes "the fast path was consulted again" an
+ * assertion instead of a hope: the router is called for tier 1 and, on an outage, once
+ * more. Counting those calls is the only way to prove the second look happened.
+ */
+test('a provider outage consults the fast path once more, then fails as PROVIDER_UNAVAILABLE', async () => {
+  const outage = new Error('every configured model failed transiently');
+  outage.code = 'ALL_PROVIDERS_FAILED';
+  const calls = [];
+  const declining = async () => {
+    calls.push('route');
+    return { matched: false, reason: 'NO_INTENT' };
+  };
+
+  const result = await answerQuestion({
+    question: 'اعمل تقرير مفصل عن كل حاجة في المنصة',
+    adminId: ADMIN_ID,
+    prisma,
+    answerFactory: declining,
+    // The factory is CALLED before the try block, so the failure has to come from
+    // invoking the graph — exactly where a real provider outage surfaces.
+    graphFactory: () => ({
+      graph: {
+        invoke: async () => {
+          throw outage;
+        },
+      },
+    }),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'PROVIDER_UNAVAILABLE', 'the outage is named, not hidden behind a generic error');
+  assert.match(result.message, /مش مستجيب/, 'the admin is told plainly, in dialect');
+  assert.equal(calls.length, 2, 'tier 1 declined, and the outage path asked the fast path exactly once more');
+});
+
+test('an outage that the fast path CAN now answer is answered, not reported as an outage', async () => {
+  // A deterministic route() is a pure function of the question, so in production this
+  // second look cannot succeed where the first declined — the fixture stubs an
+  // impossible-in-production second answer on purpose, to prove the branch is wired
+  // rather than merely reachable. This is a WIRING pin, not a behaviour claim.
+  const outage = new Error('every configured model failed transiently');
+  outage.code = 'ALL_PROVIDERS_FAILED';
+  let call = 0;
+  const answering = async () => {
+    call += 1;
+    if (call === 1) return { matched: false, reason: 'NO_INTENT' };
+    return { matched: true, intent: 'students_by_grade', answer: 'عدد الطلاب ١٢٣', latencyMs: 3, tool: 'students_count_by_grade' };
+  };
+
+  const result = await answerQuestion({
+    question: 'اعمل تقرير مفصل عن كل حاجة في المنصة',
+    adminId: ADMIN_ID,
+    prisma,
+    answerFactory: answering,
+    graphFactory: () => ({
+      graph: {
+        invoke: async () => {
+          throw outage;
+        },
+      },
+    }),
+  });
+  await trackConversation(result.conversationId);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.source, 'deterministic');
+  assert.equal(result.answer, 'عدد الطلاب ١٢٣');
+  assert.equal(call, 2, 'the last chance was the fast path, and it was used');
+});
+
+test('a NON-outage model failure is NOT reported as an outage, and the fast path is not re-consulted', async () => {
+  // A bad key or a malformed request is a different fact from "the service is down":
+  // reporting it as an outage would send the admin to retry something that can never
+  // succeed, and the last-chance fast path cannot fix a request error.
+  const badKey = new Error('invalid api key');
+  badKey.status = 401;
+  const calls = [];
+  const result = await answerQuestion({
+    question: 'اعمل تقرير مفصل عن كل حاجة في المنصة',
+    adminId: ADMIN_ID,
+    prisma,
+    answerFactory: async () => {
+      calls.push('route');
+      return { matched: false, reason: 'NO_INTENT' };
+    },
+    graphFactory: () => ({
+      graph: {
+        invoke: async () => {
+          throw badKey;
+        },
+      },
+    }),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'LLM_ERROR');
+  assert.equal(calls.length, 1, 'only the tier-1 fast path ran');
+});
+
 test('a new conversation is created WITH its first turn, titled from that question', async () => {
   const scripted = scriptedGraphFactory([
     toolCall('platform_overview', {}, 'call_overview'),
