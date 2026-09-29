@@ -4,21 +4,28 @@
  * approvals.js — the single-use, argument-bound human approval ledger for the
  * mutating agent tools (Phase 3).
  *
- * WHY: tools/_kit.js already refuses to mutate unless the caller passes
- * approved:true AND a real admin id. That proves *someone* approved; it does not
- * prove *what* was approved. This module binds a grant to one exact tool name and
- * one exact argument set (sha256 over a canonical serialization), makes the grant
- * single-use, and gives it a short TTL — so an approval for "mark enrollment 5
- * paid" can never be replayed for a different call, by a different admin, or a
- * second time.
+ * WHY: the agent must be able to prove *what* was approved, not merely that somebody
+ * approved something. One row binds a grant to one exact tool name and one exact
+ * argument set (sha256 over a canonical serialization), makes the grant single-use,
+ * and gives it a short TTL — so a confirmation for "send this to 3 students" can
+ * never be replayed for a different call, by a different admin, or a second time.
+ *
+ * TWO CONSUMERS, one ledger:
+ *  - the chat confirm flow (tools/_kit.js KIND_CONFIRM) records a preview as a
+ *    PENDING row and spends that row as the confirmation token, and
+ *  - the legacy REST/socket decision flow (decideApproval → consumeApproval) still
+ *    works for a queued decision, without granting anything by itself.
  *
  * Contract:
  *  - The prisma client is always INJECTED (`{ prisma }`), never required here, so
  *    the ledger is unit-testable with a stub and opens no connection on import.
  *  - Every failure is an AgentApprovalError with a stable `code`; callers map
  *    codes to text instead of parsing messages.
- *  - consumeApproval() is the gate: it re-derives the hash itself and flips
- *    APPROVED -> CONSUMED with a conditional updateMany, so two concurrent
+ *  - `requestedAt` is the NODE clock, not the DB default: the confirmation gate
+ *    compares it against a server-set turn timestamp, and a second clock on the
+ *    other side of the pooler would make that comparison meaningless.
+ *  - consumeApproval() is the gate for a DECIDED row: it re-derives the hash itself
+ *    and flips APPROVED -> CONSUMED with a conditional updateMany, so two concurrent
  *    consumers can never both win, and a PENDING row (a request) can never be
  *    spent before a human decided it.
  *  - Nothing here logs, and getApproval() never returns the raw args payload
@@ -191,8 +198,13 @@ async function requestApproval({ prisma, adminId, conversationId = null, toolNam
 
   const now = new Date();
   const expiresAt = new Date(now.getTime() + ttlMs);
+  // `requestedAt` is written from THIS clock on purpose. It is not decoration: the
+  // confirmation gate refuses a token whose preview was requested inside the current
+  // turn, and that comparison is only meaningful if both timestamps come from Node.
+  // Left to the column's `@default(now())` it would be the database's clock, which is
+  // a different, separately-synchronised clock on the other side of the pooler.
   const row = await model.create({
-    data: { conversationId, adminId, toolName, argsHash, args, status: STATUS.PENDING, expiresAt },
+    data: { conversationId, adminId, toolName, argsHash, args, status: STATUS.PENDING, expiresAt, requestedAt: now },
   });
 
   return {

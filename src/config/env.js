@@ -290,8 +290,10 @@ function resolveAiAgent() {
     // Phase 3 (handoff 3.3): lifetime of a preview-then-confirm token for the
     // destructive tools (deletes, broadcast). The token is an AgentApproval row;
     // the ceiling is approvals.js MAX_TTL_MS (30 min) — requestApproval rejects
-    // anything larger, so the clamp must never exceed it.
-    confirmationTtlMinutes: clampAgentInt(process.env.AI_AGENT_CONFIRMATION_TTL_MINUTES, 15, 1, 30),
+    // anything larger, so the clamp must never exceed it. Default 5 minutes: the
+    // token only has to survive ONE admin reply, and a long window widens the
+    // window an unattended console has a spendable delete sitting in it.
+    confirmationTtlMinutes: clampAgentInt(process.env.AI_AGENT_CONFIRMATION_TTL_MINUTES, 5, 1, 30),
     dailyTurnBudget: clampAgentInt(process.env.AI_AGENT_DAILY_TURN_BUDGET, 500, 1, 100000),
     conversationRetentionDays: clampAgentInt(process.env.AI_AGENT_CONVERSATION_RETENTION_DAYS, 30, 7, 3650),
   };

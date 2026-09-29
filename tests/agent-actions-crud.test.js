@@ -358,6 +358,9 @@ describe('agent CRUD tools — P2b semantics', () => {
     assert.equal(stub.rows.get(Number(token)).status, 'PENDING');
     assert.equal(stub.rows.get(Number(token)).adminId, ADMIN_ID, 'the token is bound to the requesting admin');
     assert.equal(auditCalls.at(-1).metadata.stage, 'preview', 'the preview itself is evidence');
+    // Phase 3.1 (F2): a preview is NOT a deletion. The audit readers group by `action`
+    // alone, so filing this row under VIDEO_DELETE made a preview count as a delete.
+    assert.equal(auditCalls.at(-1).action, 'VIDEO_DELETE_PREVIEW', 'a preview carries its own action name');
   });
 
   it('a preview refusal is the answer: no token, nothing pending', async () => {
@@ -469,6 +472,72 @@ describe('agent CRUD tools — P2b semantics', () => {
     );
   });
 
+  it('refuses a confirmation made inside the SAME turn as its preview (handoff C1)', async () => {
+    // The hole this closes: a preview and its confirmation inside ONE turn means the
+    // model approved its own request — so prompt-injected student text (an essay, a
+    // notification body) could delete without the admin ever answering. The turn stamp
+    // is server-set, which is why a model argument cannot move it.
+    const bunnyVideoService = require('../src/services/bunnyVideoService');
+    const original = bunnyVideoService.deleteVideo;
+    let destructiveCalls = 0;
+    bunnyVideoService.deleteVideo = async () => {
+      destructiveCalls += 1;
+      return { id: 5, bunnyVideoId: 'bunny-9' };
+    };
+    try {
+      const stub = approvalStub();
+      const ctx = {
+        prisma: { ...stub, bunnyVideo: { findUnique: async () => previewableVideo } },
+        adminId: ADMIN_ID,
+        conversationId: 12,
+        turnStartedAt: new Date().toISOString(),
+      };
+      const preview = await execute(getDefinition('delete_video'), VIDEO_ARGS, ctx);
+      assert.equal(preview.data.stage, 'PREVIEW');
+      const token = preview.data.confirmationToken;
+
+      const sameTurn = await execute(
+        getDefinition('delete_video'),
+        { ...VIDEO_ARGS, confirmationToken: token },
+        ctx
+      );
+      assert.equal(sameTurn.data.ok, false);
+      assert.equal(sameTurn.data.reason, 'CONFIRMATION_SAME_TURN');
+      assert.equal(destructiveCalls, 0, 'a same-turn confirmation must never delete');
+      assert.equal(
+        stub.rows.get(Number(token)).status,
+        'PENDING',
+        'the refusal must not spend the token the admin was shown'
+      );
+      assert.equal(auditCalls.at(-1).action, 'VIDEO_DELETE_REFUSED');
+
+      // The SAME token still works in a LATER turn, because the guard is about WHEN the
+      // confirmation arrives — not a poisoned token the admin could never use.
+      const nextTurn = await execute(
+        getDefinition('delete_video'),
+        { ...VIDEO_ARGS, confirmationToken: token },
+        { ...ctx, turnStartedAt: new Date(Date.now() + 60_000).toISOString() }
+      );
+      assert.equal(nextTurn.data.ok, true);
+      assert.equal(destructiveCalls, 1);
+      assert.equal(auditCalls.at(-1).action, 'VIDEO_DELETE', 'the executed deletion keeps the historical name');
+    } finally {
+      bunnyVideoService.deleteVideo = original;
+    }
+  });
+
+  it('a confirmation token is bound to the conversation that issued it', async () => {
+    const { stub, token } = await issuedVideoToken();
+    const elsewhere = await execute(
+      getDefinition('delete_video'),
+      { ...VIDEO_ARGS, confirmationToken: token },
+      { prisma: gateOnlyPrisma(stub), adminId: ADMIN_ID, conversationId: 77 }
+    );
+    assert.equal(elsewhere.data.ok, false);
+    assert.equal(elsewhere.data.reason, 'CONFIRMATION_MISMATCH');
+    assert.equal(stub.rows.get(Number(token)).status, 'PENDING', 'another thread spends nothing');
+  });
+
   it('broadcast_notification previews the REAL audience and only tokens a sendable one', async () => {
     const notificationService = require('../src/services/notifications/notificationService');
     const original = notificationService.resolveAudience;
@@ -497,6 +566,18 @@ describe('agent CRUD tools — P2b semantics', () => {
       assert.equal(capped.data.ok, false);
       assert.equal(capped.data.reason, 'TOO_MANY_RECIPIENTS');
       assert.equal(capped.data.confirmationToken, undefined);
+
+      // Phase 3.1 (F3): a WRONG count is answered at the preview itself — the same guard
+      // run() applies. A token issued for an audience nobody confirmed could only ever
+      // come back as CONFIRMATION_MISMATCH, costing the admin a second round trip.
+      const wrongCount = await execute(
+        getDefinition('broadcast_notification'),
+        { ...args, expectedRecipients: 99 },
+        ctx
+      );
+      assert.equal(wrongCount.data.ok, false);
+      assert.equal(wrongCount.data.reason, 'RECIPIENT_COUNT_MISMATCH');
+      assert.equal(wrongCount.data.confirmationToken, undefined, 'no token for an unconfirmed audience');
     } finally {
       notificationService.resolveAudience = original;
     }
@@ -519,10 +600,12 @@ describe('agent CRUD tools — P2b semantics', () => {
       assert.equal(result.data.ok, false);
       assert.equal(result.data.reason, 'VIDEO_NOT_FOUND');
       assert.equal(destructiveCalls, 0, 'an unknown slug must never reach the destructive call');
-      // The refusal is still EVIDENCE: an attempt to delete a video is recorded
-      // against the tool's own audit action, so a failed or mistaken request is
-      // visible in the trail rather than silently disappearing.
-      assert.equal(auditCalls.at(-1).action, 'VIDEO_DELETE');
+      // The refusal is still EVIDENCE: an attempt to delete a video is recorded against
+      // the tool's own audit action, so a failed or mistaken request is visible in the
+      // trail rather than silently disappearing. Since Phase 3.1 that row is named for the
+      // STAGE it happened in (a preview that found nothing to delete is still a preview),
+      // so neither it nor a refused confirmation can ever be counted as a deletion.
+      assert.equal(auditCalls.at(-1).action, 'VIDEO_DELETE_PREVIEW');
       assert.equal(auditCalls.at(-1).targetType, 'video');
       assert.equal(auditCalls.at(-1).metadata.via, 'agent');
     } finally {

@@ -97,18 +97,26 @@ function collectToolPayloads(result) {
 /**
  * Build the per-tool context resolver for one turn.
  *
- * Phase 3 (Decision #1) left this as a LEGACY shim: the tool layer no longer
- * reads an `approved` flag at all — plain actions execute on call (attributed to
- * `adminId`) and destructive tools gate on a confirmationToken their own preview
- * issued. An explicit `approvalId` (the older REST/socket decision flow) is still
- * CONSUMED here when it matches the tool call exactly, so a queued decision is
- * never silently left spendable, but it grants nothing by itself anymore.
+ * The tool layer no longer reads an `approved` flag: plain actions execute on call
+ * (attributed to `adminId`) and destructive tools gate on a confirmationToken their
+ * own preview issued. An explicit `approvalId` (the older REST/socket decision flow)
+ * is still CONSUMED here when it matches the tool call exactly, so a queued decision
+ * is never silently left spendable, but it grants nothing by itself anymore.
+ *
+ * `turnStartedAt` is the server's stamp for THIS turn (handoff C1). It travels with the
+ * context so the confirmation gate can refuse a confirmation issued in the same turn as
+ * its own preview. It is an ISO string, not a Date: the context crosses the LangChain
+ * serialization boundary, where a Date would not survive; tools/_kit.js coerces it back.
+ *
+ * NOTE: this resolver is invoked once per TOOL CALL, so `turnStartedAt` must be computed
+ * once per TURN, outside it (see answerQuestion). A `new Date()` inside the resolver
+ * would re-stamp the turn for every call and no confirmation would ever look same-turn.
  */
-function createApprovalResolver({ prisma, adminId, conversationId, approval }) {
+function createApprovalResolver({ prisma, adminId, conversationId, approval, turnStartedAt }) {
   const used = { approvalId: null, consumedAt: null };
+  const base = { prisma, adminId, conversationId, turnStartedAt };
 
   async function resolveToolContext(args, def) {
-    const base = { prisma, adminId, conversationId };
     if (!approval || !def || (def.kind !== 'action' && def.kind !== 'confirm')) return base;
 
     const matchesTool = approval.toolName === def.name;
@@ -119,12 +127,11 @@ function createApprovalResolver({ prisma, adminId, conversationId, approval }) {
       await consumeApproval({ prisma, approvalId: approval.id, adminId, toolName: def.name, args });
       used.approvalId = approval.id;
       used.consumedAt = new Date().toISOString();
-      return { ...base, approved: true };
     } catch {
       // Expired, already spent, or decided by someone else: the tool layer refuses
       // and the model is told, which is the honest outcome.
-      return base;
     }
+    return base;
   }
 
   return { resolveToolContext, used };
@@ -323,11 +330,16 @@ async function answerQuestion({
   }
 
   const approval = approvalId ? await getApproval({ prisma: db, approvalId, adminId }) : null;
+  // The turn boundary (handoff C1) is stamped HERE — by the server, before the graph is
+  // built — so a token issued by this turn's own preview can never be confirmed by this
+  // turn. Nothing the model or the question says can influence it.
+  const turnStartedAt = new Date().toISOString();
   const { resolveToolContext, used } = createApprovalResolver({
     prisma: db,
     adminId,
     conversationId: conversation.id,
     approval,
+    turnStartedAt,
   });
 
   // Running the turn with progress: the graph emits tool lifecycle events, but

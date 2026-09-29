@@ -200,6 +200,119 @@ test('the tool context resolver is told WHICH tool is asking, so authority can b
 });
 
 /**
+ * Phase 3.1 / handoff C1 — the turn boundary, END TO END through the graph.
+ *
+ * The unit pins live in tests/agent-actions-crud.test.js; this one proves the wiring those
+ * units cannot see: a model that previews AND confirms inside a SINGLE turn is refused and
+ * nothing destructive runs. That pair is exactly what a prompt injection inside
+ * student-authored text (an essay, a notification body) would try to produce, and before
+ * this guard the only thing stopping it was a sentence in the prompt.
+ *
+ * The audit writer is swapped for a spy for the duration: a real preview or refusal row
+ * would otherwise be inserted into the shared database by a "unit" test.
+ */
+test('a preview and its confirmation inside ONE turn cannot mutate anything', async () => {
+  const agentConfig = config.aiAgent;
+  const originalAllow = agentConfig.allowMutations;
+  const auditLog = require('../src/services/auditLog');
+  const bunnyVideoService = require('../src/services/bunnyVideoService');
+  const realRecord = auditLog.record;
+  const realDelete = bunnyVideoService.deleteVideo;
+  let deletions = 0;
+  agentConfig.allowMutations = true;
+  auditLog.record = async () => true;
+  bunnyVideoService.deleteVideo = async () => {
+    deletions += 1;
+    return { id: 9, bunnyVideoId: 'bunny-x' };
+  };
+
+  // AgentApproval stand-in: the same single-winner CAS the database runs.
+  const rows = new Map();
+  let nextId = 401;
+  const prismaStub = {
+    agentApproval: {
+      async create({ data }) {
+        const row = { id: nextId, ...data };
+        rows.set(nextId, row);
+        nextId += 1;
+        return row;
+      },
+      async findUnique({ where }) {
+        return rows.get(where.id) || null;
+      },
+      async updateMany({ where, data }) {
+        const row = rows.get(where.id);
+        if (!row || (where.status !== undefined && row.status !== where.status)) return { count: 0 };
+        Object.assign(row, data);
+        return { count: 1 };
+      },
+    },
+    bunnyVideo: {
+      findUnique: async () => ({
+        id: 9,
+        slug: 'vid123abc456',
+        title: 'فيديو',
+        status: 'READY',
+        course: { title: 'دورة' },
+        quiz: { title: 'اختبار' },
+        _count: { progress: 0 },
+      }),
+    },
+  };
+
+  /** The second step of the script: confirm with the token the FIRST call just returned. */
+  const confirmWithPreviewedToken = (messages) => {
+    const toolMessages = messages.filter((m) => typeof m.getType === 'function' && m.getType() === 'tool');
+    const payload = JSON.parse(String(toolMessages[toolMessages.length - 1].content));
+    return toolCall(
+      'delete_video',
+      { videoSlug: 'vid123abc456', confirmationToken: payload.data.confirmationToken },
+      'call_confirm'
+    );
+  };
+
+  try {
+    const model = scriptedModel([
+      toolCall('delete_video', { videoSlug: 'vid123abc456' }, 'call_preview'),
+      confirmWithPreviewedToken,
+      textAnswer('العملية متوقفة في انتظار تأكيدك.'),
+    ]);
+    // Stamped ONCE, outside the resolver, exactly as agentService does it: the resolver is
+    // invoked per TOOL CALL, so a `new Date()` inside it would re-stamp the turn for every
+    // call and the boundary would never be crossed (the guard would look correct and
+    // prove nothing).
+    const turnStartedAt = new Date().toISOString();
+    const { graph } = createAgentGraph({
+      resolveToolContext: () => ({
+        prisma: prismaStub,
+        adminId: 1,
+        conversationId: 3,
+        turnStartedAt,
+      }),
+      invokeModel: model.invokeModel,
+    });
+
+    const result = await graph.invoke(
+      { messages: [new HumanMessage('امسح الفيديو ده')] },
+      { configurable: { thread_id: threadId('same-turn') } }
+    );
+
+    const toolMessages = result.messages.filter((m) => typeof m.getType === 'function' && m.getType() === 'tool');
+    assert.equal(toolMessages.length, 2, 'the preview and its confirmation both had to run');
+    const preview = JSON.parse(String(toolMessages[0].content));
+    assert.equal(preview.data.stage, 'PREVIEW');
+    assert.match(String(preview.data.confirmationToken), /^\d+$/);
+    assert.match(String(toolMessages[1].content), /CONFIRMATION_SAME_TURN/);
+    assert.equal(deletions, 0, 'a same-turn confirmation must never reach the destructive call');
+    assert.equal([...rows.values()][0].status, 'PENDING', 'the token stays spendable for the admin reply');
+  } finally {
+    agentConfig.allowMutations = originalAllow;
+    auditLog.record = realRecord;
+    bunnyVideoService.deleteVideo = realDelete;
+  }
+});
+
+/**
  * Phase 1 (v2 rebuild) — the tool SURFACE the model is shown.
  *
  * The Phase 4.5 shortlist that used to live here is GONE (handoff 3.1 + Decision #15):

@@ -183,6 +183,9 @@ describe('AI Admin Agent — config + kill switch', () => {
     assert.equal(defaults.aiAgent.maxAnswerTokens, 700, 'default answer cap');
     assert.equal(defaults.aiAgent.turnTimeoutMs, 25000, 'default turn timeout');
     assert.equal(defaults.aiAgent.approvalTtlMs, 300000, 'default approval TTL');
+    // Phase 3.1 / C4: the confirmation window survives exactly one admin reply. Five
+    // minutes was the specified value; 15 shipped by accident, so it is pinned now.
+    assert.equal(defaults.aiAgent.confirmationTtlMinutes, 5, 'default confirm-token window');
     assert.equal(defaults.aiAgent.dailyTurnBudget, 500, 'default daily budget');
     assert.equal(defaults.aiAgent.conversationRetentionDays, 30, 'default retention');
 
@@ -193,6 +196,7 @@ describe('AI Admin Agent — config + kill switch', () => {
       AI_AGENT_MAX_ANSWER_TOKENS: '999999',
       AI_AGENT_TURN_TIMEOUT_MS: '3600000',
       AI_AGENT_APPROVAL_TTL_MS: '999999999',
+      AI_AGENT_CONFIRMATION_TTL_MINUTES: '999',
       AI_AGENT_DAILY_TURN_BUDGET: '999999999',
       AI_AGENT_CONVERSATION_RETENTION_DAYS: '999999',
     });
@@ -201,6 +205,9 @@ describe('AI Admin Agent — config + kill switch', () => {
     assert.equal(absurd.aiAgent.maxAnswerTokens, 4000, 'answer cap clamped to max');
     assert.equal(absurd.aiAgent.turnTimeoutMs, 120000, 'turn timeout clamped to max');
     assert.equal(absurd.aiAgent.approvalTtlMs, 1800000, 'approval TTL clamped to max');
+    // The ceiling is approvals.js MAX_TTL_MS (30 min): requestApproval REFUSES anything
+    // larger, so a config that clamped higher would produce a preview with no token.
+    assert.equal(absurd.aiAgent.confirmationTtlMinutes, 30, 'confirm window clamped to the ledger ceiling');
     assert.equal(absurd.aiAgent.dailyTurnBudget, 100000, 'daily budget clamped to max');
     assert.equal(absurd.aiAgent.conversationRetentionDays, 3650, 'retention clamped to max');
 
@@ -210,11 +217,14 @@ describe('AI Admin Agent — config + kill switch', () => {
       AI_AGENT_MAX_TOOL_RESULT_ROWS: '0',
       AI_AGENT_TURN_TIMEOUT_MS: '1',
       AI_AGENT_APPROVAL_TTL_MS: '10',
+      AI_AGENT_CONFIRMATION_TTL_MINUTES: '0',
     });
     assert.equal(silly.aiAgent.maxToolCalls, 6, 'garbage falls back to the default');
     assert.equal(silly.aiAgent.maxToolResultRows, 1, 'zero clamps up to the minimum');
     assert.equal(silly.aiAgent.turnTimeoutMs, 5000, 'tiny timeout clamps up');
     assert.equal(silly.aiAgent.approvalTtlMs, 30000, 'tiny approval window clamps up');
+    // A zero window would issue a token that is already expired: unusable, not secure.
+    assert.equal(silly.aiAgent.confirmationTtlMinutes, 1, 'zero confirm window clamps up to a minute');
   });
 
   it('ships model defaults that are known-good in this codebase', () => {

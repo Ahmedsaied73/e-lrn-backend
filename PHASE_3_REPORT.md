@@ -98,7 +98,10 @@ full-suite numbers.
   `CONFIRMATION_SAME_TURN` when the preview row was created at/after it, **before** consuming;
   the preview row's `requestedAt` must be set from the Node clock so both timestamps share one
   clock (the DB `@default(now())` would mix clocks with pgbouncer).
-- **Phase 4** (context compaction): read `getTurnContext()` from `graph.js` — it already carries
-  `turnStartedAt` (added by 3.1) alongside `toolPayloads`/`conversationId`.
+- **Phase 4** (context compaction): the per-turn payloads stay where they are (the graph state),
+  and the turn anchor rides the tool-context resolver — `answerQuestion` stamps `turnStartedAt` once
+  per turn and the resolver returns it in every tool context. There is deliberately **no**
+  module-level mutable turn object in `graph.js`: a process-wide "current turn" is shared between
+  concurrent admin turns and would be a correctness trap, so 3.1 did not add one.
 - Do not enable `AI_AGENT_ALLOW_MUTATIONS` on staging/production until 3.1 is merged and reviewed.
 

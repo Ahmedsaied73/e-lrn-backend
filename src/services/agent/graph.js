@@ -9,14 +9,17 @@
  *     model stops: once the budget is spent the graph ends with
  *     stopReason='MAX_TOOL_CALLS'. Without this, a model that keeps re-querying
  *     is an unbounded DB+LLM bill for one admin question.
- *  2. AUTHORITY CANNOT COME FROM THE MODEL. The tool context (adminId, prisma)
- *     is resolved SERVER-SIDE per tool call via `resolveToolContext`. Since the
- *     Phase 3 rebuild (Decision #1) plain actions execute immediately — the
- *     surviving guard is ATTRIBUTABILITY (mutations refuse without an adminId),
- *     and destructive tools additionally require a confirmationToken their own
- *     preview issued (see tools/_kit.js KIND_CONFIRM). Tool arguments are the
- *     model's; the authority to mutate never is.
-
+ *  2. AUTHORITY CANNOT COME FROM THE MODEL. The tool context (adminId, prisma) is
+ *     resolved SERVER-SIDE per tool call via `resolveToolContext`. Plain actions
+ *     execute immediately — the surviving guard is ATTRIBUTABILITY (mutations refuse
+ *     without an adminId) — and the destructive tools additionally require a
+ *     confirmationToken their own preview issued (tools/_kit.js KIND_CONFIRM).
+ *     That token is only spendable in a LATER turn: the server stamps
+ *     `turnStartedAt` when a turn begins and the gate refuses a confirmation made
+ *     inside the turn that previewed it (handoff C1), so a prompt injected through
+ *     student-authored text cannot approve itself. Tool arguments are the model's;
+ *     the authority to mutate never is.
+ *
  * Read-only by default: `listDefinitions()` only exposes the mutating tools
  * when AI_AGENT_ALLOW_MUTATIONS=true, so this graph answers analytics questions
  * out of the box and needs an explicit opt-in before it can even see an action.
@@ -211,10 +214,10 @@ function compactToolPayloads(messages) {
 
 function createAgentGraph({ resolveToolContext, checkpointer = sharedCheckpointer, invokeModel } = {}) {
   // The FULL catalogue stays bound to the ToolNode, and that is deliberate: the node
-  // is the execution AUTHORITY (strict args, row caps, redaction, the approval gate,
-  // the audit row), not a menu. Keeping it complete means a conversation can still
-  // call a tool whose schema is no longer on this turn's shortlist, and the guards
-  // cannot be bypassed by which schemas happen to be shown.
+  // is the execution AUTHORITY (strict args, row caps, redaction, the attribution and
+  // confirmation gates, the audit row), not a menu. Keeping it complete means a
+  // conversation can still call a tool whose schema is no longer on this turn's
+  // shortlist, and the guards cannot be bypassed by which schemas happen to be shown.
   const defs = listDefinitions();
   const resolver = typeof resolveToolContext === 'function' ? resolveToolContext : () => ({});
   const tools = toLangChainTools(defs, resolver);

@@ -11,9 +11,10 @@
  *  - Cache invalidation mirrors the HTTP controller EXACTLY: a stale "not
  *    enrolled" answer right after an enroll is the most trust-destroying bug a
  *    copilot can ship.
- *  - Nothing here runs unless ctx.approved === true AND ctx.adminId is real —
- *    that gate lives in _kit.execute(), NOT here, so approval cannot be forged
- *    through tool arguments.
+ *  - Nothing here runs unless the caller is attributable to a real admin, and the
+ *    destructive five additionally require the confirmationToken their own preview
+ *    issued in an EARLIER turn. Both gates live in _kit.execute(), NOT here, so
+ *    authority can never be forged through tool arguments.
  *  - Audit action names reuse the existing HTTP literals where the operation is
  *    the same, so reporting by action sees one action regardless of channel.
  */
@@ -568,6 +569,20 @@ const broadcastNotification = confirmableActionTool({
     if (actual === 0) return { ok: false, reason: 'NO_RECIPIENTS', audience: args.audience };
     if (actual > cap) {
       return { ok: false, reason: 'TOO_MANY_RECIPIENTS', actual, cap, hint: 'حدّد الجمهور بدقة أكثر أو قسّم البث.' };
+    }
+
+    // Phase 3.1 (F3): the preview applies the SAME count guard run() applies. The count
+    // is part of the hashed arguments, so issuing a token for an audience the admin
+    // never confirmed could only ever come back as CONFIRMATION_MISMATCH — one wasted
+    // round trip, and a token that exists for a send nobody agreed to. Answer here.
+    if (actual !== args.expectedRecipients) {
+      return {
+        ok: false,
+        reason: 'RECIPIENT_COUNT_MISMATCH',
+        actual,
+        expected: args.expectedRecipients,
+        hint: 'أعد التأكيد بالعدد الصحيح قبل الإرسال.',
+      };
     }
 
     return {

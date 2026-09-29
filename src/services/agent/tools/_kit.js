@@ -81,6 +81,23 @@ function daysAgo(days, now = new Date()) {
 }
 
 /**
+ * Coerce a server-set timestamp to a Date, or null when there is nothing usable.
+ *
+ * Built for ONE field (`ctx.turnStartedAt`): the tool context crosses the LangChain
+ * serialization boundary, so the value arrives as an ISO string in production and as a
+ * Date in direct calls. `null` means "no boundary was supplied", which the confirmation
+ * gate treats as "cannot evaluate" rather than "the boundary is now".
+ */
+function toDate(value) {
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
+  if (typeof value === 'string' || typeof value === 'number') {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+  return null;
+}
+
+/**
  * Read-only definition. `run(args, ctx)` must return a JSON-serializable object;
  * rows go under `rows` and set `truncated: true` when more rows existed.
  */
@@ -352,6 +369,11 @@ async function execute(def, args, ctx = {}) {
     prisma,
     adminId: Number.isSafeInteger(ctx.adminId) ? ctx.adminId : null,
     conversationId: Number.isSafeInteger(ctx.conversationId) ? ctx.conversationId : null,
+    // SERVER-SET turn boundary (Phase 3.1, handoff C1). The caller stamps it when the
+    // turn begins; it can never come from tool arguments, so the model cannot move it.
+    // An absent/unparseable value leaves it null, and the gate then skips the
+    // same-turn check rather than inventing a boundary it does not have.
+    turnStartedAt: toDate(ctx.turnStartedAt),
   };
 
   if (def.kind === KIND_CONFIRM) {
@@ -378,13 +400,22 @@ async function execute(def, args, ctx = {}) {
 /**
  * The one audit writer for both mutating kinds. Same shape as the historical
  * action audit row (via/tool/args/ms/conversationId) plus optional extra
- * metadata, so reports that grouped by `action` keep working unchanged.
+ * metadata.
+ *
+ * Stage-tagged rows get their own ACTION NAME (Phase 3.1). A preview and a refused
+ * confirmation are evidence — but they are not deletions, and every audit reader
+ * (the agent's own audit tools, admin reports) groups by `action` alone. Filing a
+ * preview under USER_DELETE made "what did I delete this week?" count refusals, so the
+ * stage is now part of the name instead of a field the readers must remember to filter.
+ * The confirmed/executed row keeps the historical name, so existing reports are intact.
  */
+const AUDIT_STAGE_SUFFIX = Object.freeze({ preview: '_PREVIEW', confirm_refused: '_REFUSED' });
+
 async function recordAudit(def, payload, args, runCtx, startedAt, extraMeta = {}) {
   await audit.record(
     { user: { id: runCtx.adminId } },
     {
-      action: def.audit.action,
+      action: `${def.audit.action}${AUDIT_STAGE_SUFFIX[extraMeta.stage] || ''}`,
       targetType: def.audit.targetType || null,
       targetId: Number.isSafeInteger(payload && payload.targetId) ? payload.targetId : null,
       metadata: {
@@ -470,10 +501,15 @@ async function executeConfirmable(def, data, ctx, runCtx, startedAt) {
 
 /**
  * The token gate. Order mirrors approvals.js: identify the row, prove
- * ownership, then the cheap state/expiry facts, then the argument binding, and
- * only then spend it — all failures return the three typed reasons the handoff
- * names, never a throw, so the model can explain the refusal to the admin.
- * A foreign row answers NOT_FOUND (no oracle, same doctrine as getApproval).
+ * ownership, then the cheap state/expiry facts, then the TURN BOUNDARY and the
+ * conversation binding, then the argument binding (hash), and only then spend it —
+ * all failures return a typed reason, never a throw, so the model can explain the
+ * refusal to the admin. A foreign row answers NOT_FOUND (no oracle, same doctrine
+ * as getApproval).
+ *
+ * The order within the last two steps is the point: the same-turn check and the
+ * conversation check both run BEFORE the hash comparison and BEFORE the consume, so a
+ * same-turn probe cannot spend the token of a preview that a human was still reading.
  */
 async function verifyConfirmationToken(def, mutationArgs, confirmationToken, runCtx) {
   const typed = (reason, detail) => ({ ok: false, reason, detail });
@@ -513,6 +549,31 @@ async function verifyConfirmationToken(def, mutationArgs, confirmationToken, run
     // confirmation in the chat flow.
     return typed('CONFIRMATION_MISMATCH', `this confirmation token is already ${String(row.status).toLowerCase()}.`);
   }
+
+  // Phase 3.1 / handoff C1 — THE TURN BOUNDARY. A confirmation made inside the very turn
+  // that previewed it is not a confirmation: the model would be approving its own
+  // request, so any student-authored text that reached its context (an essay, a
+  // notification body carrying an injected instruction) could delete or broadcast
+  // without a human ever answering. `turnStartedAt` is set by the server, never by tool
+  // arguments. A row whose requestedAt cannot be read is refused too: the column is NOT
+  // NULL in the model, so a missing stamp means the row cannot be proven older than the
+  // turn — and unproven means refused, not allowed.
+  if (runCtx.turnStartedAt) {
+    const requestedAt = toDate(row.requestedAt);
+    if (!requestedAt || requestedAt.getTime() >= runCtx.turnStartedAt.getTime()) {
+      return typed(
+        'CONFIRMATION_SAME_TURN',
+        'this confirmation was previewed during the current turn — اعرض المعاينة على المشرف وانتظر رده التالي بتأكيد صريح.'
+      );
+    }
+  }
+
+  if (runCtx.conversationId !== null && row.conversationId !== runCtx.conversationId) {
+    // A token belongs to the conversation that issued it: another thread is a different
+    // conversation with the admin, and has confirmed nothing.
+    return typed('CONFIRMATION_MISMATCH', 'this confirmation token was issued in another conversation.');
+  }
+
   if (row.argsHash !== canonicalArgsHash(def.name, mutationArgs)) {
     return typed(
       'CONFIRMATION_MISMATCH',
