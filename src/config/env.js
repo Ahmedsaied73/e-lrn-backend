@@ -302,6 +302,12 @@ function resolveAiAgent() {
     confirmationTtlMinutes: clampAgentInt(process.env.AI_AGENT_CONFIRMATION_TTL_MINUTES, 5, 1, 30),
     dailyTurnBudget: clampAgentInt(process.env.AI_AGENT_DAILY_TURN_BUDGET, 500, 1, 100000),
     conversationRetentionDays: clampAgentInt(process.env.AI_AGENT_CONVERSATION_RETENTION_DAYS, 30, 7, 3650),
+    // Memory retention (Phase 7, Decisions #21–22): same 30-day window as
+    // conversations, clamped the same way — a typo in the env var shortens the
+    // window, never widens it. 0 is reserved for "the job is disabled" like the
+    // conversation pruner, so the floor is 1 here and pruneExpiredMemories checks
+    // for non-positive separately.
+    memoryRetentionDays: clampAgentInt(process.env.AI_AGENT_MEMORY_RETENTION_DAYS, 30, 1, 3650),
   };
 }
 

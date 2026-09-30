@@ -9,6 +9,22 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
+model AgentMemory {
+  // One freeform fact the agent believes it learned, in the agent's own words.
+  // Loaded at turn start, last-touched-first — never as live conversation history.
+  id                   Int               @id @default(autoincrement())
+  adminId              Int
+  content              String            @db.Text
+  sourceConversationId Int? // which conversation it was learned in, for traceability/audit
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+
+  admin              User               @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  sourceConversation AgentConversation? @relation(fields: [sourceConversationId], references: [id], onDelete: SetNull)
+
+  @@index([adminId, updatedAt(sort: Desc)])
+}
+
 model User {
   id                Int                @id @default(autoincrement())
   name              String?
@@ -30,12 +46,17 @@ certificates      Certificate[]
   notifications     Notification[] // In-app inbox rows (optional module)
   auditLogs         AuditLog[] // Append-only admin-action audit trail
   agentConversations AgentConversation[] // AI admin agent chat sessions (admin-owned)
+  agentMemories      AgentMemory[] // cross-conversation facts the agent saved (Phase 7)
   agentApprovals     AgentApproval[]     @relation("AgentApprovalAdmin") // HITL approvals this admin requested
   agentDecisions     AgentApproval[]     @relation("AgentApprovalDecider") // HITL approvals this admin decided on
   refreshToken      String?            @db.Text
   refreshTokenFamily String?           @db.VarChar(36) // groups rotated refresh tokens; null = quarantined/logged out everywhere
   createdAt         DateTime           @default(now())
   lastLoginAt       DateTime?
+  // Phase 8 will soft-delete here — the column and index ship in Phase 7 (handoff 3.6)
+  // so the soft-delete work never needs a second schema change.
+  deletedAt         DateTime?
+  @@index([deletedAt])
 }
 
 model Course {
@@ -59,8 +80,13 @@ model Course {
   category      String?
   grade         Grade // Required field for Egyptian secondary school year
 
+  // Phase 8 will soft-delete here — the column and index ship in Phase 7 (handoff 3.6)
+  // so the soft-delete work never needs a second schema change.
+  deletedAt     DateTime?
+
   @@index([teacherId])
   @@index([grade])
+  @@index([deletedAt])
 }
 
 model Video {
@@ -491,6 +517,7 @@ model AgentConversation {
   admin     User            @relation(fields: [adminId], references: [id], onDelete: Cascade)
   messages  AgentMessage[]
   approvals AgentApproval[]
+  memoriesSourced AgentMemory[] // facts the agent says it learned in this conversation
 
   @@index([adminId, updatedAt(sort: Desc)])
 }

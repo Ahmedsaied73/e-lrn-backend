@@ -30,6 +30,7 @@ const { HumanMessage } = require('@langchain/core/messages');
 const { answerDeterministic } = require('./engine');
 const { createAgentGraph, finalAnswerText, toolCallSummary } = require('./graph');
 const { collectAllowed, checkGrounded, withGroundingNote } = require('./answerGuard');
+const { loadMemoriesForTurn } = require('./memoryService');
 const { canonicalArgsHash, consumeApproval, getApproval, requestApproval } = require('./approvals');
 const conversations = require('./conversationService');
 const audit = require('../auditLog');
@@ -371,7 +372,17 @@ async function answerQuestion({
   // Running the turn with progress: the graph emits tool lifecycle events, but
   // the grounding check still runs on the final answer before anyone sees it —
   // no token is ever shown before it is validated.
-  const built = graphFactory({ resolveToolContext });
+  //
+  // Memory (Phase 7, §3.9): the loader closure below owns this turn's identity
+  // (db, admin, what "recent" means). The graph only ever receives a function
+  // that returns strings — it cannot ask for another admin's memories because it
+  // cannot name them. Injection happens per MODEL CALL, not per turn, so a turn
+  // that calls tools three times shows the same labelled block three times; the
+  // prompt marks it as remembered facts, never as something just said.
+  const built = graphFactory({
+    resolveToolContext,
+    loadTurnMemories: () => loadMemoriesForTurn({ prisma: db, adminId }),
+  });
   const { graph } = built;
   emit({ type: 'tier', tier: 'llm', declinedReason: deterministic.reason });
 

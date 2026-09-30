@@ -33,6 +33,11 @@ const readDefinitions = [
   ...require('./quizzes'),
   ...require('./enrollments'),
   ...require('./operations'),
+  // Cross-conversation memory reads (Phase 7, §3.9): `list_memories` is visible on
+  // every turn because recall must not depend on the mutation switch — an unarmed
+  // agent can still USE what it learned, it just cannot WRITE (Decision #12's
+  // cache/current-question doctrine extends naturally: reading is knowing).
+  ...require('./memory').filter((def) => def.kind === KIND_READ),
   // Schema/metadata reads. Last in the list on purpose: they answer a question no
   // other tool can ("which TABLES does this platform have?"), so nothing that
   // already worked depends on them, and their 3 schemas are only bound when the
@@ -45,7 +50,7 @@ const readDefinitions = [
 // Phase 3 rebuild the second guard is different per kind: plain actions must be
 // attributable to the admin, and confirm tools cannot mutate without a token
 // their own preview issued (both enforced inside execute()).
-const actionDefinitions = [...require('./actions')];
+const actionDefinitions = [...require('./actions'), ...require('./memory').filter((def) => def.kind !== KIND_READ)];
 
 const NAME_RE = /^[a-z][a-z0-9_]{2,63}$/;
 const ARABIC_RE = /[\u0600-\u06FF]/;

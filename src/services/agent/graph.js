@@ -212,7 +212,31 @@ function compactToolPayloads(messages) {
   return list.map((message, index) => (isTool(message) && !keep.has(index) ? elideSpentToolPayload(message) : message));
 }
 
-function createAgentGraph({ resolveToolContext, checkpointer = sharedCheckpointer, invokeModel } = {}) {
+/**
+ * Where the turn-context assembly happens for the memory seam (handoff §3.9 —
+ * "wherever graph.js currently assembles the message list before calling the
+ * model"). Kept here (not buried in agentNode) so a unit test can assert exactly
+ * what the model was shown without invoking anything: the one SystemMessage,
+ * then the compacted live history. Memories are plain strings already; the prompt
+ * builder drops blanks, so nothing here filters or rewrites.
+ */
+function assembleTurnMessages(liveMessages, memories) {
+  const prompt = buildSystemPrompt({ memories });
+  return [new SystemMessage(prompt), ...compactToolPayloads(liveMessages)];
+}
+
+function createAgentGraph({
+  resolveToolContext,
+  checkpointer = sharedCheckpointer,
+  invokeModel,
+  // Phase 7 memory injection (§3.9): `loadTurnMemories` is a () => Promise<string[]>
+  // the caller resolves per turn. agentService wires the real loader (reads this
+  // admin's rows); a test hands in a scripted list. NOT an options object: the
+  // loader receives no turn identity, because the caller's closure already owns it —
+  // passing conversation/admin ids down here would re-create the authority plumbing
+  // answerQuestion already built, one level further from the server that owns it.
+  loadTurnMemories = null,
+} = {}) {
   // The FULL catalogue stays bound to the ToolNode, and that is deliberate: the node
   // is the execution AUTHORITY (strict args, row caps, redaction, the attribution and
   // confirmation gates, the audit row), not a menu. Keeping it complete means a
@@ -290,8 +314,22 @@ function createAgentGraph({ resolveToolContext, checkpointer = sharedCheckpointe
     // The model is shown the COMPACTED history; the state keeps every payload, so
     // grounding validation and approval detection are unaffected by this trim.
     // The prompt is built at request time (Phase 2): the date always belongs to THIS
-    // turn, and the memory block belongs to Phase 7 (empty until then).
-    const messages = [new SystemMessage(buildSystemPrompt()), ...compactToolPayloads(state.messages)];
+    // turn, and the memory block arrives through loadTurnMemories (Phase 7) — a slow
+    // loader can only slow the agent call, never sneak content into the compacted
+    // tool history this same message list shows below it.
+    // Memory NEVER costs an answer: a slow or failing read of an optional enhancement
+    // must degrade to "no memories this turn", not to a failed turn. The catch is here
+    // rather than inside the service because THIS is the seam that decides what the
+    // model sees, and a loader from any other caller gets the same guarantee.
+    let memories = [];
+    if (typeof loadTurnMemories === 'function') {
+      try {
+        memories = (await loadTurnMemories()) || [];
+      } catch (err) {
+        console.warn(`[WARN] agent.memory_load_failed ${JSON.stringify({ error: err && err.message })}`);
+      }
+    }
+    const messages = assembleTurnMessages(state.messages, memories);
     // Counted for the turn audit row: how many model calls this turn actually cost.
     modelCalls += 1;
     const { result, provider } = await callModel(messages, toolsForTurn());
@@ -386,6 +424,7 @@ function toolCallSummary(result) {
 
 module.exports = {
   buildSystemPrompt,
+  assembleTurnMessages,
   formatCairoDate,
   MEMORY_BLOCK_LABEL,
   AgentState,

@@ -459,6 +459,16 @@ const server = app.listen(port, () => {
         // Retention slipping a day is survivable; boot is not.
         console.warn('[WARN] Agent retention job failed to start:', err.message);
       }
+      // Agent memory retention (Phase 7, Decisions #21–22): the twin of the
+      // conversation sweeper — same fail-open shape, its own 03:47 tick and lock,
+      // the same "enabled means memories exist" gate.
+      try {
+        const { startMemoryRetentionJob } = require('./src/jobs/pruneAgentMemories');
+        agentMemoryRetentionTask = startMemoryRetentionJob();
+      } catch (err) {
+        // Same doctrine as its twin: a slipping window is survivable, boot is not.
+        console.warn('[WARN] Agent memory retention job failed to start:', err.message);
+      }
     }
 
     // Payments reconciliation (D11 backstop) — only when the module is enabled.
@@ -509,6 +519,7 @@ const server = app.listen(port, () => {
 let reconciliationTask = null; // node-cron task handle (stopped on shutdown)
 let paymentReconciliationTask = null; // payments cron handle (only when enabled)
 let agentRetentionTask = null; // agent transcript retention cron handle
+let agentMemoryRetentionTask = null; // agent memory retention cron handle (Phase 7)
 
 function shutdown(signal) {
   console.log(`[SHUTDOWN] ${signal} received — draining connections...`);
@@ -539,6 +550,17 @@ function shutdown(signal) {
     }
   } catch (err) {
     console.warn('[WARN] Agent retention cron stop failed:', err.message);
+  }
+
+  // Agent memory retention cron (Phase 7) — its own handle and its own stop, so a
+  // failure in one sweeper's teardown cannot leave the other cron firing mid-drain.
+  try {
+    if (agentMemoryRetentionTask) {
+      require('./src/jobs/pruneAgentMemories').stopMemoryRetentionJob(agentMemoryRetentionTask);
+      agentMemoryRetentionTask = null;
+    }
+  } catch (err) {
+    console.warn('[WARN] Agent memory retention cron stop failed:', err.message);
   }
 
   // Close BullMQ worker + queue so their dedicated Redis connections are

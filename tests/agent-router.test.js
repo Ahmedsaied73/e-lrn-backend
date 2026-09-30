@@ -67,6 +67,10 @@ test('the catalogue covers every read tool except the ones that need a model on 
     db_schema_overview: 'free-form lookup, list-shaped answer',
     db_schema_detail: 'free-form lookup, list-shaped answer',
     db_table_stats: 'free-form lookup, list-shaped answer',
+    // Memory is not a platform statistic (Decision #12). "فاكر إيه عني؟" has no
+    // recurring phrasing to template, and a memory-reading deterministic answer would
+    // answer from a cached row rather than from the model the memory exists to inform.
+    list_memories: 'the admin’s own remembered facts, phrased freely',
   };
 
   const unexpected = uncovered.filter((name) => !(name in AGENTIC_ONLY));
