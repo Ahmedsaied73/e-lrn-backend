@@ -64,7 +64,12 @@ async function main() {
     }
     console.log(`[tests] server healthy on ${BASE_URL} (pid ${serverPid})`);
 
-    const test = spawn(process.execPath, ['--test', 'tests/**/*.test.js'], {
+    // Files run SEQUENTIALLY (--test-concurrency=1). Every suite shares ONE
+    // Postgres database and ONE Redis instance: in parallel, the timing-sensitive
+    // suites (payment race callbacks, quiz lifecycle) contend for the connection
+    // pool and flake intermittently — a nondeterministic red build is worse than
+    // a slower green one, and failures here must mean real regressions.
+    const test = spawn(process.execPath, ['--test', '--test-concurrency=1', 'tests/**/*.test.js'], {
       env: { ...process.env, TEST_BASE_URL: BASE_URL },
       stdio: 'inherit',
       windowsHide: true,

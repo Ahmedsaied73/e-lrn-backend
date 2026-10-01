@@ -187,8 +187,9 @@ async function retryFailedAiGrading(req, res) {
       const before = await prisma.aiGradingJob.count({ where: { attemptId, status: 'FAILED' } });
       let enqueued = 0;
       if (enqueueAiGrading) {
-        // freshJobIds: re-schedule genuinely (bypass BullMQ's removeOnFail
-        // dedupe window); the row-level upsert keeps it idempotent and the
+        // freshJobIds: re-schedule genuinely (bypasses jobId dedupe while the
+        // previous failed job is still retained by removeOnFail — last 1000,
+        // up to 7 days); the row-level upsert keeps it idempotent and the
         // worker re-validates every guard, so re-processing is impossible.
         enqueued = await enqueueAiGrading(attemptId, { freshJobIds: true }).catch(() => 0);
       }

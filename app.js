@@ -327,6 +327,24 @@ if (enabledFeatures.payments) {
   }
 }
 
+// ── AI admin agent (Phase 4) — REST routes mounted BEFORE global error handler ──
+// Disabled means no /admin/agent routes at all (never stubs), the same doctrine as
+// the payments and notifications modules above.
+if (config.aiAgent && config.aiAgent.enabled) {
+  try {
+    app.use('/admin/agent', require('./src/routes/agentRoutes'));
+    console.log('[INFO] Agent REST mounted: /admin/agent');
+  } catch (err) {
+    console.warn('[WARN] Agent router failed to mount:', err.message);
+  }
+} else {
+  // WHY: with the flag off the admin console's agent panel gets a bare 404 and
+  // nothing on the server says why — which is indistinguishable from "the feature
+  // broke". One boot line names the cause instead of leaving it to a client error.
+  // The no-stub doctrine is unchanged: nothing is mounted in this branch.
+  console.log('[INFO] AI admin agent disabled (AI_AGENT_ENABLED=false) — /admin/agent and /agent-ws are not mounted.');
+}
+
 // ── Bunny Stream routes ────────────────────────────────────────────────────────
 // /courses prefix: handles POST /courses/:courseId/videos (create)
 // /videos prefix:  handles POST /videos/:videoId/upload and GET /videos/:videoId/playback
@@ -409,9 +427,62 @@ const server = app.listen(port, () => {
     console.log(`Example app listening at http://localhost:${port}`);
     console.log('CORS enabled for configured origins');
 
+    // The agent's WebSocket needs the listening HTTP server, so it is attached
+    // here rather than at require time: unit tests that import app.js without
+    // listening never create a socket server (or its timers) by accident.
+    if (config.aiAgent && config.aiAgent.enabled) {
+      try {
+        const { initAgentSocket, SOCKET_PATH } = require('./src/services/agent/socketHandler');
+        initAgentSocket(server);
+        console.log(`[INFO] Agent WebSocket mounted at ${SOCKET_PATH}`);
+      } catch (err) {
+        console.warn('[WARN] Agent WebSocket failed to mount:', err.message);
+      }
+    } else {
+      // Same reason as the REST mount above: a silently absent /agent-ws looks like
+      // a broken client, so the boot log states it was configuration, not failure.
+      console.log('[INFO] AI admin agent disabled (AI_AGENT_ENABLED=false) — /agent-ws is not mounted.');
+    }
+
     // Start Bunny video reconciliation job (every 10 minutes). Keep the task
     // handle so shutdown can stop it.
     reconciliationTask = startReconciliationJob();
+
+    // Phase 8: soft-delete purge (daily 04:17). Deliberately OUTSIDE the
+    // `config.aiAgent.enabled` block below — soft delete is core platform
+    // behaviour, not an agent feature, so it must run with the agent switched off.
+    // Ships with dry-run ON by default (SOFT_DELETE_PURGE_DRY_RUN), so the first
+    // runs log what they would remove and destroy nothing.
+    try {
+      const { startSoftDeletePurgeJob } = require('./src/jobs/pruneSoftDeleted');
+      softDeletePurgeTask = startSoftDeletePurgeJob();
+    } catch (err) {
+      // Retention slipping a day is survivable; boot is not.
+      console.warn('[WARN] Soft-delete purge job failed to start:', err.message);
+    }
+
+    // Agent conversation retention (daily). Deletes transcripts untouched for
+    // longer than AI_AGENT_CONVERSATION_RETENTION_DAYS, with messages and
+    // approvals cascading. Only meaningful when the agent is enabled.
+    if (config.aiAgent && config.aiAgent.enabled) {
+      try {
+        const { startRetentionJob } = require('./src/jobs/pruneAgentConversations');
+        agentRetentionTask = startRetentionJob();
+      } catch (err) {
+        // Retention slipping a day is survivable; boot is not.
+        console.warn('[WARN] Agent retention job failed to start:', err.message);
+      }
+      // Agent memory retention (Phase 7, Decisions #21–22): the twin of the
+      // conversation sweeper — same fail-open shape, its own 03:47 tick and lock,
+      // the same "enabled means memories exist" gate.
+      try {
+        const { startMemoryRetentionJob } = require('./src/jobs/pruneAgentMemories');
+        agentMemoryRetentionTask = startMemoryRetentionJob();
+      } catch (err) {
+        // Same doctrine as its twin: a slipping window is survivable, boot is not.
+        console.warn('[WARN] Agent memory retention job failed to start:', err.message);
+      }
+    }
 
     // Payments reconciliation (D11 backstop) — only when the module is enabled.
     // Lazy require + guarded start: a payments problem must never break boot.
@@ -460,6 +531,9 @@ const server = app.listen(port, () => {
 // so a hung connection can't keep the instance "up" after detach.
 let reconciliationTask = null; // node-cron task handle (stopped on shutdown)
 let paymentReconciliationTask = null; // payments cron handle (only when enabled)
+let agentRetentionTask = null; // agent transcript retention cron handle
+let agentMemoryRetentionTask = null; // agent memory retention cron handle (Phase 7)
+let softDeletePurgeTask = null; // soft-delete purge cron handle (Phase 8)
 
 function shutdown(signal) {
   console.log(`[SHUTDOWN] ${signal} received — draining connections...`);
@@ -480,6 +554,38 @@ function shutdown(signal) {
     }
   } catch (err) {
     console.warn('[WARN] Payment reconciliation cron stop failed:', err.message);
+  }
+
+  // Agent retention cron — same: absent when the agent was disabled at boot.
+  try {
+    if (agentRetentionTask) {
+      require('./src/jobs/pruneAgentConversations').stopRetentionJob(agentRetentionTask);
+      agentRetentionTask = null;
+    }
+  } catch (err) {
+    console.warn('[WARN] Agent retention cron stop failed:', err.message);
+  }
+
+  // Agent memory retention cron (Phase 7) — its own handle and its own stop, so a
+  // failure in one sweeper's teardown cannot leave the other cron firing mid-drain.
+  try {
+    if (agentMemoryRetentionTask) {
+      require('./src/jobs/pruneAgentMemories').stopMemoryRetentionJob(agentMemoryRetentionTask);
+      agentMemoryRetentionTask = null;
+    }
+  } catch (err) {
+    console.warn('[WARN] Agent memory retention cron stop failed:', err.message);
+  }
+
+  // Soft-delete purge cron (Phase 8) — its own handle and its own stop. A
+  // destructive sweep must never be able to fire mid-drain.
+  try {
+    if (softDeletePurgeTask) {
+      require('./src/jobs/pruneSoftDeleted').stopSoftDeletePurgeJob(softDeletePurgeTask);
+      softDeletePurgeTask = null;
+    }
+  } catch (err) {
+    console.warn('[WARN] Soft-delete purge cron stop failed:', err.message);
   }
 
   // Close BullMQ worker + queue so their dedicated Redis connections are

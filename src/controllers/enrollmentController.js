@@ -35,8 +35,9 @@ const enrollUserInCourse = async (req, res) => {
     }
 
     // Verify the course exists
+    // Phase 8 (DENY-ACCESS): a soft-deleted course cannot be enrolled into.
     const course = await prisma.course.findUnique({
-      where: { slug: courseSlug },
+      where: { slug: courseSlug, deletedAt: null },
       select: { id: true, slug: true, price: true }
     });
 
@@ -131,7 +132,8 @@ const checkEnrollmentStatus = async (req, res) => {
     }
 
     const course = await prisma.course.findUnique({
-      where: { slug: courseSlug },
+      // Phase 8 (DENY-ACCESS): no new enrollment into a soft-deleted course.
+      where: { slug: courseSlug, deletedAt: null },
       select: { id: true },
     });
 
@@ -186,8 +188,10 @@ const listAllEnrollments = async (req, res) => {
     const where = {};
     const userSlug = (req.query.userSlug || '').trim();
     if (userSlug) {
-      const user = await prisma.user.findUnique({
-        where: { slug: userSlug },
+      const user = await prisma.user.findFirst({
+        // Phase 8 (FILTER): filtering the admin list by a soft-deleted student
+        // must return nothing, not their surviving enrollment rows.
+        where: { slug: userSlug, deletedAt: null },
         select: { id: true },
       });
       if (!user) return res.json({ success: true, data: [], meta: { total: 0, page, limit: take, totalPages: 0 } });
@@ -196,7 +200,7 @@ const listAllEnrollments = async (req, res) => {
     const courseSlug = (req.query.courseSlug || '').trim();
     if (courseSlug) {
       const course = await prisma.course.findUnique({
-        where: { slug: courseSlug },
+        where: { slug: courseSlug, deletedAt: null },
         select: { id: true },
       });
       if (!course) return res.json({ success: true, data: [], meta: { total: 0, page, limit: take, totalPages: 0 } });
@@ -275,13 +279,14 @@ const adminEnroll = async (req, res) => {
       return res.status(400).json({ success: false, error: 'userSlug and courseSlug are required.' });
     }
 
-    const user = await prisma.user.findUnique({ where: { slug: userSlug }, select: { id: true, role: true } });
+    const user = await prisma.user.findFirst({ where: { slug: userSlug, deletedAt: null }, select: { id: true, role: true } });
     if (!user) {
       return res.status(404).json({ success: false, error: 'User not found.' });
     }
     const parsedUserId = user.id;
 
-    const course = await prisma.course.findUnique({ where: { slug: courseSlug }, select: { id: true } });
+    // Phase 8 (DENY-ACCESS): admin-enrolling into a soft-deleted course is refused.
+    const course = await prisma.course.findFirst({ where: { slug: courseSlug, deletedAt: null }, select: { id: true } });
     if (!course) {
       return res.status(404).json({ success: false, error: 'Course not found.' });
     }

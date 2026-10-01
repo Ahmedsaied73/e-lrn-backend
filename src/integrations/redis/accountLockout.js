@@ -63,9 +63,21 @@ async function getLockState(email) {
   const client = readyClient();
   if (!client) return { locked: false, failures: 0, retryAfterMs: 0 };
   try {
-    const raw = await withTimeout(client.get(keyFor(email)));
-    const ttl = await withTimeout(client.ttl(keyFor(email)));
-    const failures = Number(raw) || 0;
+    const key = keyFor(email);
+    // Single Lua round-trip: the previous GET+TTL pair raced key expiry between
+    // the two commands (could report locked with retryAfterMs 0). Returns
+    // {failures, ttlSec}; a missing key returns {0, -2} (mirrors GET/TTL).
+    const res = await withTimeout(
+      client.eval(
+        `local c = redis.call('GET', KEYS[1]); ` +
+        `if not c then return {0, -2} end; ` +
+        `return {tonumber(c) or 0, redis.call('TTL', KEYS[1])};`,
+        1,
+        key
+      )
+    );
+    const failures = Number(res && res[0]) || 0;
+    const ttl = Number(res && res[1]) || 0;
     const locked = failures >= threshold();
     return {
       locked,

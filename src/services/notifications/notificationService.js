@@ -23,6 +23,7 @@ const TITLE_MAX = 200;
 const BODY_MAX = 5000;
 const LINK_MAX = 500;
 const FANOUT_CHUNK = 500;
+const UNREAD_COUNT_TTL_SEC = 30;
 const VALID_GRADES = ['FIRST_SECONDARY', 'SECOND_SECONDARY', 'THIRD_SECONDARY'];
 
 function badRequest(message) {
@@ -66,21 +67,36 @@ function validateContent({ title, body }) {
  */
 async function resolveAudience(audience) {
   if (!audience || audience.kind === 'all') {
-    const users = await prisma.user.findMany({ where: { role: 'STUDENT' }, select: { id: true } });
+    // Phase 8 (FILTER): a soft-deleted student must never receive a broadcast.
+    const users = await prisma.user.findMany({
+      where: { role: 'STUDENT', deletedAt: null },
+      select: { id: true },
+    });
     return users.map((u) => u.id);
   }
   if (audience.kind === 'course') {
     const { courseSlug } = audience;
     if (typeof courseSlug !== 'string') throw badRequest('Invalid courseSlug');
-    const course = await prisma.course.findUnique({ where: { slug: courseSlug }, select: { id: true } });
+    // Phase 8: broadcasting to a soft-deleted course is refused rather than
+    // silently fanned out to a hidden audience.
+    const course = await prisma.course.findUnique({
+      where: { slug: courseSlug, deletedAt: null },
+      select: { id: true },
+    });
     if (!course) throw notFound('Course not found');
-    const enrollments = await prisma.enrollment.findMany({ where: { courseId: course.id }, select: { userId: true } });
+    // Phase 8: enrollment ROWS survive a soft delete, so the audience must be
+    // filtered through the user relation — a deleted student's enrollment would
+    // otherwise put them back on the recipient list for every course broadcast.
+    const enrollments = await prisma.enrollment.findMany({
+      where: { courseId: course.id, user: { deletedAt: null } },
+      select: { userId: true },
+    });
     return enrollments.map((e) => e.userId);
   }
   if (audience.kind === 'grade') {
     if (!VALID_GRADES.includes(audience.grade)) throw badRequest('Invalid grade');
     const users = await prisma.user.findMany({
-      where: { role: 'STUDENT', grade: audience.grade },
+      where: { role: 'STUDENT', grade: audience.grade, deletedAt: null },
       select: { id: true },
     });
     return users.map((u) => u.id);
@@ -112,6 +128,7 @@ async function createForUsers({ userIds, type, title, body = null, linkUrl = nul
     const created = await prisma.notification.createMany({ data: chunk });
     count += created.count;
   }
+  await invalidateUnreadCount(ids);
   return { count, batchId: finalBatchId };
 }
 
@@ -137,8 +154,31 @@ async function listForUser(userId, { page = 1, limit = 20, unreadOnly = false } 
   return { items, total, page: pageNum, limit: take };
 }
 
+/**
+ * Drop cached unread counts for the given user id(s). Never throws — a Redis
+ * failure merely leaves a stale badge until the short TTL expires. Chunked
+ * like the fan-out (a broadcast can touch thousands of recipients).
+ */
+async function invalidateUnreadCount(userIds) {
+  try {
+    const cache = require('../../integrations/redis/cache');
+    const ids = (Array.isArray(userIds) ? userIds : [userIds]).filter((id) => Number.isSafeInteger(id) && id > 0);
+    for (let i = 0; i < ids.length; i += FANOUT_CHUNK) {
+      await cache.del(ids.slice(i, i + FANOUT_CHUNK).map((id) => cache.buildKey('notif', 'unread', String(id))));
+    }
+  } catch {
+    /* best-effort: a stale count self-heals on TTL */
+  }
+}
+
 async function unreadCount(userId) {
-  return prisma.notification.count({ where: { userId, read: false } });
+  // Cache-aside (TTL 30s): the FE polls this for the inbox badge on every
+  // navigation. Lazy require + withCache fall through to the DB transparently
+  // when Redis is off — Redis never breaks a request.
+  const cache = require('../../integrations/redis/cache');
+  return cache.withCache(cache.buildKey('notif', 'unread', String(userId)), UNREAD_COUNT_TTL_SEC, () =>
+    prisma.notification.count({ where: { userId, read: false } })
+  );
 }
 
 async function markRead(userId, id) {
@@ -151,6 +191,7 @@ async function markRead(userId, id) {
     where: { id: notificationId, userId },
     data: { read: true },
   });
+  if (updated.count > 0) await invalidateUnreadCount(userId);
   return { updated: updated.count };
 }
 
@@ -159,6 +200,7 @@ async function markAllRead(userId) {
     where: { userId, read: false },
     data: { read: true },
   });
+  if (updated.count > 0) await invalidateUnreadCount(userId);
   return { updated: updated.count };
 }
 

@@ -36,19 +36,57 @@ async function login(req, res) {
     // Credential-check section (user fetch + bcrypt compare) bounded by the
     // login semaphore: pending logins wait here WITHOUT holding a DB pool
     // connection. All 401/lockout semantics below are unchanged.
-    const { user, passwordMatch } = await loginSlot(async () => {
+    const { user, passwordMatch, deleted } = await loginSlot(async () => {
+      const normalizedEmail = email.trim().toLowerCase();
       const found = await prisma.user.findUnique({
-        where: { email: email.trim().toLowerCase() }
+        where: { email: normalizedEmail }
       });
 
-      if (!found) return { user: null, passwordMatch: false };
+      if (!found) {
+        // Phase 8 (REJECT-AS-DELETED): a soft-deleted account's live email has been
+        // replaced by a tombstone, so the freed address no longer matches the row.
+        // Look for it under the parked original — but ONLY on this miss path, so a
+        // successful login still costs exactly the one indexed lookup it always did.
+        //
+        // The try/catch is a DEPLOY-ORDER guard, not a data guard: `deletedEmail` is
+        // added by migration 20261002000000, and if this code reaches an environment
+        // where that has not run yet, the raw query would 500 on EVERY failed login
+        // (a far worse failure than the one it reports). Degrading to "not deleted"
+        // is exactly the pre-Phase-8 behaviour, so it fails safe, never open.
+        let parked = null;
+        try {
+          parked = await prisma.user.findFirst({
+            where: { deletedEmail: normalizedEmail },
+            select: { id: true },
+          });
+        } catch (parkErr) {
+          console.warn('[auth/login] deletedEmail lookup unavailable (migration 20261002000000 not applied?):', parkErr.code || parkErr.message);
+        }
+        return { user: null, passwordMatch: false, deleted: Boolean(parked) };
+      }
+
+      // Defence in depth: if a row is soft-deleted WITHOUT the tombstone (a manual
+      // or future code path), refuse here rather than letting the original address
+      // log in. This is the clause that makes the delete's promise true regardless
+      // of how the row got its deletedAt.
+      if (found.deletedAt) return { user: null, passwordMatch: false, deleted: true };
 
       const ok = await bcrypt.compare(password, found.password);
-      return { user: found, passwordMatch: ok };
+      return { user: found, passwordMatch: ok, deleted: false };
     });
 
     if (!user) {
       await recordFailure(email);
+      // Ordered AFTER recordFailure on purpose: a deleted address must still spend
+      // the same lockout budget as a wrong password, or ACCOUNT_DELETED becomes a
+      // free existence-probe for the login limiter.
+      if (deleted) {
+        return res.status(401).json({
+          success: false,
+          error: 'This account has been deleted.',
+          code: 'ACCOUNT_DELETED',
+        });
+      }
       return res.status(401).json({ success: false, error: 'Invalid credentials.' });
     }
 
@@ -74,6 +112,15 @@ async function login(req, res) {
         lastLoginAt: new Date(),
       }
     });
+
+    // lastLoginAt is part of the cached /user/me payload (v1:me:{id}) — drop it.
+    // Never-throw: a Redis failure leaves a ≤60s-stale lastLoginAt, nothing worse.
+    try {
+      const cache = require('../integrations/redis/cache');
+      await cache.del(cache.buildKey('me', String(user.id)));
+    } catch {
+      /* best-effort */
+    }
 
     // Set HttpOnly Cookies on Response. Tokens are NEVER returned in the body —
     // the browser holds them in cookies (cookie-only auth model).
@@ -188,7 +235,12 @@ async function refreshToken(req, res) {
     }
 
     const user = await prisma.user.findUnique({
-      where: { id: decoded.id },
+      // Phase 8 (REJECT-AS-DELETED): a soft-deleted account must not be able to
+      // roll its session forward. The delete path already nulls refreshToken, so
+      // this filter is the second lock — it also covers a row deleted by any
+      // future path that forgets that. `undefined` on a deleted row falls through
+      // to the same 403 as a revoked token: the client is simply logged out.
+      where: { id: decoded.id, deletedAt: null },
       select: { id: true, email: true, name: true, role: true, refreshToken: true, refreshTokenFamily: true },
     });
 

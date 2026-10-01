@@ -28,6 +28,7 @@ Single reference for every HTTP endpoint of the e-learning platform backend. Cov
 - [16. Health Probes (`/healthz`, `/readyz`, `/health`, `/metrics`)](#16-health-probes-healthz-readyz-health-metrics)
 - [17. Sequential Access Gate](#17-sequential-access-gate)
 - [18. Error Codes](#18-error-codes)
+- [19. AI Admin Agent (`/admin/agent`, `/agent-ws`)](#19-ai-admin-agent-adminagent-agent-ws)
 
 ---
 
@@ -539,3 +540,233 @@ Structured `code` values returned by the global handler (in addition to the HTTP
 | `VALIDATION_ERROR` | 400 | Payload validation failed |
 | `ALREADY_PASSED` | 409 | Quiz start while a passed attempt exists |
 | `MAX_ATTEMPTS_REACHED` | 409 | Quiz attempt budget exhausted |
+| `AGENT_QUESTION_REQUIRED` | 400 | Agent turn with a missing/blank `question` (§19) |
+| `AGENT_QUESTION_TOO_LONG` | 400 | Agent `question` over 2000 characters (§19) |
+| `AGENT_INVALID_INPUT` | 400 | Agent body/param shape invalid (§19) |
+| `AGENT_CONVERSATION_NOT_FOUND` | 404 | Agent conversation missing or owned by another admin (§19) |
+| `AGENT_APPROVAL_NOT_FOUND` | 404 | Approval missing / not owned by this admin (§19) |
+| `AGENT_APPROVAL_NOT_OWNED` | 404 | Approval belongs to another admin (`decide`) (§19) |
+| `AGENT_APPROVAL_EXPIRED` | 409 | Approval TTL elapsed (`decide`) (§19) |
+| `AGENT_APPROVAL_REJECTED` | 409 | Approval was already rejected (`decide`) (§19) |
+| `AGENT_APPROVAL_ALREADY_CONSUMED` | 409 | Approval grant was already spent (`decide`) (§19) |
+| `AGENT_APPROVAL_NOT_PENDING` | 409 | Approval row is not `PENDING` anymore (`decide`) (§19) |
+| `AGENT_APPROVAL_INVALID_INPUT` | 400 | `POST /admin/agent/approvals` body invalid (tool/args/ttl) (§19) |
+| `AGENT_RATE_LIMITED` | 429 | Per-admin minute turn budget exhausted on `POST /ask` (§19) |
+| `AGENT_DAILY_BUDGET_EXCEEDED` | 429 | Per-admin **daily** turn budget exhausted on `POST /ask` (§19) |
+
+> Turn-level agent codes (`AGENT_DISABLED`, `EMPTY_QUESTION`, `LLM_*`, `GROUNDING_FAILED`, …) are **not** global-handler codes: they ride a `200` with `ok: false` and are listed in §19.
+
+---
+
+## 19. AI Admin Agent (`/admin/agent`, `/agent-ws`)
+
+Admin copilot: analytics questions answered from the platform database, plus guarded mutations that only run under a single-use human approval. Sources: `src/routes/agentRoutes.js` (REST), `src/services/agent/socketHandler.js` (WebSocket), `src/services/agent/agentService.js` (one turn), `src/config/env.js` → `resolveAiAgent()` (config).
+
+### Conditional mount
+
+- Mounted by `app.js` **only when `AI_AGENT_ENABLED=true`** (default `false`). While it is false there is **no `/admin/agent` router and no `/agent-ws` socket server at all** — disabled means absent, never stubbed (same doctrine as the payments and notifications modules).
+- REST: `app.use('/admin/agent', require('./src/routes/agentRoutes'))`, mounted before the global error handler.
+- Socket: attached inside the `app.listen()` callback (`initAgentSocket(server)`), not at require time, so importing `app.js` without listening never creates a socket server (or its timers).
+- Second, independent switch: `AI_AGENT_ALLOW_MUTATIONS` (default `false`). While false the mutating tools are not registered with the model at all, so no prompt (or prompt injection) can reach them. `allowMutations` can never be `true` while `enabled` is `false`.
+- Neither switch is boot-critical: a missing provider key only leaves the module `configured: false`, which answers with an Arabic configuration error instead of crashing boot.
+
+### Authentication
+
+- Every route sits behind `router.use(authenticateToken, authorizeAdmin())` — the same order as every other `/admin/*` router.
+- Anonymous / invalid token → **401** `{ success: false, error: 'Access denied. No token provided.' | 'Invalid or expired token.' }`.
+- Authenticated non-admin → **403** `{ success: false, error: 'Access denied. Insufficient privileges.' }`.
+- The WebSocket has its own equivalent middleware — cookie-only, with a DB admin re-check (see below).
+
+### Turn budget — BOTH `POST /ask` and the WebSocket (Phase 4.5)
+
+One policy, two surfaces: `src/services/agent/limits.js` is the only place that decides
+whether a turn may run. Before this the limiter existed on the REST route only, which left
+the socket as the cheaper path to an unlimited LLM bill, and `AI_AGENT_DAILY_TURN_BUDGET`
+was resolved and clamped but enforced nowhere.
+
+| Setting | Value |
+|---|---|
+| Minute bucket | `Number(process.env.AI_AGENT_ASK_LIMIT) || 60` per 60 s, key `agent:turns:m:<adminId>:<yyyymmddhhmm>`, TTL 120 s |
+| Day bucket | `config.aiAgent.dailyTurnBudget` (default 500), key `agent:turns:d:<adminId>:<yyyymmdd>`, TTL until local midnight |
+| Key | **per admin**, never per IP — the same admin behind two networks shares one budget |
+| Store | Redis (`INCR` + `EXPIRE` once per key) when `isRedisReady()`, else a bounded in-process counter |
+| Refused turn | **counted anyway** — a client that retries a closed budget cannot walk past it |
+
+| Surface | Exceeded | Body |
+|---|---|---|
+| `POST /ask` | **429** + `Retry-After` | `{ success: false, error, code: 'AGENT_RATE_LIMITED' }` |
+| `POST /ask` | **429** + `Retry-After` (until midnight) | `{ …, code: 'AGENT_DAILY_BUDGET_EXCEEDED' }` |
+| `agent:message` | `agent:error` | `{ code: 'RATE_LIMITED' \| 'DAILY_BUDGET_EXCEEDED', detail, retryAfterMs }` — the service is **not** called |
+
+- **Fail-open, always.** If Redis is unreachable the counter falls back to a bounded local
+  map (the same house rule as `rateLimitStore.js`), and a limiter that *throws* is ignored
+  rather than turned into a 503. A provider outage must never become "the admin cannot ask a
+  question". The honest cost: during a Redis outage the ceiling is per-process, not shared.
+- The socket rejection happens **before** the service call, so a refused turn never reaches
+  the model or the database.
+- Rationale (from the route header): one call can reach a paid LLM, the same reason the
+  Paymob checkout endpoint is per-user limited.
+
+### Endpoints
+
+| Method | Path | Body / query | Success response |
+|---|---|---|---|
+| `POST` | `/admin/agent/ask` | `{ question, conversationId?, approvalId? }` | **200** `{ success: true, ok: true, answer, source, conversationId, detail }` — or **200** with `ok: false` (turn results below) |
+| `GET` | `/admin/agent/conversations` | query `take?` (default 30, clamped 1..50) | **200** `{ success: true, data: [{ id, title, updatedAt, lastMessageAt, messageCount }] }` |
+| `GET` | `/admin/agent/conversations/:id/messages` | — | **200** `{ success: true, data: [{ id, role, content, toolName, createdAt }] }` |
+| `POST` | `/admin/agent/approvals` | `{ toolName, args, conversationId?, ttlMs? }` | **201** `{ success: true, data: { id, toolName, argsHash, status, expiresAt } }` — ⚠ **currently returns 500, see below** |
+| `POST` | `/admin/agent/approvals/:id/decide` | `{ approved: true \| false }` | **200** `{ success: true, data: { id, status, decidedAt, decidedBy } }` |
+| `GET` | `/admin/agent/approvals/:id` | — | **200** `{ success: true, data: { id, toolName, argsHash, status, requestedAt, expiresAt, decidedAt, consumedAt, conversationId } }` |
+
+All six answer the repo's error shape `{ success: false, error, code }` when they throw.
+
+### `POST /admin/agent/ask` — ADMIN (turn-budgeted)
+- **Body**: `question` (non-empty string, ≤ 2000 chars), `conversationId?` (positive int), `approvalId?` (positive int — spends a previously granted, owner-checked approval exactly once).
+- **200** `{ success: true, ok: true, answer, source, conversationId, detail }`. `source` is `'deterministic'` (the Arabic fast path, no LLM) or `'llm'` (the model tier). `detail` = `{ provider, toolCalls, stopReason, approval, approvalRequested, latencyMs }` for a model answer, or `{ intent, tool, latencyMs, declinedReason }` for the fast path (`approvalRequested` is `{ approvalId, toolName, expiresAt }` or `null`).
+- **200** `{ success: true, ok: false, code, message, conversationId, declinedReason, ungrounded }` — an expected agent failure, not an HTTP error (codes below).
+- **503** the same `ok: false` envelope with `code: 'AGENT_DISABLED'`.
+- **400** `AGENT_QUESTION_REQUIRED` (missing/blank `question`), `AGENT_QUESTION_TOO_LONG` (> 2000 chars), `AGENT_INVALID_INPUT` (`conversationId`/`approvalId` not a positive integer).
+- **429** + `Retry-After` `AGENT_RATE_LIMITED` / `AGENT_DAILY_BUDGET_EXCEEDED` — see *Turn budget* above.
+- **Phase 4.5 — `conversationId` on a failed turn.** A conversation row is now written *together with* its first turn, in one round trip, so a turn that produced no answer cannot leave an empty row behind. Consequence: when a **new** conversation is refused (`LLM_ERROR`, `LLM_UNAVAILABLE`, `GROUNDING_FAILED`, `EMPTY_ANSWER`, `TOOL_BUDGET_EXHAUSTED`, `LLM_NOT_CONFIGURED`), the response carries `conversationId: null` and no conversation exists. When a turn on an **existing** conversation is refused, the id is still returned (that conversation exists) and nothing is written to it. Clients must therefore treat `conversationId: null` as "start a new conversation on the next question", not as an error.
+
+### `GET /admin/agent/conversations` — ADMIN
+- **Query**: `take` (default 30, clamped to 1..50; a non-numeric value falls back to the default rather than erroring).
+- **200** `{ success: true, data: [{ id, title, updatedAt, lastMessageAt, messageCount }] }` — newest `updatedAt` first, for this admin only.
+
+### `GET /admin/agent/conversations/:id/messages` — ADMIN
+- **200** `{ success: true, data: [{ id, role, content, toolName, createdAt }] }` — oldest first, capped at 100 rows. The select is deliberately narrow: `toolArgs`, `toolResult` and `metadata` are never fetched, so the chat UI cannot render operational internals.
+- **400** `AGENT_INVALID_INPUT` (`:id` not a positive integer) · **404** `AGENT_CONVERSATION_NOT_FOUND` (missing, or owned by another admin — `NOT_OWNED` is reported as 404, never 403).
+
+### `POST /admin/agent/approvals` — ADMIN
+- **Body**: `toolName` (must match `/^[a-z][a-z0-9_]{2,63}$/`), `args` (plain object), `conversationId?`, `ttlMs?`.
+- **201** `{ success: true, data: { id, toolName, argsHash, status, expiresAt } }` · **400** `AGENT_APPROVAL_INVALID_INPUT` (bad tool name, non-serialisable args, `ttlMs` outside 30 000..1 800 000).
+- `args` is **not** echoed back — the response carries only `argsHash`.
+- `ttlMs` is optional and defaults to `config.aiAgent.approvalTtlMs` (5 min, already clamped to exactly the 30 s..30 min the service enforces).
+- **Fixed in Phase 4.5.** This endpoint shipped returning **500 for every request**: the route called `requestApproval({ … })` while the module's destructured require pulled only `decideApproval`, `getApproval` and `AgentApprovalError`, so the call threw `ReferenceError` (not an `AppError`, so the global handler answered 500 with no `code`). A second, quieter defect sat behind it: `ttlMs` was documented optional but `requestApproval` rejects a non-integer value, so even with the import fixed every request without an explicit TTL returned 400. Both are fixed, and `tests/agent-rest.test.js` now walks create → read → decide (the absence of any test for this endpoint is why both defects survived).
+- Purpose (from the source): the agent itself creates most of these rows when a refused mutation becomes a request; the endpoint exists to make the flow testable and to let a dashboard retry a request that expired before it was decided.
+
+
+### `POST /admin/agent/approvals/:id/decide` — ADMIN
+- **Body**: `approved` — must be exactly `true` or `false`.
+- **200** `{ success: true, data: { id, status, decidedAt, decidedBy } }` (`status` = `APPROVED` | `REJECTED`). Deciding is idempotent in outcome but not in history: a second decision on a non-`PENDING` row is refused rather than silently accepted.
+- **400** `AGENT_INVALID_INPUT` (`:id` not a positive integer, or `approved` not a boolean).
+- **404** `AGENT_APPROVAL_NOT_FOUND` (no such row) · `AGENT_APPROVAL_NOT_OWNED` (another admin's row).
+- **409** `AGENT_APPROVAL_EXPIRED`, `AGENT_APPROVAL_REJECTED`, `AGENT_APPROVAL_ALREADY_CONSUMED`, `AGENT_APPROVAL_NOT_PENDING` — every `AgentApprovalError` code other than `NOT_FOUND`/`NOT_OWNED` is mapped to 409.
+
+### `GET /admin/agent/approvals/:id` — ADMIN
+- **200** `{ success: true, data: { id, toolName, argsHash, status, requestedAt, expiresAt, decidedAt, consumedAt, conversationId } }` — deliberately **no `args`**: the raw arguments may carry PII-adjacent values and the `argsHash` is what proves the binding.
+- **400** `AGENT_INVALID_INPUT` (`:id` not a positive integer) · **404** `AGENT_APPROVAL_NOT_FOUND` (missing *or* another admin's row — `getApproval` returns `null` for both).
+
+### Response envelope — and the `200` + `ok: false` rule
+
+The agent uses the repo's `{ success, error }` shape **plus** an `ok` flag, because an assistant turn can fail in ways that are not HTTP errors (a refused model answer, an exhausted tool budget, a provider outage). Those return **200 with `ok: false`** rather than a misleading 5xx, so a dashboard cannot mistake them for a broken endpoint; only `AGENT_DISABLED` is a **503**.
+
+| Turn outcome | HTTP | Body |
+|---|---|---|
+| Answered | 200 | `{ success: true, ok: true, answer, source, conversationId, detail }` |
+| Expected agent failure | 200 | `{ success: true, ok: false, code, message, conversationId, declinedReason, ungrounded }` |
+| Agent disabled | 503 | the same `ok: false` body with `code: 'AGENT_DISABLED'` |
+| Bad request / not found / conflict | 400 · 404 · 409 | `{ success: false, error, code }` (global handler) |
+
+Turn-result codes returned by `answerQuestion` (`src/services/agent/agentService.js`) — every one of these rides `success: true`:
+
+| `code` | HTTP | Meaning |
+|---|---|---|
+| `AGENT_DISABLED` | 503 | `config.aiAgent.enabled` is false when the service runs (routes are normally unmounted, so this is a defence-in-depth path) |
+| `EMPTY_QUESTION` | 200 | `question` is not a non-empty string |
+| `LLM_NOT_CONFIGURED` | 200 | neither `GROQ_API_KEY` nor `GEMINI_API_KEY` resolved and the deterministic fast path declined |
+| `LLM_UNAVAILABLE` | 200 | the graph threw `ALL_PROVIDERS_FAILED` — every configured provider failed *transiently* |
+| `LLM_ERROR` | 200 | any other graph/provider throw, including a **permanent** provider error (bad key, malformed request). A **retired model id** (`404 model_not_found`) lands here on committed HEAD because the failover wrapper does not retry 404s (see `llmProvider.isRetriable`); an in-flight Phase 4.5 change instead retires that provider for the process and falls through to the fallback, which surfaces as `LLM_UNAVAILABLE` once no usable provider is left |
+| `TOOL_BUDGET_EXHAUSTED` | 200 | the model ended with `stopReason: 'MAX_TOOL_CALLS'` and produced no prose |
+| `EMPTY_ANSWER` | 200 | the model ended without prose for any other reason |
+| `GROUNDING_FAILED` | 200 | the answer contained figures no tool returned; the payload adds `ungrounded: [...]` and the answer is discarded |
+
+- `conversationId` and `declinedReason` are present on failures where known; `ungrounded` only on `GROUNDING_FAILED`.
+- `message` is Arabic (e.g. `'ميزة المساعد الذكي غير مُفعّلة.'` for `AGENT_DISABLED`), matching the deterministic tier's answers.
+- Throwing is reserved for real bugs — these eight are documented outcomes, not errors.
+
+### Route-level error codes
+
+Thrown as `AppError` and shaped by the global handler as `{ success: false, error, code }`:
+
+| `code` | HTTP | Thrown by |
+|---|---|---|
+| `AGENT_QUESTION_REQUIRED` | 400 | `POST /ask` — missing/blank `question` |
+| `AGENT_QUESTION_TOO_LONG` | 400 | `POST /ask` — `question` over 2000 characters |
+| `AGENT_INVALID_INPUT` | 400 | `POST /ask` (`conversationId`/`approvalId`), `GET /conversations/:id/messages` (`:id`), `POST /approvals/:id/decide` (`:id`, `approved`) |
+| `AGENT_CONVERSATION_NOT_FOUND` | 404 | `GET /conversations/:id/messages` — `AgentConversationError('NOT_OWNED')` |
+| `AGENT_APPROVAL_NOT_FOUND` | 404 | `POST /approvals/:id/decide`, `GET /approvals/:id` |
+| `AGENT_APPROVAL_NOT_OWNED` | 404 | `POST /approvals/:id/decide` — another admin's row |
+| `AGENT_APPROVAL_EXPIRED` | 409 | `POST /approvals/:id/decide` — TTL elapsed |
+| `AGENT_APPROVAL_REJECTED` | 409 | `POST /approvals/:id/decide` — already rejected |
+| `AGENT_APPROVAL_ALREADY_CONSUMED` | 409 | `POST /approvals/:id/decide` — grant already spent |
+| `AGENT_APPROVAL_NOT_PENDING` | 409 | `POST /approvals/:id/decide` — any other non-`PENDING` state |
+| `AGENT_APPROVAL_INVALID_INPUT` | 400 | `POST /approvals` — bad `toolName` / `args` / `ttlMs` |
+
+- The `AGENT_APPROVAL_*` codes are built as `AGENT_APPROVAL_${err.code}` from the stable codes of `AgentApprovalError`: `INVALID_INPUT`, `NOT_FOUND`, `NOT_OWNED`, `REJECTED`, `EXPIRED`, `ALREADY_CONSUMED`, `NOT_PENDING`. (`TOOL_MISMATCH` and `ARGS_MISMATCH` exist in the service but are raised only by the consumption gate inside a turn, never by a route.)
+- Status mapping differs per route: `POST /approvals` maps **every** `AgentApprovalError` to **400**, while `POST /approvals/:id/decide` maps `NOT_FOUND`/`NOT_OWNED` to **404** and everything else to **409**.
+
+### WebSocket (`/agent-ws`)
+
+`socket.io` attached to the same listening HTTP server by `initAgentSocket(server)` (called from the `app.listen()` callback), created with `path: '/agent-ws'` — clients connect to the default namespace at that path. Connection options: `credentials: true`, `methods: ['GET', 'POST']`, and an origin callback that reuses `isAllowedOrigin` from `src/config/cors.js` (a handshake with no `Origin` is allowed; anything else is rejected with `ORIGIN_NOT_ALLOWED`). Only when `AI_AGENT_ENABLED` is true.
+
+**Handshake auth — cookie-only, then a DB admin re-check** (`io.use(authenticateSocket)`):
+
+1. Read the token from the `accessToken` cookie, or the legacy `token` cookie. There is **no `Authorization: Bearer` fallback** — a browser chat sends cookies, so this surface deliberately trusts nothing else.
+2. `jwt.verify(token, config.jwt.secret)` and require `decoded.type === 'access'`.
+3. Re-check the user in the database (`prisma.user.findUnique`, `select: { id, role, name }`) and require `role === 'ADMIN'` — the same DB re-check `authorizeAdmin()` performs for REST.
+4. On success the socket carries `socket.agent = { adminId, adminName }` (namespaced on purpose: `socket.user` is deliberately left unused).
+
+| Rejection (`next(new Error(...))`) | Cause |
+|---|---|
+| `AUTH_REQUIRED` | no `accessToken`/`token` cookie on the handshake |
+| `INVALID_TOKEN` | signature/expiry failure, or a decoded token whose `type` is not `access` |
+| `ADMIN_REQUIRED` | user no longer exists, or `role !== 'ADMIN'` |
+| `AUTH_FAILED` | any other throw from verify or the DB lookup |
+
+**Client → server**
+
+| Event | Payload | Effect |
+|---|---|---|
+| `agent:message` | `{ question, conversationId?, approvalId? }` | Runs one persisted turn; answers with `agent:complete` |
+| `agent:decide` | `{ approvalId, approved }` | Approve/reject one pending request; answers with `agent:decision` |
+| `agent:conversations` | — (payload ignored) | Answers with `agent:conversations` (30 most recent) |
+| `agent:history` | `{ conversationId }` | Answers with `agent:history` (transcript) |
+
+**Server → client**
+
+| Event | Payload |
+|---|---|
+| `agent:thinking` | a progress object: `{ type: 'thinking', status: 'started' }` or `{ type: 'tier', tier: 'deterministic' \| 'llm', intent? \| declinedReason? }` |
+| `agent:tool_call` | `{ type: 'tool_call', name, args }` — the **model's own** requested call, not a tool payload |
+| `agent:tool_result` | `{ type: 'tool_result', name, ok }` — outcome flag only |
+| `agent:complete` | the full turn result: `{ ok: true, source, answer, conversationId, detail }` or `{ ok: false, code, message, conversationId, … }`. Note this is **not** the REST `{ success, ok, … }` envelope — the service result is emitted as-is, so an expected failure still arrives as one `agent:complete` with `ok: false` (never an `agent:error`) |
+| `agent:error` | `{ code, detail }` |
+| `agent:conversations` | `{ conversations: [{ id, title, updatedAt, lastMessageAt, messageCount }] }` |
+| `agent:history` | `{ conversationId, messages: [{ id, role, content, toolName, createdAt }] }` |
+| `agent:decision` | `{ approvalId, status, decidedBy, decidedAt }` |
+
+⚠ The header comment block of `socketHandler.js` lists an `agent:tier` event, but **no such event is ever emitted**: the handler forwards both `thinking` and `tier` progress objects through `agent:thinking` (`if (event.type === 'thinking' || event.type === 'tier') forwardProgress('agent:thinking')(event)`). Clients should read `agent:thinking` and switch on `type`/`tier`.
+
+**Per-event validation → `agent:error`**
+
+| Condition | `code` |
+|---|---|
+| `agent:message` with a blank `question`, or one longer than 2000 characters | `EMPTY_QUESTION` |
+| `agent:message` whose turn handler threw | `AGENT_ERROR` |
+| `agent:history` without a positive integer `conversationId` | `INVALID_CONVERSATION` |
+| `agent:history` for a conversation that is missing or another admin's | `CONVERSATION_NOT_FOUND` |
+| `agent:history` / `agent:conversations` read failed for any other reason | `HISTORY_FAILED` |
+| `agent:decide` without a positive `approvalId` and a boolean `approved` | `INVALID_DECISION` |
+| `agent:decide` on an expired approval | `APPROVAL_EXPIRED` |
+| `agent:decide` on a missing / other admin's approval | `APPROVAL_NOT_FOUND` |
+| `agent:decide` on a rejected / already-consumed / non-pending approval | `APPROVAL_ALREADY_DECIDED` |
+| `agent:decide` failed for any other reason | `DECISION_FAILED` |
+| handler registration itself threw (the socket is then disconnected) | `HANDLER_FAILED` |
+
+Every handler resolves — a throwing handler is caught and turned into `agent:error` rather than a silently detached socket.
+
+**Two deliberate design rules**
+
+1. **Answer content is never streamed.** There is no `agent:token` word-stream, because the grounding guard (`answerGuard.checkGrounded`) can only validate a *complete* answer — a token shown before validation would defeat the whole check. Progress events (`agent:thinking`, `agent:tool_call`, `agent:tool_result`) are live; the answer itself arrives once, validated, inside `agent:complete` — or not at all.
+2. **Tool payloads are never sent to the browser.** `agent:tool_result` carries only a tool name and an `ok` flag, because raw payloads would duplicate the redaction surface into the client. The transcript endpoint is narrowed the same way (no `toolArgs` / `toolResult` / `metadata`).

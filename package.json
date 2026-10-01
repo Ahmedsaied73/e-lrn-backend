@@ -17,7 +17,9 @@
     "db:setup": "prisma migrate deploy && prisma generate",
     "upload:course": "node scripts/uploadCourseFolder.js",
     "migrate:uploads": "node scripts/migrateUploadsToSupabase.js",
-    "migrate:uploads:delete": "node scripts/migrateUploadsToSupabase.js --delete-local"
+    "migrate:uploads:delete": "node scripts/migrateUploadsToSupabase.js --delete-local",
+    "smoke:agent": "node scripts/smoke-agent.js",
+    "agent:latency": "node scripts/agent-latency.js"
   },
   "keywords": [],
   "author": "",
@@ -25,6 +27,7 @@
   "type": "commonjs",
   "dependencies": {
     "@langchain/google-genai": "2.3.1",
+    "@langchain/langgraph": "^1.4.14",
     "@prisma/client": "^5.22.0",
     "@sentry/node": "^10.75.0",
     "@supabase/supabase-js": "2.116.0",
@@ -44,6 +47,7 @@
     "node-cron": "^4.6.0",
     "nodemailer": "^6.10.0",
     "prisma": "^5.22.0",
+    "socket.io": "^4.8.4",
     "zod": "4.6.0"
   },
   "devDependencies": {

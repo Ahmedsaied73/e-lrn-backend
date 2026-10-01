@@ -51,12 +51,16 @@ const logger = (options = {}) => {
     const startTime = Date.now();
     const timestamp = new Date().toISOString();
 
+    // Request-time facts only. `userId` is deliberately NOT captured here:
+    // authenticateToken is route-level middleware, so req.user is still
+    // undefined while this handler runs — reading it here made every log line
+    // report userId:null (verified: 0/1067 lines in a load-test log had a
+    // user). It is resolved in the finish handler instead, below.
     const base = {
       timestamp,
       method: req.method,
       path: req.originalUrl || req.url,
       ip: req.ip || req.connection.remoteAddress,
-      userId: req.user ? req.user.id : null,
       requestId: req.headers['x-request-id'] || null,
     };
 
@@ -70,6 +74,9 @@ const logger = (options = {}) => {
     res.on('finish', () => {
       const entry = {
         ...base,
+        // Resolved at response time, when route-level auth has run. This is the
+        // only point where req.user is populated.
+        userId: req.user ? req.user.id : null,
         status: res.statusCode,
         durationMs: Date.now() - startTime,
       };

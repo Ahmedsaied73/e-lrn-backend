@@ -346,10 +346,23 @@ async function evaluateGate(userId, videoId, userRole) {
         bunnyLibraryId: true,
         status: true,
         title: true,
+        // Phase 8: the owning course's soft-delete state, fetched with the video it
+        // already loads — so denying a deleted course costs no extra query.
+        course: { select: { deletedAt: true } },
       },
     });
 
     if (!video) return { allowed: false, reason: 'Video not found', code: 'VIDEO_NOT_FOUND' };
+
+    // Phase 8 (DENY-ACCESS): a soft-deleted course denies the gate outright, even to
+    // an enrolled student. Enrollment rows SURVIVE a soft delete, so the
+    // NOT_ENROLLED check below would otherwise still pass — and this verdict is
+    // cached for 5 minutes, so a miss here would keep serving `allowed: true` for a
+    // course the admin just hid. delete_course invalidates the enrolled users' gate
+    // keys for exactly this reason.
+    if (video.course && video.course.deletedAt) {
+      return { allowed: false, reason: 'This course has been deleted', code: 'COURSE_DELETED' };
+    }
 
     // ── Phase 2: enrollment + course video ordering (parallel) ────────────────
     // Quiz info is included in courseVideos via the 1:1 relation so we don't
@@ -629,11 +642,13 @@ async function finalizeStaleAttempt(attempt, quiz, db = prisma) {
  * Invalidate cached quiz meta for a user+video. Call after anything that can
  * change the meta response: attempt start/submit, essay grade, attempt reset,
  * video completion, exemption grant/revoke. Best-effort (never throws).
+ * Key layout is videoId-first (v1:quiz:meta:{videoId}:{userId}) — must match
+ * the read path in quizController.getQuizMeta.
  */
 async function invalidateQuizMeta(userId, videoId) {
   try {
     const cache = require('../integrations/redis/cache');
-    await cache.del(cache.buildKey('quiz', 'meta', userId, videoId));
+    await cache.del(cache.buildKey('quiz', 'meta', videoId, userId));
   } catch {
     // Cache failure must never break quiz flows.
   }
@@ -658,12 +673,14 @@ async function invalidateQuizMetaForAttempt(attemptId) {
 /**
  * Drop ALL cached meta for a user (exemption changes can flip `unlocked` on
  * any downstream video — precise per-video invalidation would need course
- * enumeration; the per-user namespace is small and bounded).
+ * enumeration). Meta keys are videoId-first (v1:quiz:meta:{videoId}:{userId}),
+ * so a per-user prefix can't be scanned directly; drop the whole namespace
+ * instead (rare admin op, bounded scan, entries self-heal in 30s).
  */
-async function invalidateQuizMetaForUser(userId) {
+async function invalidateQuizMetaForUser(_userId) {
   try {
     const cache = require('../integrations/redis/cache');
-    await cache.delPrefix(`v1:quiz:meta:${userId}:`);
+    await cache.delPrefix('v1:quiz:meta:');
   } catch {
     // Never break flows.
   }

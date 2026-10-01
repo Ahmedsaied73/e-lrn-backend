@@ -26,7 +26,7 @@
 const cron = require('node-cron');
 const bunnyVideoService = require('../services/bunnyVideoService');
 const bunnyClient = require('../integrations/bunny/bunnyStreamClient');
-const { getRedis } = require('../integrations/redis/redisClient');
+const { acquireLock, releaseLock } = require('../integrations/redis/distributedLock');
 
 const STALE_MINUTES = 30;
 
@@ -39,7 +39,9 @@ const CONCURRENCY = 4;
 // Distributed lock — with more than one app instance the 10-minute tick would
 // fire on every instance, and each would applyBunnyStatus + fan out duplicate
 // notifications (no dedupe on that path). The lock lets exactly one instance
-// run per window. Fail-open: if Redis is down we proceed using only the
+// run per window. Token-based (see distributedLock.js): release deletes only
+// if we still hold it, so a run that outlives its TTL can't drop the next
+// holder's lock. Fail-open: if Redis is down we proceed using only the
 // process-local guard below (the safety net stays available in degraded mode).
 const LOCK_KEY = 'lock:reconcile-stale-videos';
 const LOCK_TTL_SECONDS = 300; // 5 min — longer than any realistic run; auto-expires if a holder crashes.
@@ -47,35 +49,6 @@ const LOCK_TTL_SECONDS = 300; // 5 min — longer than any realistic run; auto-e
 // Overlap guard — a slow run (many remote polls) must not stack on top of the
 // next 10-minute tick.
 let isRunning = false;
-
-async function acquireDistributedLock() {
-  const client = getRedis();
-  if (!client || client.status !== 'ready') return true; // Redis off — process-local guard is all we have
-  try {
-    const result = await Promise.race([
-      client.set(LOCK_KEY, process.pid.toString(), 'EX', LOCK_TTL_SECONDS, 'NX'),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('lock acquire timeout')), 3000)),
-    ]);
-    return result === 'OK';
-  } catch (err) {
-    // Commitment boundary: a Redis hiccup must never disable the safety net.
-    log.warn('video.reconcile.lock_failed', { error: err.message });
-    return true;
-  }
-}
-
-async function releaseDistributedLock() {
-  const client = getRedis();
-  if (!client || client.status !== 'ready') return;
-  try {
-    await Promise.race([
-      client.del(LOCK_KEY),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('lock release timeout')), 3000)),
-    ]);
-  } catch (err) {
-    log.warn('video.reconcile.lock_release_failed', { error: err.message });
-  }
-}
 
 const log = {
   info: (event, ctx = {}) => console.log(`[INFO] ${event}`, JSON.stringify(ctx)),
@@ -112,8 +85,15 @@ async function reconcileStaleVideos() {
     return;
   }
 
-  const lockAcquired = await acquireDistributedLock();
-  if (!lockAcquired) {
+  let lock;
+  try {
+    lock = await acquireLock(LOCK_KEY, LOCK_TTL_SECONDS);
+  } catch (err) {
+    // Commitment boundary: a Redis hiccup must never disable the safety net.
+    log.warn('video.reconcile.lock_failed', { error: err.message });
+    lock = { acquired: true, token: null }; // fail-open: process-local guard is all we have
+  }
+  if (!lock.acquired) {
     log.warn('video.reconcile.skip_lock_held');
     return;
   }
@@ -179,7 +159,11 @@ async function reconcileStaleVideos() {
     log.info('video.reconcile.completed', { count: staleVideos.length });
   } finally {
     isRunning = false;
-    await releaseDistributedLock();
+    try {
+      await releaseLock(LOCK_KEY, lock.token);
+    } catch (err) {
+      log.warn('video.reconcile.lock_release_failed', { error: err.message });
+    }
   }
 }
 
