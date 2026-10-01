@@ -806,7 +806,39 @@ async function pruneExpiredConversations({ prisma, retentionDays, now = new Date
   return { deleted: count, remaining, disabled: false };
 }
 
+/**
+ * Load the last N USER and ASSISTANT messages from the database (Phase 9A).
+ *
+ * Excludes TOOL_CALL, TOOL_RESULT, and ERROR roles to protect model token budgets.
+ * Returns chronological array of message records ({ id, role, content }).
+ */
+async function loadConversationHistory({ prisma, conversationId, limit = 20 } = {}) {
+  assertConversationId(conversationId);
+  const size = Math.min(Math.max(Number(limit) || 20, 1), 50);
+
+  const rows = await prisma.agentMessage.findMany({
+    where: {
+      conversationId,
+      role: { in: [ROLES.USER, ROLES.ASSISTANT] },
+    },
+    orderBy: { id: 'desc' },
+    take: size,
+    select: {
+      id: true,
+      role: true,
+      content: true,
+    },
+  });
+
+  return rows.reverse().map((row) => ({
+    id: row.id,
+    role: row.role,
+    content: row.content,
+  }));
+}
+
 module.exports = {
+  ROLES,
   AgentConversationError,
   buildTitle,
   getOrCreateConversation,
@@ -820,5 +852,7 @@ module.exports = {
   renameConversation,
   deleteConversation,
   rewindToLastUserMessage,
+  // Phase 9A
+  loadConversationHistory,
   pruneExpiredConversations,
 };

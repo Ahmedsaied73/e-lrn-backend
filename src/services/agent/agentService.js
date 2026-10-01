@@ -26,7 +26,7 @@
 
 const config = require('../../config/env');
 const { randomUUID } = require('node:crypto');
-const { HumanMessage } = require('@langchain/core/messages');
+const { HumanMessage, AIMessage } = require('@langchain/core/messages');
 const { answerDeterministic } = require('./engine');
 const { createAgentGraph, finalAnswerText, toolCallSummary } = require('./graph');
 const { collectAllowed, checkGrounded, withGroundingNote } = require('./answerGuard');
@@ -169,9 +169,10 @@ function createApprovalResolver({ prisma, adminId, conversationId, approval, tur
  * The caller (answerQuestion) validates the FINAL answer with the grounding
  * guard either way: live events are progress, never content.
  */
-async function runAgentTurn(graph, question, conversationId, emit) {
-  const input = { messages: [new HumanMessage(question)] };
-  const options = { configurable: { thread_id: `conv-${conversationId}` } };
+async function runAgentTurn(graph, question, conversationId, emit, priorMessages = []) {
+  const history = Array.isArray(priorMessages) ? priorMessages : [];
+  const input = { messages: [...history, new HumanMessage(question)] };
+  const options = { configurable: { thread_id: `conv-${conversationId}-${Date.now()}` } };
 
   if (typeof graph.stream === 'function') {
     // streamMode 'values' yields the full state after each step, so the runner
@@ -384,11 +385,25 @@ async function answerQuestion({
     loadTurnMemories: () => loadMemoriesForTurn({ prisma: db, adminId }),
   });
   const { graph } = built;
-  emit({ type: 'tier', tier: 'llm', declinedReason: deterministic.reason });
+  let priorMessages = [];
+  if (turnConversationId) {
+    try {
+      const historyRows = await conversations.loadConversationHistory({
+        prisma: db,
+        conversationId: turnConversationId,
+        limit: 20,
+      });
+      priorMessages = historyRows.map((row) =>
+        row.role === 'USER' ? new HumanMessage(row.content) : new AIMessage(row.content)
+      );
+    } catch (err) {
+      console.warn(`[WARN] agent.history_load_failed ${JSON.stringify({ error: err && err.message })}`);
+    }
+  }
 
   let run;
   try {
-    const turn = await runAgentTurn(graph, question, turnConversationId, emit);
+    const turn = await runAgentTurn(graph, question, turnConversationId, emit, priorMessages);
     run = turn;
   } catch (err) {
     // A provider outage (Decision #17) is handled differently from a real bug: the
