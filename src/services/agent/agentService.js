@@ -26,10 +26,11 @@
 
 const config = require('../../config/env');
 const { randomUUID } = require('node:crypto');
-const { HumanMessage } = require('@langchain/core/messages');
+const { HumanMessage, AIMessage } = require('@langchain/core/messages');
 const { answerDeterministic } = require('./engine');
 const { createAgentGraph, finalAnswerText, toolCallSummary } = require('./graph');
-const { collectAllowed, checkGrounded } = require('./answerGuard');
+const { collectAllowed, checkGrounded, withGroundingNote } = require('./answerGuard');
+const { loadMemoriesForTurn } = require('./memoryService');
 const { canonicalArgsHash, consumeApproval, getApproval, requestApproval } = require('./approvals');
 const conversations = require('./conversationService');
 const audit = require('../auditLog');
@@ -95,18 +96,50 @@ function collectToolPayloads(result) {
 }
 
 /**
+ * Tool-call arguments the model sent this turn, as plain objects.
+ *
+ * A number that rode inside a request (a slug, a window, a take, an id) is not
+ * invented, so echoing it back is never a fabrication — the guard needs these
+ * separately from the results. Structural content stays out: args are tiny and
+ * already model-visible, but the exemption is numeric-only by construction (the
+ * guard only ever collects canonical numbers).
+ */
+function collectToolCallArgs(result) {
+  const messages = (result && result.messages) || [];
+  const args = [];
+  for (const message of messages) {
+    const calls = (message && message.tool_calls) || [];
+    for (const call of calls) {
+      if (call && call.args !== undefined && call.args !== null) args.push(call.args);
+    }
+  }
+  return args;
+}
+
+/**
  * Build the per-tool context resolver for one turn.
  *
- * `approved` is granted only for a tool call matching a consumed approval's tool
- * name AND canonical arguments hash. Everything else is refused downstream by
- * tools/_kit.js, so an unapproved action cannot run even if the model insists.
+ * The tool layer no longer reads an `approved` flag: plain actions execute on call
+ * (attributed to `adminId`) and destructive tools gate on a confirmationToken their
+ * own preview issued. An explicit `approvalId` (the older REST/socket decision flow)
+ * is still CONSUMED here when it matches the tool call exactly, so a queued decision
+ * is never silently left spendable, but it grants nothing by itself anymore.
+ *
+ * `turnStartedAt` is the server's stamp for THIS turn (handoff C1). It travels with the
+ * context so the confirmation gate can refuse a confirmation issued in the same turn as
+ * its own preview. It is an ISO string, not a Date: the context crosses the LangChain
+ * serialization boundary, where a Date would not survive; tools/_kit.js coerces it back.
+ *
+ * NOTE: this resolver is invoked once per TOOL CALL, so `turnStartedAt` must be computed
+ * once per TURN, outside it (see answerQuestion). A `new Date()` inside the resolver
+ * would re-stamp the turn for every call and no confirmation would ever look same-turn.
  */
-function createApprovalResolver({ prisma, adminId, conversationId, approval }) {
+function createApprovalResolver({ prisma, adminId, conversationId, approval, turnStartedAt }) {
   const used = { approvalId: null, consumedAt: null };
+  const base = { prisma, adminId, conversationId, turnStartedAt };
 
   async function resolveToolContext(args, def) {
-    const base = { prisma, adminId, conversationId };
-    if (!approval || !def || def.kind !== 'action') return base;
+    if (!approval || !def || (def.kind !== 'action' && def.kind !== 'confirm')) return base;
 
     const matchesTool = approval.toolName === def.name;
     const matchesArgs = approval.argsHash === canonicalArgsHash(def.name, args);
@@ -116,12 +149,11 @@ function createApprovalResolver({ prisma, adminId, conversationId, approval }) {
       await consumeApproval({ prisma, approvalId: approval.id, adminId, toolName: def.name, args });
       used.approvalId = approval.id;
       used.consumedAt = new Date().toISOString();
-      return { ...base, approved: true };
     } catch {
       // Expired, already spent, or decided by someone else: the tool layer refuses
       // and the model is told, which is the honest outcome.
-      return base;
     }
+    return base;
   }
 
   return { resolveToolContext, used };
@@ -137,9 +169,10 @@ function createApprovalResolver({ prisma, adminId, conversationId, approval }) {
  * The caller (answerQuestion) validates the FINAL answer with the grounding
  * guard either way: live events are progress, never content.
  */
-async function runAgentTurn(graph, question, conversationId, emit) {
-  const input = { messages: [new HumanMessage(question)] };
-  const options = { configurable: { thread_id: `conv-${conversationId}` } };
+async function runAgentTurn(graph, question, conversationId, emit, priorMessages = []) {
+  const history = Array.isArray(priorMessages) ? priorMessages : [];
+  const input = { messages: [...history, new HumanMessage(question)] };
+  const options = { configurable: { thread_id: `conv-${conversationId}-${Date.now()}` } };
 
   if (typeof graph.stream === 'function') {
     // streamMode 'values' yields the full state after each step, so the runner
@@ -167,7 +200,11 @@ async function runAgentTurn(graph, question, conversationId, emit) {
             emit({
               type: 'tool_result',
               name: message.name || null,
-              ok: /error|invalid|approval_required|fail/i.test(String(message.content || '')) === false,
+              // A preview awaiting confirmation is NOT a failure; an error, a
+              // typed refusal, or a confirmation-gate miss IS shown as not-ok.
+              ok: /error|invalid|approval_required|confirmation_(not_found|mismatch|expired)|fail/i.test(
+                String(message.content || ''),
+              ) === false,
             });
           }
         }
@@ -190,6 +227,10 @@ async function runAgentTurn(graph, question, conversationId, emit) {
  * { type: 'thinking' | 'tier' | 'tool_call' | 'tool_result' } objects. It is
  * best-effort by contract — a listener exception never fails an answer, and the
  * events carry progress (tool names, tiers), never secrets or full payloads.
+ *
+ * `graphFactory` and `answerFactory` are the two test seams: the graph builder, and
+ * the deterministic router (needed since Phase 5, because the provider-outage path
+ * consults the fast path a second time and a test must be able to count those calls).
  */
 async function answerQuestion({
   question,
@@ -199,6 +240,7 @@ async function answerQuestion({
   persist = true,
   prisma,
   graphFactory = createAgentGraph,
+  answerFactory = answerDeterministic,
   onEvent = null,
 }) {
   const startedAt = Date.now();
@@ -276,7 +318,7 @@ async function answerQuestion({
   }
 
   // ── Tier 1: deterministic ───────────────────────────────────────────────────
-  const deterministic = await answerDeterministic(question, {
+  const deterministic = await answerFactory(question, {
     prisma: db,
     adminId,
     conversationId: conversation.id,
@@ -316,28 +358,108 @@ async function answerQuestion({
   }
 
   const approval = approvalId ? await getApproval({ prisma: db, approvalId, adminId }) : null;
+  // The turn boundary (handoff C1) is stamped HERE — by the server, before the graph is
+  // built — so a token issued by this turn's own preview can never be confirmed by this
+  // turn. Nothing the model or the question says can influence it.
+  const turnStartedAt = new Date().toISOString();
   const { resolveToolContext, used } = createApprovalResolver({
     prisma: db,
     adminId,
     conversationId: conversation.id,
     approval,
+    turnStartedAt,
   });
 
   // Running the turn with progress: the graph emits tool lifecycle events, but
   // the grounding check still runs on the final answer before anyone sees it —
   // no token is ever shown before it is validated.
-  const { graph } = graphFactory({ resolveToolContext });
-  emit({ type: 'tier', tier: 'llm', declinedReason: deterministic.reason });
+  //
+  // Memory (Phase 7, §3.9): the loader closure below owns this turn's identity
+  // (db, admin, what "recent" means). The graph only ever receives a function
+  // that returns strings — it cannot ask for another admin's memories because it
+  // cannot name them. Injection happens per MODEL CALL, not per turn, so a turn
+  // that calls tools three times shows the same labelled block three times; the
+  // prompt marks it as remembered facts, never as something just said.
+  const built = graphFactory({
+    resolveToolContext,
+    loadTurnMemories: () => loadMemoriesForTurn({ prisma: db, adminId }),
+  });
+  const { graph } = built;
+  let priorMessages = [];
+  if (turnConversationId) {
+    try {
+      const historyRows = await conversations.loadConversationHistory({
+        prisma: db,
+        conversationId: turnConversationId,
+        limit: 20,
+      });
+      priorMessages = historyRows.map((row) =>
+        row.role === 'USER' ? new HumanMessage(row.content) : new AIMessage(row.content)
+      );
+    } catch (err) {
+      console.warn(`[WARN] agent.history_load_failed ${JSON.stringify({ error: err && err.message })}`);
+    }
+  }
 
   let run;
   try {
-    const turn = await runAgentTurn(graph, question, turnConversationId, emit);
+    const turn = await runAgentTurn(graph, question, turnConversationId, emit, priorMessages);
     run = turn;
   } catch (err) {
+    // A provider outage (Decision #17) is handled differently from a real bug: the
+    // fast path gets ONE last look (below), and the admin is told plainly what
+    // happened. Anything else — a bad key, a malformed request — is a different fact
+    // and must not be reported as "the service is down".
+    if (!err || err.code !== 'ALL_PROVIDERS_FAILED') {
+      return {
+        ok: false,
+        code: 'LLM_ERROR',
+        message: 'حصل خطأ أثناء توليد الرد. جرّب تاني، ولو كررت نفسها راجع إعدادات مزوّد الذكاء الاصطناعي.',
+        declinedReason: deterministic.reason,
+        conversationId: conversation.id,
+      };
+    }
+
+    // §3.5 / Decision #17: try the fast-path router against the SAME question before
+    // giving up — a single deterministic check, never a retry loop with hidden backoff.
+    // In today's tier order the fast path already ran and declined (that is how the turn
+    // reached the model at all), so this second look only matters if that order ever
+    // changes; its cost is one route() call and its value is that the guarantee stays
+    // true without anyone remembering to re-add it.
+    const lastChance = await answerFactory(question, {
+      prisma: db,
+      adminId,
+      conversationId: conversation.id,
+    });
+    if (lastChance.matched) {
+      emit({ type: 'tier', tier: 'deterministic', intent: lastChance.intent });
+      await persistTurn(lastChance.answer, {
+        deterministic: true,
+        latencyMs: lastChance.latencyMs,
+        toolCalls: lastChance.tool ? [lastChance.tool] : 0,
+      });
+      return {
+        ok: true,
+        source: 'deterministic',
+        answer: lastChance.answer,
+        conversationId: conversation.id,
+        detail: {
+          intent: lastChance.intent,
+          tool: lastChance.tool,
+          latencyMs: Date.now() - startedAt,
+          declinedReason: deterministic.reason,
+        },
+      };
+    }
+
+    // Nothing left to try: say so, in the admin's own dialect, with the real cause —
+    // the model tier is unavailable. No silent retry ever ran behind this answer.
     return {
       ok: false,
-      code: err && err.code === 'ALL_PROVIDERS_FAILED' ? 'LLM_UNAVAILABLE' : 'LLM_ERROR',
-      message: 'تعذّر الوصول إلى مزوّد الذكاء الاصطناعي. حاول مرة أخرى.',
+      code: 'PROVIDER_UNAVAILABLE',
+      message:
+        'مزوّد الذكاء الاصطناعي مش مستجيب دلوقتي (ضغط على الخدمة أو مشكلة مؤقتة عنده). جرّب تاني بعد شوية؛ ' +
+        'ولو محتاج رقم أو تقرير بسرعة، اسأل عن حاجة من التقارير الجاهزة زي عدد الطلاب أو اشتراكات الشهر.',
       declinedReason: deterministic.reason,
       conversationId: conversation.id,
     };
@@ -355,17 +477,20 @@ async function answerQuestion({
     };
   }
 
-  // ── Grounding: the answer may not contain figures no tool returned ──────────
-  const grounding = checkGrounded(answer, collectToolPayloads(run));
-  if (!grounding.ok) {
-    return {
-      ok: false,
-      code: 'GROUNDING_FAILED',
-      message: 'تم تجاهل الإجابة لأنها تحتوي أرقاماً لا يمكن تتبّعها إلى بيانات المنصة.',
-      ungrounded: grounding.ungrounded,
-      conversationId: conversation.id,
-    };
-  }
+  // ── Grounding: advisory, never destructive (Phase 4, handoff 3.4) ─────────
+  //
+  // A figure no tool returned is a warning, not a verdict: the answer is shown,
+  // the figures are recorded on the turn, and one short Arabic caveat is
+  // appended — once, and only when something was actually flagged. The guard
+  // itself evaluates the three exemptions (numbers the admin typed, numbers in
+  // this turn's tool-call arguments, a turn in which no tool ran at all), so the
+  // worst case for any turn is an answer with a trailing note.
+  const grounding = checkGrounded(answer, collectToolPayloads(run), {
+    question,
+    toolArgs: collectToolCallArgs(run),
+  });
+  const groundedAnswer = withGroundingNote(answer, grounding);
+  const unverifiedFigures = grounding.ungrounded;
 
   // ── The interactive hinge: a refused mutation becomes an approval REQUEST ───
   // When the model asked for a mutation and the tool layer refused it for lack of
@@ -390,23 +515,41 @@ async function answerQuestion({
     }
   }
 
+  // Per-turn measurement (Decision Q3): the weight of the model-facing tool surface this
+  // turn bound, and how many model calls it spent. Read from the graph the turn actually
+  // used, so the number describes THIS turn rather than a re-derivation of it. A graph
+  // double without turnMetrics (an older test seam) reports null instead of failing.
+  const turnMetrics =
+    typeof built.turnMetrics === 'function' ? built.turnMetrics() : { modelCalls: null, toolSurface: null };
+
   const detail = {
     provider: run.provider,
+    // WHICH model answered, taken from the failover that actually ran rather than
+    // re-derived from config (Phase 5): with two attempts on one vendor, a
+    // provider-name-only record cannot tell the operator which tier answered.
+    model: run.model || null,
     toolCalls: toolCallSummary(run),
     stopReason: run.stopReason,
     approval: used.approvalId,
     approvalRequested,
+    modelCalls: turnMetrics.modelCalls,
+    toolSurface: turnMetrics.toolSurface,
     latencyMs: Date.now() - startedAt,
+    unverifiedFigures,
+    // Why Tier 2 ran at all. A `null` here means the turn never needed a reason —
+    // only a turn that first heard "no" from Tier 1 gets here.
+    declinedReason: deterministic.reason,
   };
 
-  await persistTurn(answer, {
+  await persistTurn(groundedAnswer, {
     llm: true,
     provider: run.provider,
-    // The model that actually answered, resolved through the provider ORDER so it
-    // cannot be wrong when the primary/fallback pairing changes.
-    model: require('./llmProvider').modelIdFor(run.provider),
+    // The model that actually answered — the failover wrapper reports it, so this can
+    // never disagree with what the provider layer tried (Phase 5).
+    model: run.model || null,
     toolCalls: detail.toolCalls,
     latencyMs: detail.latencyMs,
+    unverifiedFigures,
   });
 
   // One audit row per model-answered turn: the deterministic tier is reproducible
@@ -423,18 +566,26 @@ async function answerQuestion({
         provider: run.provider,
         toolCalls: detail.toolCalls,
         declinedReason: deterministic.reason,
-        grounded: true,
+        // Phase 4: "the turn was flagged" is the fact, not "the turn was clean".
+        // An empty list means the guard had nothing to say; a populated one means
+        // the answer the admin saw ends with the caveat line.
+        unverifiedFigures,
+        // Decision Q3: what binding the whole catalogue every turn actually cost, and how
+        // many model calls the turn spent. Read from the audit trail, never guessed.
+        toolSurface: detail.toolSurface,
+        modelCalls: detail.modelCalls,
       },
     }
   );
 
-  return { ok: true, source: 'llm', answer, conversationId: conversation.id, detail };
+  return { ok: true, source: 'llm', answer: groundedAnswer, conversationId: conversation.id, detail };
 }
 
 module.exports = {
   AgentServiceError,
   answerQuestion,
   collectToolPayloads,
+  collectToolCallArgs,
   createApprovalResolver,
   allowedFromPayloads: collectAllowed,
 };

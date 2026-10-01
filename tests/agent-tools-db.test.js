@@ -135,11 +135,13 @@ describe('agent tools — live DB (net-zero)', () => {
     assert.equal(mine.phoneNumber, student.phoneNumber, 'phone is allowed through unchanged');
   });
 
-  it('refuses a mutation without approval and writes nothing', async () => {
+  it('refuses an unattributable mutation and writes nothing', async () => {
+    // Phase 3: the precondition is ATTRIBUTION, not an approval flag — a call
+    // whose ctx carries no adminId must be refused before any write.
     const args = { userSlug: student.slug, courseSlug: course.slug };
     await assert.rejects(
       () => execute(liveDef('enroll_student'), args, { prisma }),
-      (err) => err.code === 'APPROVAL_REQUIRED'
+      (err) => err.code === 'ADMIN_REQUIRED'
     );
     assert.equal(
       await prisma.enrollment.count({ where: { userId: student.id } }),
@@ -150,7 +152,7 @@ describe('agent tools — live DB (net-zero)', () => {
 
   it('enroll → duplicate → paid → unenroll round trip, with audit rows as evidence', async () => {
     const args = { userSlug: student.slug, courseSlug: course.slug };
-    const ctx = { prisma, approved: true, adminId: admin.id };
+    const ctx = { prisma, adminId: admin.id };
 
     const enrolled = await execute(liveDef('enroll_student'), args, ctx);
     assert.equal(enrolled.data.ok, true, 'enrolled');
@@ -188,7 +190,7 @@ describe('agent tools — live DB (net-zero)', () => {
   });
 
   it('refuses unknown slugs on actions instead of throwing', async () => {
-    const ctx = { prisma, approved: true, adminId: admin.id };
+    const ctx = { prisma, adminId: admin.id };
 
     // Well-formed (12 base36 chars) but nonexistent → structured not-found.
     const missingStudent = await execute(
@@ -215,7 +217,7 @@ describe('agent tools — live DB (net-zero)', () => {
 
   it('gate exemption grant/revoke round trip (needs a real video, else skips)', async (t) => {
     if (!video) return t.skip('no BunnyVideo fixture in this environment');
-    const ctx = { prisma, approved: true, adminId: admin.id };
+    const ctx = { prisma, adminId: admin.id };
 
     const granted = await execute(
       liveDef('grant_gate_exemption'),
@@ -259,7 +261,7 @@ describe('agent tools — live DB (net-zero)', () => {
   });
 
   it('course price action is guarded on both sides without touching shared data', async () => {
-    const ctx = { prisma, approved: true, adminId: admin.id };
+    const ctx = { prisma, adminId: admin.id };
 
     const missing = await execute(
       liveDef('update_course_price'),

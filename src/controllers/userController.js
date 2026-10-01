@@ -21,8 +21,10 @@ const selectWithoutPassword = {
 // Resolve a userSlug param to a numeric user id, or null. Never throws.
 async function resolveUserIdBySlug(slug) {
   if (!isValidSlug(slug)) return null;
-  const user = await prisma.user.findUnique({
-    where: { slug },
+  // Phase 8 (FILTER): a soft-deleted account must not resolve to an id, or every
+  // admin route keyed by userSlug would keep operating on a hidden user.
+  const user = await prisma.user.findFirst({
+    where: { slug, deletedAt: null },
     select: { id: true },
   });
   return user ? user.id : null;
@@ -55,7 +57,9 @@ const getUser = async (req, res) => {
     // round-trip through JSON to the same ISO strings res.json would emit.
     const user = await cache.withCache(cache.buildKey('me', String(req.user.id)), ME_TTL_SEC, () =>
       prisma.user.findUnique({
-        where: { id: req.user.id },
+        // Phase 8 (FILTER): a soft-deleted account gets a 404 here, which is what
+        // drops a still-valid access token's client session on its next bootstrap.
+        where: { id: req.user.id, deletedAt: null },
         select: selectWithoutPassword
       })
     );
@@ -84,6 +88,10 @@ const deleteUser = async (req, res) => {
     }
 
     const user = await prisma.user.findUnique({
+      // Phase 8 verdict: LEAVE the soft-delete filter OFF here on purpose. This is
+      // the admin CONSOLE's delete route (a different surface from the chat tool),
+      // and it must be able to find an already-soft-deleted row. See PHASE_8_REPORT
+      // §7 D5: the console route still hard-deletes.
       where: { id: userIdNum }
     });
 
@@ -250,7 +258,9 @@ const getUserById = async (req, res) => {
 
     // Get user data
     const user = await prisma.user.findUnique({
-      where: { id: userIdNum },
+      // Phase 8 (FILTER): the admin user-detail read must not serve a soft-deleted
+      // account. Keyed on the primary key, so the extra predicate is allowed.
+      where: { id: userIdNum, deletedAt: null },
       select: selectWithoutPassword
     });
 
@@ -274,7 +284,10 @@ const getAllUsers = async (req, res) => {
     const take = Math.max(1, Math.min(parseInt(req.query.limit) || 20, 100));
     const skip = (page - 1) * take;
 
-    const where = {};
+    // Phase 8 (FILTER): the admin students table lists live accounts only. Set on
+    // the shared `where` so the findMany AND the count beside it stay in step —
+    // a filtered list with an unfiltered total is the bug this prevents.
+    const where = { deletedAt: null };
     if (ROLES.includes(req.query.role)) where.role = req.query.role;
     if (GRADES.includes(req.query.grade)) where.grade = req.query.grade;
     const search = (req.query.search || '').trim();

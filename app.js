@@ -448,6 +448,19 @@ const server = app.listen(port, () => {
     // handle so shutdown can stop it.
     reconciliationTask = startReconciliationJob();
 
+    // Phase 8: soft-delete purge (daily 04:17). Deliberately OUTSIDE the
+    // `config.aiAgent.enabled` block below — soft delete is core platform
+    // behaviour, not an agent feature, so it must run with the agent switched off.
+    // Ships with dry-run ON by default (SOFT_DELETE_PURGE_DRY_RUN), so the first
+    // runs log what they would remove and destroy nothing.
+    try {
+      const { startSoftDeletePurgeJob } = require('./src/jobs/pruneSoftDeleted');
+      softDeletePurgeTask = startSoftDeletePurgeJob();
+    } catch (err) {
+      // Retention slipping a day is survivable; boot is not.
+      console.warn('[WARN] Soft-delete purge job failed to start:', err.message);
+    }
+
     // Agent conversation retention (daily). Deletes transcripts untouched for
     // longer than AI_AGENT_CONVERSATION_RETENTION_DAYS, with messages and
     // approvals cascading. Only meaningful when the agent is enabled.
@@ -458,6 +471,16 @@ const server = app.listen(port, () => {
       } catch (err) {
         // Retention slipping a day is survivable; boot is not.
         console.warn('[WARN] Agent retention job failed to start:', err.message);
+      }
+      // Agent memory retention (Phase 7, Decisions #21–22): the twin of the
+      // conversation sweeper — same fail-open shape, its own 03:47 tick and lock,
+      // the same "enabled means memories exist" gate.
+      try {
+        const { startMemoryRetentionJob } = require('./src/jobs/pruneAgentMemories');
+        agentMemoryRetentionTask = startMemoryRetentionJob();
+      } catch (err) {
+        // Same doctrine as its twin: a slipping window is survivable, boot is not.
+        console.warn('[WARN] Agent memory retention job failed to start:', err.message);
       }
     }
 
@@ -509,6 +532,8 @@ const server = app.listen(port, () => {
 let reconciliationTask = null; // node-cron task handle (stopped on shutdown)
 let paymentReconciliationTask = null; // payments cron handle (only when enabled)
 let agentRetentionTask = null; // agent transcript retention cron handle
+let agentMemoryRetentionTask = null; // agent memory retention cron handle (Phase 7)
+let softDeletePurgeTask = null; // soft-delete purge cron handle (Phase 8)
 
 function shutdown(signal) {
   console.log(`[SHUTDOWN] ${signal} received — draining connections...`);
@@ -539,6 +564,28 @@ function shutdown(signal) {
     }
   } catch (err) {
     console.warn('[WARN] Agent retention cron stop failed:', err.message);
+  }
+
+  // Agent memory retention cron (Phase 7) — its own handle and its own stop, so a
+  // failure in one sweeper's teardown cannot leave the other cron firing mid-drain.
+  try {
+    if (agentMemoryRetentionTask) {
+      require('./src/jobs/pruneAgentMemories').stopMemoryRetentionJob(agentMemoryRetentionTask);
+      agentMemoryRetentionTask = null;
+    }
+  } catch (err) {
+    console.warn('[WARN] Agent memory retention cron stop failed:', err.message);
+  }
+
+  // Soft-delete purge cron (Phase 8) — its own handle and its own stop. A
+  // destructive sweep must never be able to fire mid-drain.
+  try {
+    if (softDeletePurgeTask) {
+      require('./src/jobs/pruneSoftDeleted').stopSoftDeletePurgeJob(softDeletePurgeTask);
+      softDeletePurgeTask = null;
+    }
+  } catch (err) {
+    console.warn('[WARN] Soft-delete purge cron stop failed:', err.message);
   }
 
   // Close BullMQ worker + queue so their dedicated Redis connections are

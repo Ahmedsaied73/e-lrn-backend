@@ -132,8 +132,9 @@ async function createVideo({ courseSlug, title, requestedByUserId }) {
   }
 
   // Verify course exists — ownership is implicit for ADMIN (verified by authorizeAdmin middleware)
+  // Phase 8 (DENY-ACCESS): a soft-deleted course must not accept new videos.
   const course = await prisma.course.findUnique({
-    where: { slug: courseSlug },
+    where: { slug: courseSlug, deletedAt: null },
     select: { id: true, slug: true, title: true },
   });
 
@@ -396,11 +397,36 @@ async function getPlaybackAccess(videoId, userId, { video: preloadedVideo } = {}
           bunnyLibraryId: true,
           status: true,
           title: true,
+          // Phase 8: the owning course's soft-delete state rides along on the
+          // authoritative fetch, so the check below costs no extra query.
+          course: { select: { deletedAt: true } },
         },
       });
 
   if (!video) {
     throw new AppError('Video not found', 404, ErrorCodes.VIDEO_NOT_FOUND);
+  }
+
+  // Phase 8 (DENY-ACCESS): a soft-deleted course must not issue a playback token,
+  // even to a student who is still enrolled. Enrollment rows survive a soft delete,
+  // so the enrollment check below is NOT sufficient on its own.
+  //
+  // When the caller passed a preloaded row (the R6 fast path) the relation is
+  // absent, so it is resolved with one primary-key lookup — a skipped check here
+  // would fail OPEN on exactly the path students use.
+  const courseRow = video.course
+    ?? (await prisma.course.findUnique({
+      where: { id: video.courseId },
+      select: { deletedAt: true },
+    }));
+  if (courseRow && courseRow.deletedAt) {
+    log.info('video.playback.denied', {
+      videoId: video.id,
+      courseId: video.courseId,
+      userId,
+      reason: 'course_deleted',
+    });
+    throw new AppError('This course has been deleted', 403, ErrorCodes.VIDEO_ACCESS_DENIED);
   }
 
   // IDOR guard: verify enrollment using the server-derived courseId
@@ -572,7 +598,9 @@ async function listCourseVideos(courseSlug, userId, role) {
   }
 
   const course = await prisma.course.findUnique({
-    where: { slug: courseSlug },
+    // Phase 8 (DENY-ACCESS): a soft-deleted course's videos must not be listed to
+    // anyone — the 404 below is what stops a student deep-link from resurrecting it.
+    where: { slug: courseSlug, deletedAt: null },
     select: { id: true, slug: true },
   });
 
@@ -640,7 +668,9 @@ async function reorderVideos(courseSlug, videoSlugs, requestedByUserId) {
   }
 
   const course = await prisma.course.findUnique({
-    where: { slug: courseSlug },
+    // Phase 8 (FILTER): a soft-deleted course's videos must not be reorderable —
+    // the 404 keeps admin tooling from writing to a hidden course.
+    where: { slug: courseSlug, deletedAt: null },
     select: { id: true, slug: true },
   });
   if (!course) {

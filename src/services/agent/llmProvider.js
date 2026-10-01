@@ -1,29 +1,35 @@
 'use strict';
 
 /**
- * llmProvider.js — dual-provider model access with failover (Phase 3).
+ * llmProvider.js — one vendor, two model ATTEMPTS, with failover (Phase 5).
  *
- * Two providers, one rule: a *transient* provider failure (429/5xx/timeout) must
- * not become the admin's problem, but a *permanent* one (bad request, bad key)
- * must NOT be retried on the fallback — retrying a malformed request just burns a
- * second quota and hides the real bug behind a confusing second error.
+ * Phase 5 (handoff 3.5): a single vendor remains, so this is no longer a multi-vendor
+ * layer. Gemini answers via @langchain/google-genai, and "failover" means the SAME
+ * vendor's older Flash tier answering when the primary model fails transiently —
+ * `AI_AGENT_MODEL_PRIMARY`, then `AI_AGENT_MODEL_FALLBACK`.
  *
- * The preference order is not hardcoded here: it comes from config.aiAgent
- * (Phase 0 resolves `primary` = first CONFIGURED provider), so adding a third
- * provider later is a config change, never a change to the graph.
+ * One rule survives the change: a *transient* provider failure (429/5xx/timeout)
+ * must not become the admin's problem, but a *permanent* one (bad request, bad key)
+ * must NOT be retried on the second attempt — retrying a malformed request just
+ * burns a second quota and hides the real bug behind a confusing second error.
+ *
+ * The attempts are not hardcoded here: they come from config.aiAgent (the provider
+ * order, then the two model ids), so changing a model is an env change, never a
+ * change to the graph — and the state below is keyed per ATTEMPT rather than per
+ * vendor, because two attempts now share one vendor name.
  *
  * Phase 4.5 — a THIRD failure class: `provider_config`. A retired/renamed model
  * (`404 model_not_found`, `400 model_decommissioned`, Gemini's "is not found for
- * API version" 400/404) is neither transient nor a bad request. Retrying it on the
- * fallback every turn would kill the whole tier for the process lifetime, so it is
- * recorded once as UNUSABLE and every later turn skips that provider outright. The
- * retired model is a fact about the deployment's ENV, not about this request, so it
- * must not be re-discovered (and re-logged) on every turn.
+ * API version" 400/404) is neither transient nor a bad request. Retrying it every
+ * turn would kill that attempt for the process lifetime, so it is recorded once as
+ * UNUSABLE and every later turn skips it outright. The retired model is a fact about
+ * the deployment's ENV, not about this request, so it must not be re-discovered (and
+ * re-logged) on every turn.
  *
- * The LangChain SDKs are required lazily inside createModel(), which keeps them
- * off the boot path — the same property the rest of this repo relies on (see
- * src/services/aiGrader/provider.js). With AI_AGENT_ENABLED=false nothing here
- * is ever loaded.
+ * The LangChain SDK is required lazily inside createModel(), which keeps it off the
+ * boot path — the same property the rest of this repo relies on (see
+ * src/services/aiGrader/provider.js). With AI_AGENT_ENABLED=false nothing here is
+ * ever loaded.
  */
 
 const config = require('../../config/env');
@@ -38,9 +44,12 @@ const RETRIABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
 const RETRIABLE_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND', 'UND_ERR_CONNECT_TIMEOUT']);
 
 /**
- * Provider-vendor wording for "this model id is not a model anymore". Both
- * vendors send this as 404 (Groq: `model_not_found`) or 400 (Gemini: "is not found
- * for API version v1beta, or is not supported for generateContent").
+ * Provider-vendor wording for "this model id is not a model anymore". The concrete
+ * shape this deployment actually hits is Gemini's 404 "is not found for API version
+ * v1beta, or is not supported for generateContent"; the OpenAI-compatible spellings
+ * (`model_not_found`, `model_decommissioned`) are kept because the classifier keys on
+ * WORDING rather than on a vendor name, and a future vendor should not need this file
+ * edited to be classified correctly.
  */
 const MODEL_GONE_404_RE = /model_not_found|does not exist|no longer available|not found for API version|not supported for generateContent|is not found/i;
 const MODEL_GONE_400_RE = /invalid model|model_decommissioned|unsupported model|model_not_found/i;
@@ -54,18 +63,21 @@ class LlmProviderError extends Error {
   }
 }
 
-/** Cooldown state. Module-level on purpose: it is a property of the process. */
+/** Cooldown state for the FIRST attempt. Module-level: a property of the process. */
 let primaryCooldownUntil = 0;
 
 /**
- * Providers whose configured MODEL the vendor refused, for the LIFETIME of the
- * process: name -> { reason, model, lastErrorAt }. Module-level for the same reason
- * as the cooldown, plus one more — re-probing a retired model on every turn costs a
- * round trip AND a log line per turn, which is exactly the noise this phase removes.
- * Cleared only by resetFailoverState() (the test seam), so a config fix means a
- * restart, which is honest: env is read once at boot anyway.
+ * Attempts whose configured MODEL the vendor refused, for the LIFETIME of the process:
+ * `vendor:model` -> { reason, provider, model, lastErrorAt }. Module-level for the same
+ * reason as the cooldown, plus one more — re-probing a retired model on every turn costs
+ * a round trip AND a log line per turn, which is exactly the noise this removes. Cleared
+ * only by resetFailoverState() (the test seam), so a config fix means a restart, which is
+ * honest: env is read once at boot anyway.
+ *
+ * Keyed per ATTEMPT, not per vendor: since Phase 5 both attempts live in one vendor, and
+ * a per-vendor key would let a retired PRIMARY id mark the healthy fallback unusable too.
  */
-const unusableProviders = new Map();
+const unusableAttempts = new Map();
 
 /**
  * Providers in preference order, configured ones only.
@@ -169,39 +181,43 @@ function configReasonOf(err) {
   return 'provider_config_error';
 }
 
-/** The model id a provider is currently configured with (for diagnostics only). */
+/** One failover attempt: a vendor plus the model id that will be asked. */
+function attemptKey(providerName, modelId) {
+  return `${providerName}:${modelId}`;
+}
+
 /**
- * The model id a PROVIDER should be asked for.
+ * The failover ATTEMPTS, in order: one entry per (vendor, model id).
  *
- * The primary/fallback split is a POSITION in the failover order, not a property
- * of the vendor. Keying the choice off the provider NAME (the old
- * `name === 'groq' ? primary : fallback`) meant that flipping the provider order
- * in env.js — legitimately, and without touching this file — made the Gemini
- * primary ask Groq's model id and 404 on every turn. Both positions are now
- * resolved from the ORDER itself, so any provider order works.
+ * Phase 5 (handoff 3.5). With one vendor left, failover is no longer "another
+ * company" — it is the primary MODEL failing transiently and the older fallback MODEL
+ * answering the same call. Both halves come from config (the provider order, then the
+ * two model ids), so a model change is an env change and this file never holds a
+ * literal id. Duplicate attempts collapse: when primaryModel === fallbackModel there
+ * is ONE attempt, not two identical ones (retrying the identical request can only
+ * cost quota, never succeed).
  */
-function modelIdFor(providerName) {
+function failoverTargets() {
   const agent = config.aiAgent;
-  // An EMPTY order stays empty. Synthesising `[agent.primary]` here made position 0
-  // exist for a provider the order never named, so the tail rule below was
-  // unreachable in exactly the case its own comment describes ("the empty-order case
-  // lands here too, and that is deliberate") — and the empty order is the honest
-  // representation of "nothing is configured", where handing out the primary id is
-  // the 404 this function exists to prevent.
-  const order = Array.isArray(agent.providerOrder) && agent.providerOrder.length ? agent.providerOrder : [];
-  const position = order.indexOf(providerName);
-  if (position === 0) return agent.primaryModel;
-  if (position > 0) return agent.fallbackModel;
-  // Not named in the order (a late addition, or a test double) is the tail: hand it
-  // the NON-primary id. The empty-order case lands here too, and that is deliberate
-  // — with no order there is no position zero to justify the primary id, and
-  // guessing wrong here is the 404 this function used to cause.
-  return agent.primaryModel === agent.fallbackModel ? agent.primaryModel : agent.fallbackModel;
+  const targets = [];
+  for (const name of providerOrder()) {
+    for (const modelId of [agent.primaryModel, agent.fallbackModel]) {
+      if (!modelId) continue;
+      const key = attemptKey(name, modelId);
+      if (!targets.some((target) => target.key === key)) targets.push({ key, name, model: modelId });
+    }
+  }
+  return targets;
 }
 
 /**
  * A message safe to log or to show: truncated, and with anything that looks like
  * an API key removed. Provider errors can echo request metadata back.
+ *
+ * The pattern list is deliberately vendor-SHAPED rather than vendor-filtered: the
+ * Gemini `AIza…` form is the one this deployment uses, and the OpenAI-compatible
+ * `gsk_…` form stays because a pasted key of the wrong shape is exactly the mistake
+ * this scrub exists to make harmless.
  */
 function safeMessage(err) {
   return String((err && err.message) || err || 'unknown error')
@@ -211,35 +227,24 @@ function safeMessage(err) {
 }
 
 /**
- * Build one chat model. A fresh instance per call keeps failover stateless and
- * avoids a bound-model holding a stale client after a provider switch.
+ * Build one chat model for one ATTEMPT. A fresh instance per call keeps failover
+ * stateless and avoids a bound model holding a stale client after a model switch.
  * temperature 0 because an administrative answer must be reproducible.
  *
- * The model id comes from modelIdFor(provider), NOT from a literal in this
- * branch: hardcoding `primaryModel` under the Groq branch and `fallbackModel`
- * under the Gemini branch re-encoded "groq is always first" in a second place,
- * so flipping the provider order made each vendor request the other's model id
- * (Gemini asking for `openai/gpt-oss-120b` → 404 on every turn).
+ * `modelId` is required in spirit: since Phase 5 there are two attempts on ONE vendor,
+ * so a hardcoded id here would make the fallback a silent copy of the primary. The
+ * parameter defaults to the primary id only so a direct caller (a diagnostic, a test)
+ * cannot get `undefined` handed to the SDK.
  */
-function createModel(providerName) {
+function createModel(providerName, modelId = null) {
   const agent = config.aiAgent;
-  if (providerName === 'groq') {
-    const { ChatGroq } = require('@langchain/groq');
-    return new ChatGroq({
-      apiKey: agent.groqApiKey,
-      model: modelIdFor('groq'),
-      temperature: 0,
-      maxRetries: 0, // retries are OUR job: we switch provider instead
-      maxTokens: agent.maxAnswerTokens,
-    });
-  }
   if (providerName === 'gemini') {
     const { ChatGoogleGenerativeAI } = require('@langchain/google-genai');
     return new ChatGoogleGenerativeAI({
       apiKey: agent.geminiApiKey,
-      model: modelIdFor('gemini'),
+      model: modelId || agent.primaryModel,
       temperature: 0,
-      maxRetries: 0,
+      maxRetries: 0, // retries are OUR job: we switch model instead
       maxOutputTokens: agent.maxAnswerTokens,
     });
   }
@@ -247,29 +252,35 @@ function createModel(providerName) {
 }
 
 /**
- * Record a provider as unusable and warn about it exactly ONCE per process.
+ * Record an ATTEMPT as unusable and warn about it exactly ONCE per process.
  *
  * The log line is JSON with a fixed vocabulary and a redacted message: it must be
  * greppable in production ("agent.llm.provider_config_error") and must never carry
- * key material, since a provider error can echo request metadata back.
+ * key material, since a provider error can echo request metadata back. The model id is
+ * part of the line because with two attempts on one vendor the vendor name alone no
+ * longer says which id was refused.
  */
-function markProviderUnusable(provider, err) {
-  const firstTime = !unusableProviders.has(provider);
+function markAttemptUnusable(target, err) {
+  const firstTime = !unusableAttempts.has(target.key);
   const reason = configReasonOf(err);
-  unusableProviders.set(provider, {
+  unusableAttempts.set(target.key, {
     reason,
-    model: modelIdFor(provider),
+    provider: target.name,
+    model: target.model,
     lastErrorAt: Date.now(),
   });
   if (firstTime) {
-    console.warn(`[WARN] agent.llm.provider_config_error ${JSON.stringify({ provider, reason })}`);
+    console.warn(
+      `[WARN] agent.llm.provider_config_error ${JSON.stringify({ provider: target.name, model: target.model, reason })}`
+    );
   }
 }
 
 /** Snapshot of the unusable map for diagnostics / error metadata. Never a key. */
 function unusableDetail() {
-  return [...unusableProviders.entries()].map(([name, entry]) => ({
-    name,
+  return [...unusableAttempts.entries()].map(([key, entry]) => ({
+    key,
+    name: entry.provider,
     model: entry.model,
     reason: entry.reason,
     lastErrorAt: new Date(entry.lastErrorAt).toISOString(),
@@ -277,52 +288,50 @@ function unusableDetail() {
 }
 
 /**
- * Run `invoke(model, providerName)` with failover.
+ * Run `invoke(model, providerName, modelId)` with failover across the attempts.
  *
  * The callback shape (rather than this module building messages/graphs) is what
  * keeps provider concerns out of the graph: the graph composes whatever it needs,
- * and only the *choice of provider* lives here.
+ * and only the *choice of model* lives here.
  *
- * Returns { result, provider, attempts }. Throws LlmProviderError('ALL_PROVIDERS_
- * FAILED') when no usable provider can answer (all transient, or every configured
- * model retired), and rethrows the original error (tagged with `attempts`) when a
- * failure is permanent — the caller must be able to tell "the model refused" from
- * "the model was busy". agentService.js branches on exactly this code, so
- * ALL_PROVIDERS_FAILED must stay the one code used for "the whole tier is down".
+ * Returns { result, provider, model, attempts }. Throws LlmProviderError('ALL_PROVIDERS_
+ * FAILED') when no usable attempt can answer (all transient, or every configured model
+ * retired), and rethrows the original error (tagged with `attempts`) when a failure is
+ * permanent — the caller must be able to tell "the model refused" from "the model was
+ * busy". agentService.js branches on exactly this code, so ALL_PROVIDERS_FAILED must stay
+ * the one code used for "the whole model tier is down".
  */
 async function invokeWithFailover(invoke) {
-  const order = providerOrder();
-  if (!order.length) {
-    throw new LlmProviderError(
-      'NOT_CONFIGURED',
-      'no LLM provider is configured (set GROQ_API_KEY or GEMINI_API_KEY)'
-    );
+  const targets = failoverTargets();
+  if (!targets.length) {
+    throw new LlmProviderError('NOT_CONFIGURED', 'no LLM provider is configured (set GEMINI_API_KEY)');
   }
 
-  const primary = order[0];
+  const primaryKey = targets[0].key;
   const attempts = [];
 
-  // Two independent skips, applied by NAME rather than by position: once the
-  // primary is dropped (unusable and/or cooling down) the next provider becomes
-  // first in line and must NOT inherit either skip, or a single 429 on the primary
-  // would silently disable the fallback too. When the unusable filter empties the
-  // list the loop below never runs and the shared ALL_PROVIDERS_FAILED throw at the
-  // end reports it — one exit for "the tier is down", never a second error type.
-  const candidates = order.filter((name) => !unusableProviders.has(name));
+  // Two independent skips, applied by ATTEMPT KEY rather than by position: once the
+  // primary is dropped (unusable, and/or cooling down) the next attempt becomes first
+  // in line and must NOT inherit either skip, or a single 429 on the primary would
+  // silently disable the fallback model too. When the unusable filter empties the list
+  // the loop below never runs and the shared ALL_PROVIDERS_FAILED throw at the end
+  // reports it — one exit for "the tier is down", never a second error type.
+  const candidates = targets.filter((target) => !unusableAttempts.has(target.key));
   const now = Date.now();
   // The primary is skipped only inside its cooldown window.
-  const ordered = candidates.filter((name) => name !== primary || now >= primaryCooldownUntil);
+  const ordered = candidates.filter((target) => target.key !== primaryKey || now >= primaryCooldownUntil);
 
-  for (const provider of ordered) {
-    const isPrimary = provider === primary;
+  for (const target of ordered) {
+    const isPrimary = target.key === primaryKey;
     try {
-      const result = await invoke(createModel(provider), provider);
+      const result = await invoke(createModel(target.name, target.model), target.name, target.model);
       if (isPrimary) primaryCooldownUntil = 0;
-      return { result, provider, attempts };
+      return { result, provider: target.name, model: target.model, attempts };
     } catch (err) {
       const kind = classifyFailure(err);
       attempts.push({
-        provider,
+        provider: target.name,
+        model: target.model,
         status: statusOf(err),
         code: codeOf(err),
         retriable: kind === 'transient',
@@ -331,14 +340,15 @@ async function invokeWithFailover(invoke) {
       });
 
       if (kind === 'provider_config') {
-        // Not the request's fault and not fixable by retrying: retire this
-        // provider for the process and let the next one answer this same call.
-        markProviderUnusable(provider, err);
+        // Not the request's fault and not fixable by retrying: retire this ATTEMPT
+        // for the process and let the next model answer this same call.
+        markAttemptUnusable(target, err);
         continue;
       }
       if (kind !== 'transient') {
         // Permanent: do not spend the fallback on a request that cannot succeed.
-        err.provider = provider;
+        err.provider = target.name;
+        err.model = target.model;
         err.attempts = attempts;
         throw err;
       }
@@ -346,12 +356,12 @@ async function invokeWithFailover(invoke) {
     }
   }
 
-  // One exit for "the tier is down", whatever the cause: ALL_PROVIDERS_FAILED is the
-  // only code agentService.js maps to LLM_UNAVAILABLE (everything else becomes
-  // LLM_ERROR), so a second code here would surface as a permanent-looking error.
-  // In production BOTH causes mean the same thing to the admin — try again later —
-  // while `attempts`/`unusable` tell an operator which one it actually was.
-  const stillUsable = order.some((name) => !unusableProviders.has(name));
+  // One exit for "the model tier is down", whatever the cause: ALL_PROVIDERS_FAILED is
+  // the only code agentService.js maps to PROVIDER_UNAVAILABLE (everything else becomes
+  // LLM_ERROR), so a second code here would surface as a permanent-looking error. In
+  // production BOTH causes mean the same thing to the admin — try again later — while
+  // `attempts`/`unusable` tell an operator which one it actually was.
+  const stillUsable = targets.some((target) => !unusableAttempts.has(target.key));
   const unusable = unusableDetail();
   const meta = { attempts };
   if (unusable.length) meta.unusable = unusable;
@@ -359,8 +369,8 @@ async function invokeWithFailover(invoke) {
   throw new LlmProviderError(
     'ALL_PROVIDERS_FAILED',
     stillUsable
-      ? 'every configured LLM provider failed transiently'
-      : 'every configured LLM provider is unusable: its configured model was rejected by the provider',
+      ? 'every configured model failed transiently'
+      : 'every configured model is unusable: its configured id was rejected by the provider',
     meta
   );
 }
@@ -368,10 +378,12 @@ async function invokeWithFailover(invoke) {
 /**
  * Wiring/latency diagnostics — never contains a key.
  *
- * `providers` is the per-provider detail added in Phase 4.5 (why an operator can
- * see "groq is down and it is not a cooldown, its model is gone" from one call).
- * The pre-existing keys are kept byte-for-byte: dashboards and the socket handler
- * already read them, and renaming a diagnostic key is a silent breakage.
+ * `providers` is the per-ATTEMPT detail added in Phase 4.5 (why an operator can see
+ * "the primary id is retired and it is not a cooldown, that model is gone" from one
+ * call). Since Phase 5 there are two attempts on ONE vendor, so the entries are keyed
+ * by (name, model) instead of by vendor — a per-vendor entry could not say WHICH model
+ * was refused. The pre-existing keys are kept byte-for-byte: dashboards and the socket
+ * handler already read them, and renaming a diagnostic key is a silent breakage.
  */
 function healthState(now = Date.now()) {
   return {
@@ -380,16 +392,16 @@ function healthState(now = Date.now()) {
     primaryInCooldown: now < primaryCooldownUntil,
     cooldownUntil: primaryCooldownUntil ? new Date(primaryCooldownUntil).toISOString() : null,
     cooldownMs: FAILOVER_COOLDOWN_MS,
-    providers: providerOrder().map((name) => {
-      const unusable = unusableProviders.get(name);
+    providers: failoverTargets().map((target) => {
+      const unusable = unusableAttempts.get(target.key);
       return {
-        name,
+        name: target.name,
+        // Why this attempt exists at all: the id it will ask for, so a retired default
+        // is visible without reading env.
+        model: target.model,
         usable: !unusable,
         reason: unusable ? unusable.reason : null,
         lastErrorAt: unusable ? new Date(unusable.lastErrorAt).toISOString() : null,
-        // Why it would be contacted at all: the model id that provider is pinned
-        // to, so a retired default is visible without reading env.
-        model: modelIdFor(name),
       };
     }),
   };
@@ -402,7 +414,7 @@ function healthState(now = Date.now()) {
  */
 function resetFailoverState() {
   primaryCooldownUntil = 0;
-  unusableProviders.clear();
+  unusableAttempts.clear();
 }
 
 module.exports = {
@@ -416,10 +428,11 @@ module.exports = {
   statusOf,
   safeMessage,
   providerOrder,
-  // Exported so agentService records the model that ACTUALLY answered. It used to
-  // re-derive that with its own `provider === 'gemini' ? fallback : primary`
-  // ternary, which is the same drift modelIdFor() exists to remove.
-  modelIdFor,
+  // The ordered attempts (vendor + model id). Exported for the same reason the old
+  // modelIdFor was: agentService records WHICH model answered, and the failover it
+  // walked must be readable without re-deriving it from config in a second place
+  // (invokeWithFailover returns the answering model directly, so no caller has to).
+  failoverTargets,
   healthState,
   resetFailoverState,
 };

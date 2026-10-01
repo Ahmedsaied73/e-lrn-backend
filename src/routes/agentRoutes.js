@@ -22,7 +22,16 @@ const prisma = require('../config/db');
 const { AppError } = require('../utils/AppError');
 const { answerQuestion } = require('../services/agent/agentService');
 const { turnLimits } = require('../services/agent/limits');
-const { listConversations, getMessages } = require('../services/agent/conversationService');
+const {
+  listConversations,
+  getMessages,
+  // Phase 9 — conversation features (§9.1)
+  searchConversations,
+  renameConversation,
+  deleteConversation,
+  rewindToLastUserMessage,
+  AgentConversationError,
+} = require('../services/agent/conversationService');
 const {
   decideApproval,
   getApproval,
@@ -150,6 +159,144 @@ router.get('/conversations/:id/messages', async (req, res, next) => {
     if (err && err.name === 'AgentConversationError' && err.code === 'NOT_OWNED') {
       return next(new AppError('conversation not found', 404, 'AGENT_CONVERSATION_NOT_FOUND'));
     }
+    return next(err);
+  }
+});
+
+// ── Phase 9: conversation error → HTTP ────────────────────────────────────────
+// One mapping for all four new routes, so the "a foreign id is NOT FOUND, never 403"
+// rule from §9.1 is expressed once instead of four times. NOT_FOUND and NOT_OWNED
+// collapse to the same 404 on purpose: telling a caller that someone else's
+// conversation exists is an information leak the previous route already avoided.
+function conversationErrorToHttp(err) {
+  if (!(err instanceof AgentConversationError)) return null;
+  if (err.code === 'NOT_FOUND' || err.code === 'NOT_OWNED') {
+    return new AppError('conversation not found', 404, 'AGENT_CONVERSATION_NOT_FOUND');
+  }
+  if (err.code === 'NO_USER_MESSAGE') {
+    return new AppError(err.message, 409, 'AGENT_CONVERSATION_NO_USER_MESSAGE');
+  }
+  return new AppError(err.message, 400, `AGENT_CONVERSATION_${err.code}`);
+}
+
+function conversationIdParam(req) {
+  const conversationId = Number(req.params.id);
+  if (!Number.isSafeInteger(conversationId) || conversationId <= 0) {
+    throw new AppError('conversation id must be a positive integer', 400, 'AGENT_INVALID_INPUT');
+  }
+  return conversationId;
+}
+
+// ── GET /admin/agent/conversations/search ─────────────────────────────────────
+// Declared BEFORE /conversations/:id/messages for a reason worth stating: Express
+// matches in declaration order, and while `search` cannot collide with a
+// `:id/messages` path today, a future `GET /conversations/:id` would swallow it.
+// Keeping the literal first is the cheap way to never have that bug.
+router.get('/conversations/search', async (req, res, next) => {
+  try {
+    const { q, take, cursor } = req.query || {};
+    const cursorValue = cursor === undefined ? null : Number(cursor);
+    const data = await searchConversations({
+      prisma,
+      adminId: req.user.id,
+      q,
+      take: take === undefined ? undefined : Number(take),
+      cursor: Number.isSafeInteger(cursorValue) ? cursorValue : null,
+    });
+    return res.json({ success: true, data });
+  } catch (err) {
+    const http = conversationErrorToHttp(err);
+    if (http) return next(http);
+    return next(err);
+  }
+});
+
+// ── PATCH /admin/agent/conversations/:id ──────────────────────────────────────
+// Rename only. The body is whitelisted to `title` so a future field cannot be
+// mass-assigned into the conversation row by a client that guesses a column name.
+router.patch('/conversations/:id', async (req, res, next) => {
+  try {
+    const data = await renameConversation({
+      prisma,
+      adminId: req.user.id,
+      conversationId: conversationIdParam(req),
+      title: req.body ? req.body.title : undefined,
+    });
+    return res.json({ success: true, data });
+  } catch (err) {
+    const http = conversationErrorToHttp(err);
+    if (http) return next(http);
+    return next(err);
+  }
+});
+
+// ── DELETE /admin/agent/conversations/:id ─────────────────────────────────────
+router.delete('/conversations/:id', async (req, res, next) => {
+  try {
+    const data = await deleteConversation({
+      prisma,
+      adminId: req.user.id,
+      conversationId: conversationIdParam(req),
+    });
+    return res.json({ success: true, data });
+  } catch (err) {
+    const http = conversationErrorToHttp(err);
+    if (http) return next(http);
+    return next(err);
+  }
+});
+
+// ── POST /admin/agent/conversations/:id/regenerate ────────────────────────────
+// Body: { content? }. Without `content` the last question is re-asked; with it, the
+// last question is REPLACED and then re-asked (that is §9.1's "edit the last
+// message"). The rewind is a transaction in conversationService; the turn itself is
+// the same answerQuestion the /ask route calls, which is what makes the daily budget,
+// the rate limiter and the grounding guard apply to a regenerated turn too — hence
+// enforceTurnBudget here as well.
+router.post('/conversations/:id/regenerate', enforceTurnBudget, async (req, res, next) => {
+  try {
+    const conversationId = conversationIdParam(req);
+    const content = req.body && req.body.content !== undefined ? req.body.content : null;
+
+    const rewound = await rewindToLastUserMessage({
+      prisma,
+      adminId: req.user.id,
+      conversationId,
+      content,
+    });
+
+    const result = await answerQuestion({
+      question: rewound.question,
+      adminId: req.user.id,
+      conversationId,
+      prisma,
+    });
+
+    if (!result.ok) {
+      return res.status(200).json({
+        success: true,
+        ok: false,
+        code: result.code,
+        message: result.message,
+        conversationId: result.conversationId || conversationId,
+        declinedReason: result.declinedReason || null,
+        ungrounded: result.ungrounded || null,
+        regenerated: rewound,
+      });
+    }
+
+    return res.json({
+      success: true,
+      ok: true,
+      answer: result.answer,
+      source: result.source,
+      conversationId: result.conversationId,
+      detail: result.detail,
+      regenerated: rewound,
+    });
+  } catch (err) {
+    const http = conversationErrorToHttp(err);
+    if (http) return next(http);
     return next(err);
   }
 });

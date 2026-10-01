@@ -1,11 +1,12 @@
 'use strict';
 
 /**
- * Phase 3 — the orchestrator, end to end against the real database.
+ * Phase 4 — the orchestrator, end to end against the real database.
  *
  * The three claims worth an integration test:
  *   1. A catalogued question never builds a graph (no model, no cost).
- *   2. A model answer that quotes a figure no tool returned is refused, not shown.
+ *   2. A model answer whose figures no tool returned is SHOWN with a caveat, and
+ *      the figures are recorded on the turn (handoff 3.4 — the old refusal is gone).
  *   3. An action runs only under an approval bound to ITS OWN tool and arguments —
  *      and that approval is then spent, so it cannot be replayed.
  */
@@ -98,6 +99,41 @@ test('a catalogued question is answered without ever building a graph', async ()
   assert.deepEqual(messages[1].metadata.toolCalls, ['students_count_by_grade']);
 });
 
+/**
+ * Phase 6 (Decision #12) — a miss always hands off to the full graph.
+ *
+ * The two halves the handoff demands in one place: a catalogued question is answered
+ * WITHOUT the model (the test above), and a question the catalogue cannot name
+ * REACHES the model even though the deterministic call declined with NO_INTENT.
+ * Whatever stands in for Tier 2 — here a scripted graph — must be built and run,
+ * and its answer must be the turn's answer.
+ */
+test('a question matching none of the 28 intents invokes the full graph', async () => {
+  let graphInvocations = 0;
+  const scripted = scriptedGraphFactory([
+    new (require('@langchain/core/messages').AIMessage)({
+      content: 'حاضر، أنا معاك. اسألني عن المنصة أو أي حاجة تانية.',
+    }),
+  ]);
+  const result = await answerQuestion({
+    question: 'اشرحلي نظرية النسبية ببساطة',
+    adminId: ADMIN_ID,
+    prisma,
+    graphFactory: (options) => {
+      graphInvocations += 1;
+      return scripted.factory(options);
+    },
+  });
+
+  assert.equal(graphInvocations, 1, 'the miss must reach the model, not a dead end');
+  assert.equal(result.ok, true);
+  assert.equal(result.source, 'llm');
+  assert.equal(result.detail.declinedReason, 'NO_INTENT', 'the tier-1 decline is recorded, not hidden');
+  assert.match(result.answer, /حاضر/);
+  await trackConversation(result.conversationId);
+});
+
+
 test('the kill switch stops the service before anything else happens', async () => {
   const original = config.aiAgent.enabled;
   config.aiAgent.enabled = false;
@@ -153,10 +189,12 @@ test('a model answer is accepted only when its figures trace to tool output', as
   });
   await trackConversation(result.conversationId);
 
-  assert.equal(result.ok, true, `expected a grounded answer, got ${result.code || ''} ${result.ungrounded || ''}`);
+  assert.equal(result.ok, true, `expected a grounded answer, got ${result.code || ''}`);
   assert.equal(result.source, 'llm');
   assert.equal(result.detail.provider, 'scripted');
   assert.deepEqual(result.detail.toolCalls, ['platform_overview']);
+  assert.deepEqual(result.detail.unverifiedFigures, [], 'a clean turn records an empty findings list');
+  assert.ok(!result.answer.includes('مش متأكد إنه من بيانات المنصة'), 'and appends no caveat');
 
   // The model-answered turn is persisted and audited (the deterministic tier is
   // reproducible from the catalogue; a model turn is not).
@@ -172,7 +210,10 @@ test('a model answer is accepted only when its figures trace to tool output', as
   assert.equal(auditRow.actorId, ADMIN_ID);
 });
 
-test('a fabricated statistic is refused, and nothing is persisted', async () => {
+test('a fabricated statistic is shown WITH a caveat, and the figures are recorded', async () => {
+  // Phase 4 (handoff 3.4, Decision #13): the old `GROUNDING_FAILED` refusal is gone.
+  // The answer the model wrote is the answer the admin sees — intact, with one honest
+  // caveat — and the turn carries the figures the guard could not trace.
   const fabricated = scriptedGraphFactory([
     toolCall('platform_overview', {}, 'call_overview'),
     new AIMessage({ content: 'عدد الطلاب 999,999 طالباً.' }),
@@ -185,23 +226,27 @@ test('a fabricated statistic is refused, and nothing is persisted', async () => 
   });
   await trackConversation(result.conversationId);
 
-  assert.equal(result.ok, false);
-  assert.equal(result.code, 'GROUNDING_FAILED');
-  assert.deepEqual(result.ungrounded, ['999,999']);
-  // Phase 4.5: a refused FIRST turn has no conversation to count messages in, because
-  // nothing is created at all any more (the sibling test below pins the row count).
-  // Prisma also refuses a null filter, so the id itself is the assertion: it proves no
-  // transcript was ever opened. A refused FOLLOW-UP turn still has a conversation,
-  // and that path is covered by the successful-turn history assertion below.
-  assert.equal(result.conversationId, null, 'a rejected first answer must not open a conversation');
+  assert.equal(result.ok, true, 'a flagged answer is shown, never discarded');
+  assert.match(result.answer, /^عدد الطلاب 999,999 طالباً\./, 'the model text itself is untouched');
+  assert.deepEqual(result.detail.unverifiedFigures, ['999,999']);
+  assert.match(result.answer, /\(الرقم ده مش متأكد إنه من بيانات المنصة، اتأكد منه لو مهم\)/);
+
+  // Phase 4.5's guarantee survives the inversion: a shown turn is a stored turn, so
+  // the conversation holds its question + answer pair — and the flag is queryable.
+  const messages = await prisma.agentMessage.findMany({
+    where: { conversationId: result.conversationId },
+    orderBy: { id: 'asc' },
+    select: { role: true, content: true, metadata: true },
+  });
+  assert.deepEqual(messages.map((m) => m.role), ['USER', 'ASSISTANT']);
+  assert.match(messages[1].content, /999,999/);
+  assert.match(messages[1].content, /مش متأكد إنه من بيانات المنصة/);
+  assert.deepEqual(messages[1].metadata.unverifiedFigures, ['999,999']);
 });
 
-test('a refused turn leaves NO conversation row behind (the sidebar-orphan defect)', async () => {
-  // Phase 4.5. Before this, the conversation row was created BEFORE the turn was
-  // answered, so every failed turn left a titless, message-less conversation in the
-  // admin's sidebar — 25 of 70 rows in one diagnostic session. A conversation is now
-  // written together with the turn that gives it meaning, so a turn with nothing to
-  // store must leave nothing at all.
+test('a flagged turn leaves a conversation WITH its answer (nothing is dropped)', async () => {
+  // Phase 4.5's orphan rule, re-pinned for the advisory world: with no discard
+  // path left, every turn has something to store, so every turn stores it.
   const before = await prisma.agentConversation.count({ where: { adminId: ADMIN_ID } });
 
   const fabricated = scriptedGraphFactory([
@@ -214,11 +259,119 @@ test('a refused turn leaves NO conversation row behind (the sidebar-orphan defec
     prisma,
     graphFactory: fabricated.factory,
   });
-  assert.equal(result.ok, false);
+  assert.equal(result.ok, true, 'there is no refusal path left to trigger');
 
   const after = await prisma.agentConversation.count({ where: { adminId: ADMIN_ID } });
-  assert.equal(after, before, 'a refused turn must not create a conversation');
-  assert.equal(result.conversationId, null, 'and it must not hand out an id for one');
+  assert.equal(after, before + 1, 'a shown turn must create its conversation');
+  assert.ok(result.conversationId, 'and it must hand out an id for it');
+  assert.deepEqual(result.detail.unverifiedFigures, ['888,888']);
+});
+
+/**
+ * §3.5 / Decision #17 — the provider-outage contract, end to end.
+ *
+ * The provider layer is pinned to "two attempts, then ONE typed failure" in
+ * tests/agent-llm-provider.test.js; what is pinned HERE is the turn handler: the fast
+ * path gets one last deterministic look before giving up, and the admin is told
+ * plainly that the model tier is down — no silent retry behind the answer.
+ *
+ * `answerFactory` is the seam that makes "the fast path was consulted again" an
+ * assertion instead of a hope: the router is called for tier 1 and, on an outage, once
+ * more. Counting those calls is the only way to prove the second look happened.
+ */
+test('a provider outage consults the fast path once more, then fails as PROVIDER_UNAVAILABLE', async () => {
+  const outage = new Error('every configured model failed transiently');
+  outage.code = 'ALL_PROVIDERS_FAILED';
+  const calls = [];
+  const declining = async () => {
+    calls.push('route');
+    return { matched: false, reason: 'NO_INTENT' };
+  };
+
+  const result = await answerQuestion({
+    question: 'اعمل تقرير مفصل عن كل حاجة في المنصة',
+    adminId: ADMIN_ID,
+    prisma,
+    answerFactory: declining,
+    // The factory is CALLED before the try block, so the failure has to come from
+    // invoking the graph — exactly where a real provider outage surfaces.
+    graphFactory: () => ({
+      graph: {
+        invoke: async () => {
+          throw outage;
+        },
+      },
+    }),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'PROVIDER_UNAVAILABLE', 'the outage is named, not hidden behind a generic error');
+  assert.match(result.message, /مش مستجيب/, 'the admin is told plainly, in dialect');
+  assert.equal(calls.length, 2, 'tier 1 declined, and the outage path asked the fast path exactly once more');
+});
+
+test('an outage that the fast path CAN now answer is answered, not reported as an outage', async () => {
+  // A deterministic route() is a pure function of the question, so in production this
+  // second look cannot succeed where the first declined — the fixture stubs an
+  // impossible-in-production second answer on purpose, to prove the branch is wired
+  // rather than merely reachable. This is a WIRING pin, not a behaviour claim.
+  const outage = new Error('every configured model failed transiently');
+  outage.code = 'ALL_PROVIDERS_FAILED';
+  let call = 0;
+  const answering = async () => {
+    call += 1;
+    if (call === 1) return { matched: false, reason: 'NO_INTENT' };
+    return { matched: true, intent: 'students_by_grade', answer: 'عدد الطلاب ١٢٣', latencyMs: 3, tool: 'students_count_by_grade' };
+  };
+
+  const result = await answerQuestion({
+    question: 'اعمل تقرير مفصل عن كل حاجة في المنصة',
+    adminId: ADMIN_ID,
+    prisma,
+    answerFactory: answering,
+    graphFactory: () => ({
+      graph: {
+        invoke: async () => {
+          throw outage;
+        },
+      },
+    }),
+  });
+  await trackConversation(result.conversationId);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.source, 'deterministic');
+  assert.equal(result.answer, 'عدد الطلاب ١٢٣');
+  assert.equal(call, 2, 'the last chance was the fast path, and it was used');
+});
+
+test('a NON-outage model failure is NOT reported as an outage, and the fast path is not re-consulted', async () => {
+  // A bad key or a malformed request is a different fact from "the service is down":
+  // reporting it as an outage would send the admin to retry something that can never
+  // succeed, and the last-chance fast path cannot fix a request error.
+  const badKey = new Error('invalid api key');
+  badKey.status = 401;
+  const calls = [];
+  const result = await answerQuestion({
+    question: 'اعمل تقرير مفصل عن كل حاجة في المنصة',
+    adminId: ADMIN_ID,
+    prisma,
+    answerFactory: async () => {
+      calls.push('route');
+      return { matched: false, reason: 'NO_INTENT' };
+    },
+    graphFactory: () => ({
+      graph: {
+        invoke: async () => {
+          throw badKey;
+        },
+      },
+    }),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'LLM_ERROR');
+  assert.equal(calls.length, 1, 'only the tier-1 fast path ran');
 });
 
 test('a new conversation is created WITH its first turn, titled from that question', async () => {

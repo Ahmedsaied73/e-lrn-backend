@@ -21,7 +21,7 @@
  */
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { readDefinitions, actionDefinitions, getDefinition, selectToolSet } = require('../src/services/agent/tools');
+const { readDefinitions, actionDefinitions, getDefinition, listDefinitions } = require('../src/services/agent/tools');
 const { execute } = require('../src/services/agent/tools/_kit');
 const envConfig = require('../src/config/env');
 const { disconnectRedis } = require('../src/integrations/redis/redisClient');
@@ -220,14 +220,17 @@ describe('agent schema tools — registry', () => {
     }
   });
 
-  it('is reachable: a schema question selects the schema tools', () => {
-    // No router.js edit was needed: the selection lexicon is derived from each
-    // tool's own Arabic description, so this pins that those descriptions still
-    // carry the words an admin would actually type.
-    const selected = selectToolSet({ question: 'ما هي الجداول الموجودة في قاعدة البيانات؟' });
-    const names = selected.reads.map((def) => def.name);
-    assert.ok(names.includes('db_schema_overview'), `db_schema_overview not selected from: ${names.join(', ')}`);
-    assert.ok(names.includes('db_table_stats'), `db_table_stats not selected from: ${names.join(', ')}`);
+  it('is reachable: a schema tool is in the read catalogue and on every turn', () => {
+    // Phase 1 (v2): the model-facing surface is the whole read catalogue, so a schema
+    // tool can no longer be dropped for lack of a matching keyword (the Phase 4.5
+    // selector used to decide that from each tool's Arabic description). What still
+    // matters is that all three are registered AND bound, so a database question reaches
+    // the tool that can answer it.
+    const boundNames = listDefinitions().map((def) => def.name);
+    for (const name of SCHEMA_TOOLS) {
+      assert.ok(readDefinitions.some((def) => def.name === name), `${name} must be in the read catalogue`);
+      assert.ok(boundNames.includes(name), `${name} must be on the model-facing surface`);
+    }
   });
 });
 

@@ -67,21 +67,36 @@ function validateContent({ title, body }) {
  */
 async function resolveAudience(audience) {
   if (!audience || audience.kind === 'all') {
-    const users = await prisma.user.findMany({ where: { role: 'STUDENT' }, select: { id: true } });
+    // Phase 8 (FILTER): a soft-deleted student must never receive a broadcast.
+    const users = await prisma.user.findMany({
+      where: { role: 'STUDENT', deletedAt: null },
+      select: { id: true },
+    });
     return users.map((u) => u.id);
   }
   if (audience.kind === 'course') {
     const { courseSlug } = audience;
     if (typeof courseSlug !== 'string') throw badRequest('Invalid courseSlug');
-    const course = await prisma.course.findUnique({ where: { slug: courseSlug }, select: { id: true } });
+    // Phase 8: broadcasting to a soft-deleted course is refused rather than
+    // silently fanned out to a hidden audience.
+    const course = await prisma.course.findUnique({
+      where: { slug: courseSlug, deletedAt: null },
+      select: { id: true },
+    });
     if (!course) throw notFound('Course not found');
-    const enrollments = await prisma.enrollment.findMany({ where: { courseId: course.id }, select: { userId: true } });
+    // Phase 8: enrollment ROWS survive a soft delete, so the audience must be
+    // filtered through the user relation — a deleted student's enrollment would
+    // otherwise put them back on the recipient list for every course broadcast.
+    const enrollments = await prisma.enrollment.findMany({
+      where: { courseId: course.id, user: { deletedAt: null } },
+      select: { userId: true },
+    });
     return enrollments.map((e) => e.userId);
   }
   if (audience.kind === 'grade') {
     if (!VALID_GRADES.includes(audience.grade)) throw badRequest('Invalid grade');
     const users = await prisma.user.findMany({
-      where: { role: 'STUDENT', grade: audience.grade },
+      where: { role: 'STUDENT', grade: audience.grade, deletedAt: null },
       select: { id: true },
     });
     return users.map((u) => u.id);

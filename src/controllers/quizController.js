@@ -1000,7 +1000,9 @@ async function grantExemption(req, res) {
     // never a P2003 foreign-key 500 from the upsert below.
     const [video, student] = await Promise.all([
       prisma.bunnyVideo.findUnique({ where: { slug: videoSlug }, select: { id: true } }),
-      prisma.user.findUnique({ where: { slug: userSlug }, select: { id: true } }),
+      // Phase 8 (FILTER): exempting or grading a soft-deleted student must 404 like
+      // any unknown slug, not attach a row to a hidden account.
+      prisma.user.findFirst({ where: { slug: userSlug, deletedAt: null }, select: { id: true } }),
     ]);
     if (!video) {
       return res.status(404).json({ success: false, error: 'Video not found' });

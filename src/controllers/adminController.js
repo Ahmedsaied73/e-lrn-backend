@@ -68,16 +68,16 @@ async function getDashboardStats(req, res) {
         newestEnrollments,
         recentAttempts,
       ] = await Promise.all([
-        prisma.user.count({ where: { role: 'STUDENT' } }),
-        prisma.user.count({ where: { role: 'ADMIN' } }),
-        prisma.course.count(),
+        prisma.user.count({ where: { role: 'STUDENT', deletedAt: null } }),
+        prisma.user.count({ where: { role: 'ADMIN', deletedAt: null } }),
+        prisma.course.count({ where: { deletedAt: null } }),
         prisma.enrollment.count(),
         prisma.quiz.count(),
         prisma.quizAttempt.groupBy({ by: ['status'], _count: { _all: true } }),
         prisma.bunnyVideo.count(),
         prisma.bunnyVideo.groupBy({ by: ['status'], _count: { _all: true } }),
         prisma.submission.count({ where: { status: 'PENDING' } }),
-        prisma.user.count({ where: { role: 'STUDENT', createdAt: { gte: sinceWeek } } }),
+        prisma.user.count({ where: { role: 'STUDENT', deletedAt: null, createdAt: { gte: sinceWeek } } }),
         prisma.bunnyVideo.findMany({
           where: { status: 'FAILED' },
           orderBy: { updatedAt: 'desc' },
@@ -100,6 +100,9 @@ async function getDashboardStats(req, res) {
           },
         }),
         prisma.user.findMany({
+          // Phase 8 (FILTER): the dashboard's "newest users" feed must not list a
+          // student the admin just deleted.
+          where: { deletedAt: null },
           orderBy: { createdAt: 'desc' },
           take: 5,
           select: safeUserSelect,

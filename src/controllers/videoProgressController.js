@@ -177,7 +177,9 @@ const getCourseVideoProgress = async (req, res) => {
     if (!isValidSlug(courseSlug)) return res.status(400).json({ error: 'Invalid course slug' });
 
     const course = await prisma.course.findUnique({
-      where: { slug: courseSlug },
+      // Phase 8 (DENY-ACCESS): the per-course progress view must 404 for a
+      // soft-deleted course.
+      where: { slug: courseSlug, deletedAt: null },
       include: { bunnyVideos: { where: { status: 'READY' }, orderBy: [{ position: 'asc' }, { createdAt: 'asc' }] } }
     });
 
