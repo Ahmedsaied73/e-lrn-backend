@@ -128,7 +128,12 @@ const authorizeAdmin = (arg1, arg2, arg3) => {
       const cachedRole = getCachedRole(req.user.id);
       const dbRole = cachedRole !== undefined
         ? cachedRole
-        : (await prisma.user.findUnique({ where: { id: req.user.id }, select: { role: true } }))?.role || null;
+        // Phase 8: `deletedAt: null` is defence in depth. Admins cannot be
+        // soft-deleted through chat (delete_user refuses the role outright), so
+        // this changes nothing today — it exists so that if a future path ever
+        // deletes an admin, authorization fails closed instead of trusting a
+        // cached or claimed role for an account that can no longer log in.
+        : (await prisma.user.findUnique({ where: { id: req.user.id, deletedAt: null }, select: { role: true } }))?.role || null;
       if (cachedRole === undefined) cacheRole(req.user.id, dbRole);
       if (!roles.includes(dbRole)) {
         return res.status(403).json({ success: false, error: 'Access denied. Insufficient privileges.' });
@@ -163,7 +168,7 @@ const isAdmin = async (req) => {
     const cachedRole = getCachedRole(req.user.id);
     if (cachedRole !== undefined) return cachedRole === 'ADMIN';
     const dbUser = await prisma.user.findUnique({
-      where: { id: req.user.id },
+      where: { id: req.user.id, deletedAt: null },
       select: { role: true },
     });
     const role = dbUser ? dbUser.role : null;

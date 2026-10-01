@@ -70,7 +70,11 @@ const enrollmentStats = readTool({
 
     let courseId = null;
     if (args.courseSlug) {
-      const course = await prisma.course.findUnique({ where: { slug: args.courseSlug }, select: { id: true } });
+      const course = await prisma.course.findFirst({
+        // Phase 8 (FILTER): a soft-deleted course reports as not found.
+        where: { slug: args.courseSlug, deletedAt: null },
+        select: { id: true },
+      });
       // Unknown slug is an answer ("الدورة غير موجودة"), not an error.
       if (!course) return { found: false, courseSlug: args.courseSlug };
       courseId = course.id;
@@ -168,7 +172,7 @@ const enrollmentByCourse = readTool({
     const take = clampTake(args.take, 25);
 
     const found = await prisma.course.findMany({
-      where: args.grade ? { grade: args.grade } : {},
+      where: args.grade ? { grade: args.grade, deletedAt: null } : { deletedAt: null },
       orderBy: { createdAt: 'asc' },
       take: take + 1,
       select: { id: true, slug: true, title: true, grade: true, price: true },

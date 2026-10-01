@@ -49,9 +49,9 @@ const platformOverview = readTool({
       newEnrollments7d,
       attemptsTotal,
     ] = await Promise.all([
-      prisma.user.count({ where: { role: 'STUDENT' } }),
-      prisma.user.count({ where: { role: 'ADMIN' } }),
-      prisma.course.count(),
+      prisma.user.count({ where: { role: 'STUDENT', deletedAt: null } }),
+      prisma.user.count({ where: { role: 'ADMIN', deletedAt: null } }),
+      prisma.course.count({ where: { deletedAt: null } }),
       prisma.enrollment.count(),
       prisma.enrollment.count({ where: { isPaid: true } }),
       prisma.enrollment.count({ where: { isCompleted: true } }),
@@ -63,7 +63,7 @@ const platformOverview = readTool({
       prisma.quizAttempt.count({ where: { status: 'GRADING' } }),
       prisma.aiGradingJob.count({ where: { status: 'PENDING' } }),
       prisma.submission.count({ where: { status: 'PENDING' } }),
-      prisma.user.count({ where: { role: 'STUDENT', createdAt: { gte: since7 } } }),
+      prisma.user.count({ where: { role: 'STUDENT', deletedAt: null, createdAt: { gte: since7 } } }),
       prisma.enrollment.count({ where: { createdAt: { gte: since7 } } }),
       prisma.quizAttempt.count(),
     ]);
@@ -108,7 +108,8 @@ const platformRecentActivity = readTool({
 
     const [users, enrollments, attempts, payments, auditRows] = await Promise.all([
       prisma.user.findMany({
-        where: { createdAt: { gte: since } },
+        // Phase 8 (FILTER): recent activity must not list a soft-deleted account.
+        where: { createdAt: { gte: since }, deletedAt: null },
         orderBy: { createdAt: 'desc' },
         take,
         select: { slug: true, name: true, email: true, grade: true, role: true, createdAt: true },

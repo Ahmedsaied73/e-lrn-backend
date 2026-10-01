@@ -346,10 +346,23 @@ async function evaluateGate(userId, videoId, userRole) {
         bunnyLibraryId: true,
         status: true,
         title: true,
+        // Phase 8: the owning course's soft-delete state, fetched with the video it
+        // already loads — so denying a deleted course costs no extra query.
+        course: { select: { deletedAt: true } },
       },
     });
 
     if (!video) return { allowed: false, reason: 'Video not found', code: 'VIDEO_NOT_FOUND' };
+
+    // Phase 8 (DENY-ACCESS): a soft-deleted course denies the gate outright, even to
+    // an enrolled student. Enrollment rows SURVIVE a soft delete, so the
+    // NOT_ENROLLED check below would otherwise still pass — and this verdict is
+    // cached for 5 minutes, so a miss here would keep serving `allowed: true` for a
+    // course the admin just hid. delete_course invalidates the enrolled users' gate
+    // keys for exactly this reason.
+    if (video.course && video.course.deletedAt) {
+      return { allowed: false, reason: 'This course has been deleted', code: 'COURSE_DELETED' };
+    }
 
     // ── Phase 2: enrollment + course video ordering (parallel) ────────────────
     // Quiz info is included in courseVideos via the 1:1 relation so we don't

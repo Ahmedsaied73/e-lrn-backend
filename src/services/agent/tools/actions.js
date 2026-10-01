@@ -24,6 +24,7 @@ const bcrypt = require('bcrypt');
 const cache = require('../../../integrations/redis/cache');
 const { actionTool, confirmableActionTool } = require('./_kit');
 const { isValidSlug, randomBase36Slug } = require('../../../utils/slugs');
+const { SOFT_DELETE_RETENTION_DAYS, softDeleteTombstoneEmail } = require('../../softDelete');
 
 const GRADE_VALUES = ['FIRST_SECONDARY', 'SECOND_SECONDARY', 'THIRD_SECONDARY'];
 
@@ -41,16 +42,20 @@ const SLUG_RE = /^[a-z0-9]{12}$/;
 const slugArg = (what) =>
   z.string().regex(SLUG_RE, 'معرّف غير صالح: يجب أن يكون ١٢ حرفاً/رقماً لاتينياً صغيراً').describe(`معرّف ${what} (١٢ خانة)`);
 
+// Phase 8 (§8.4 FILTER): every action tool resolves its student/course through
+// these two helpers, so the soft-delete filter is applied ONCE here and cannot be
+// forgotten by a new action. `findFirst` (not `findUnique`) because `slug` is the
+// only unique column and the extra predicate is not part of a unique index.
 async function findStudent(prisma, userSlug) {
-  return prisma.user.findUnique({
-    where: { slug: userSlug },
+  return prisma.user.findFirst({
+    where: { slug: userSlug, deletedAt: null },
     select: { id: true, slug: true, name: true, grade: true, role: true },
   });
 }
 
 async function findCourse(prisma, courseSlug) {
-  return prisma.course.findUnique({
-    where: { slug: courseSlug },
+  return prisma.course.findFirst({
+    where: { slug: courseSlug, deletedAt: null },
     select: { id: true, slug: true, title: true, price: true },
   });
 }
@@ -712,8 +717,10 @@ const reorderCourseVideos = actionTool({
     const bunnyVideoService = require('../../bunnyVideoService');
     try {
       const rows = await bunnyVideoService.reorderVideos(args.courseSlug, args.videoSlugs, ctx.adminId);
-      const course = await ctx.prisma.course.findUnique({
-        where: { slug: args.courseSlug },
+      const course = await ctx.prisma.course.findFirst({
+        // Phase 8 (FILTER): targetId only; reorderVideos already refused a deleted
+        // course with a 404 before this runs.
+        where: { slug: args.courseSlug, deletedAt: null },
         select: { id: true },
       });
       return {
@@ -742,8 +749,10 @@ const updateCoursePrice = actionTool({
   audit: { action: 'COURSE_UPDATE', targetType: 'course' },
   run: async (args, ctx) => {
     const prisma = ctx.prisma;
-    const course = await prisma.course.findUnique({
-      where: { slug: args.courseSlug },
+    const course = await prisma.course.findFirst({
+      // Phase 8 (FILTER/DENY-ACCESS): a soft-deleted course must not be re-priced —
+      // it reads as COURSE_NOT_FOUND, the same refusal an unknown slug gets.
+      where: { slug: args.courseSlug, deletedAt: null },
       select: { id: true, slug: true, title: true, price: true },
     });
     if (!course) return { ok: false, reason: 'COURSE_NOT_FOUND' };
@@ -793,6 +802,14 @@ const createStudent = actionTool({
 
     // Mirrors authController.register: the pre-checks turn the HTTP 409 into a
     // precise, actionable reason instead of a generic write failure.
+    //
+    // Phase 8 verdict: LEAVE (no `deletedAt: null` here, on purpose). These two
+    // columns are `@unique` and are NOT the soft-delete filter surface — they are
+    // the identity check. A soft-deleted account's email/phone were moved to
+    // deletedEmail/deletedPhoneNumber and the live columns tombstoned, so a deleted
+    // holder simply does not match. Adding a filter would be a no-op that implies
+    // this check depends on the soft-delete rule, and would make a wrong change
+    // here look safe.
     const existingEmail = await prisma.user.findUnique({ where: { email }, select: { id: true } });
     if (existingEmail) return { ok: false, reason: 'EMAIL_TAKEN' };
     const existingPhone = await prisma.user.findUnique({ where: { phoneNumber }, select: { id: true } });
@@ -1314,7 +1331,7 @@ const deleteQuiz = confirmableActionTool({
 const deleteCourse = confirmableActionTool({
   name: 'delete_course',
   description:
-    'حذف دورة نهائياً: الفيديوهات وتسجيلات الطلاب والشهادات والاختبارات المرتبطة بها، مع حذف فيديوهاتها من Bunny Stream وصور اختباراتها من التخزين. إجراء غير قابل للتراجع ويتطلب معرّف الدورة بدقة. يتم على خطوتين: استدعاء بلا توكن يعيد معاينة بعدد الفيديوهات والاشتراكات والشهادات المتأثرة، ثم تنفيذ بعد تأكيد المشرف الصريح باستخدام توكن المعاينة.',
+    'حذف دورة حذفاً مؤقتاً (soft delete) قابلاً للاسترجاع لمدة ٣٠ يوماً: تختفي الدورة من كل القوائم والبحث، وتتوقف إتاحة فيديوهاتها واختباراتها للطلاب، مع الاحتفاظ بالدورة وكل محتواها وتسجيلات الطلاب في قاعدة البيانات. إجراء يتطلب معرّف الدورة بدقة، ويتم على خطوتين: استدعاء بلا توكن يعيد معاينة بعدد الفيديوهات والاشتراكات والشهادات المتأثرة، ثم تنفيذ بعد تأكيد المشرف الصريح باستخدام توكن المعاينة.',
   schema: z.object({
     courseSlug: slugArg('الدورة'),
   }),
@@ -1326,10 +1343,14 @@ const deleteCourse = confirmableActionTool({
         id: true,
         slug: true,
         title: true,
+        deletedAt: true,
         _count: { select: { videos: true, enrollments: true, certificates: true } },
       },
     });
     if (!course) return { ok: false, reason: 'COURSE_NOT_FOUND' };
+    if (course.deletedAt) {
+      return { ok: false, reason: 'ALREADY_DELETED', deletedAtIso: course.deletedAt.toISOString() };
+    }
     const bunnyVideoRows = await ctx.prisma.bunnyVideo.count({ where: { courseId: course.id } });
     return {
       ok: true,
@@ -1343,85 +1364,47 @@ const deleteCourse = confirmableActionTool({
           certificates: course._count.certificates,
         },
       },
-      irreversible: true,
-      warning: 'الحذف نهائي: الفيديوهات من Bunny Stream، والاشتراكات، والشهادات، والاختبارات وكل محاولات طلابها — كلها ستُحذف مع الدورة.',
+      // NOT irreversible: the row and all its content survive 30 days.
+      recoverable: true,
+      retentionDays: SOFT_DELETE_RETENTION_DAYS,
+      warning:
+        'حذف مؤقت قابل للاسترجاع لمدة ٣٠ يوماً: الدورة هتختفي من القوائم والبحث، ' +
+        'والطلاب المشتركين هيفقدوا الوصول لفيديوهاتها واختباراتها فوراً. المحتوى والاشتراكات هتفضل محفوظة للاسترجاع.',
     };
   },
   run: async (args, ctx) => {
     const prisma = ctx.prisma;
-    const bunnyClient = require('../../../integrations/bunny/bunnyStreamClient');
 
     const course = await prisma.course.findUnique({
       where: { slug: args.courseSlug },
-      select: {
-        id: true,
-        title: true,
-        _count: { select: { videos: true, enrollments: true, certificates: true } },
-      },
+      select: { id: true, title: true, deletedAt: true, _count: { select: { enrollments: true } } },
     });
     if (!course) return { ok: false, reason: 'COURSE_NOT_FOUND' };
+    if (course.deletedAt) {
+      return { ok: false, reason: 'ALREADY_DELETED', deletedAtIso: course.deletedAt.toISOString() };
+    }
     const courseId = course.id;
+    const enrolledUserIds = (
+      await prisma.enrollment.findMany({ where: { courseId }, select: { userId: true } })
+    ).map((row) => row.userId);
 
-    // Snapshots taken BEFORE the transaction, because the rows they describe are
-    // exactly what it deletes (and the quiz rows cascade with the BunnyVideos).
-    const [bunnyVideos, quizRows, enrollmentRows] = await Promise.all([
-      prisma.bunnyVideo.findMany({ where: { courseId }, select: { bunnyVideoId: true } }),
-      prisma.quiz.findMany({ where: { bunnyVideo: { courseId } }, select: { surveyJson: true } }),
-      prisma.enrollment.findMany({ where: { courseId }, select: { userId: true } }),
-    ]);
-    const enrolledUserIds = enrollmentRows.map((row) => row.userId);
-
-    await prisma.$transaction(async (tx) => {
-      // Children whose FK is Restrict are removed explicitly — a bare
-      // course.delete would throw P2003 for any course with rows.
-      if (course._count.videos > 0) await tx.video.deleteMany({ where: { courseId } });
-      if (course._count.enrollments > 0) await tx.enrollment.deleteMany({ where: { courseId } });
-      if (course._count.certificates > 0) await tx.certificate.deleteMany({ where: { courseId } });
-
-      // A course inside a learning path must be DISCONNECTED, not delete-cascaded
-      // (the path itself is a separate product object).
-      const paths = await tx.learningPath.findMany({
-        where: { courses: { some: { id: courseId } } },
-        select: { id: true },
-      });
-      for (const path of paths) {
-        await tx.learningPath.update({
-          where: { id: path.id },
-          data: { courses: { disconnect: { id: courseId } } },
-        });
-      }
-
-      await tx.course.delete({ where: { id: courseId } });
-    });
-
-    // Remote cleanup after the DB commit — per-video errors are logged, never fatal:
-    // the delete has already happened and failing here would only lie to the admin.
-    let remoteCleanupFailures = 0;
-    for (const video of bunnyVideos) {
-      try {
-        await bunnyClient.deleteVideo(video.bunnyVideoId);
-      } catch (cleanupErr) {
-        remoteCleanupFailures += 1;
-        console.error(`[agent/delete_course] Failed to delete Bunny video ${video.bunnyVideoId}:`, cleanupErr.message);
-      }
-    }
-
-    try {
-      const { removeQuizImagesBestEffort } = require('../../../integrations/supabase/supabaseClient');
-      for (const quiz of quizRows) {
-        await removeQuizImagesBestEffort(quiz.surveyJson);
-      }
-    } catch (cleanupErr) {
-      console.error('[agent/delete_course] Storage cleanup error:', cleanupErr.message);
-    }
+    // Soft delete is a single UPDATE: content, enrollments and certificates all
+    // survive so a restore inside the window is lossless (§8.3).
+    //
+    // DELIBERATELY ABSENT: the Bunny Stream and Supabase Storage cleanup the old
+    // hard-delete ran. Those rows are still live data until the purge job reaches
+    // them 30 days later, and that job owns the remote cleanup — deleting the
+    // Bunny videos now would make a restore return a course whose videos 404, and
+    // would charge the admin for a delete they never confirmed.
+    await prisma.course.update({ where: { id: courseId }, data: { deletedAt: new Date() } });
 
     await cache.delPrefix('v1:courses:');
     await cache.delPrefix(`v1:videos:course:${courseId}:`);
     await cache.del(cache.buildKey('search', 'cats'));
 
     // Every enrolled student's cached gate verdict still says allowed:true for a
-    // course they are no longer in — drop the namespace so the next evaluation
-    // fails closed from the database.
+    // course that is now hidden — drop the namespace so the next evaluation
+    // re-reads the (now denied) state from the database.
     try {
       const quizService = require('../../quizService');
       await Promise.all(enrolledUserIds.map((userId) => quizService.invalidateGateForUser(userId)));
@@ -1435,14 +1418,12 @@ const deleteCourse = confirmableActionTool({
       course: {
         slug: args.courseSlug,
         title: course.title,
-        deletedEnrollments: course._count.enrollments,
-        deletedVideos: bunnyVideos.length,
+        hiddenEnrollments: course._count.enrollments,
       },
-      remoteCleanupFailures,
+      retentionDays: SOFT_DELETE_RETENTION_DAYS,
       note:
-        remoteCleanupFailures > 0
-          ? 'تم الحذف من قاعدة البيانات، لكن فشل حذف بعض الفيديوهات من Bunny Stream — راجع سجلات الخادم.'
-          : null,
+        'الدورة اتحذفت حذفاً مؤقتاً واختفت من القوائم، والطلاب المشتركين فقدوا الوصول ليها. ' +
+        'المحتوى كله محفوظ، والفيديوهات هتفضل على Bunny لحد الحذف النهائي بعد ٣٠ يوماً.',
     };
   },
 });
@@ -1450,7 +1431,7 @@ const deleteCourse = confirmableActionTool({
 const deleteUser = confirmableActionTool({
   name: 'delete_user',
   description:
-    'حذف حساب مستخدم نهائياً مع تسجيلاته في الدورات ومدفوعاته وشهاداته ومحاولاته. إجراء غير قابل للتراجع، ولا يمكن حذف حساب المشرف نفسه، ولا حساب يملك دورات. يتم على خطوتين: استدعاء بلا توكن يعيد معاينة بالحساب وعدد اشتراكاته، ثم تنفيذ بعد تأكيد المشرف الصريح باستخدام توكن المعاينة.',
+    'حذف حساب مستخدم حذفاً مؤقتاً (soft delete) قابلاً للاسترجاع لمدة ٣٠ يوماً: يختفي الحساب من كل القوائم والبحث والاشتراكات والإشعارات ولا يستطيع تسجيل الدخول، مع الاحتفاظ ببياناته في قاعدة البيانات. يتم تحرير البريد الإلكتروني ورقم الهاتف حتى يمكن استخدامهما في التسجيل من جديد. لا يمكن حذف حساب المشرف نفسه ولا حساب يملك دورات. يتم على خطوتين: استدعاء بلا توكن يعيد معاينة بالحساب وعدد اشتراكاته، ثم تنفيذ بعد تأكيد المشرف الصريح باستخدام توكن المعاينة.',
   schema: z.object({
     userSlug: slugArg('المستخدم'),
   }),
@@ -1458,13 +1439,15 @@ const deleteUser = confirmableActionTool({
   preview: async (args, ctx) => {
     const user = await ctx.prisma.user.findUnique({
       where: { slug: args.userSlug },
-      select: { id: true, slug: true, name: true, role: true, grade: true },
+      select: { id: true, slug: true, name: true, role: true, grade: true, deletedAt: true },
     });
     if (!user) return { ok: false, reason: 'USER_NOT_FOUND' };
     // The same refusals run() makes, surfaced BEFORE the confirmation token:
     // previewing a delete that can never execute would only waste the admin's
     // confirmation on a guaranteed failure.
     if (user.id === ctx.adminId) return { ok: false, reason: 'CANNOT_DELETE_SELF' };
+    if (user.role === 'ADMIN') return { ok: false, reason: 'CANNOT_DELETE_ADMIN' };
+    if (user.deletedAt) return { ok: false, reason: 'ALREADY_DELETED', deletedAtIso: user.deletedAt.toISOString() };
     const ownedCourses = await ctx.prisma.course.count({ where: { teacherId: user.id } });
     if (ownedCourses > 0) return { ok: false, reason: 'USER_OWNS_COURSES', ownedCourses };
     const enrollments = await ctx.prisma.enrollment.count({ where: { userId: user.id } });
@@ -1474,8 +1457,12 @@ const deleteUser = confirmableActionTool({
         user: { slug: user.slug, name: user.name, role: user.role, grade: user.grade ?? null },
         enrollments,
       },
-      irreversible: true,
-      warning: 'الحذف نهائي: اشتراكات الطالب ومدفوعاته وشهاداته ومحاولاته كلها ستُحذف مع الحساب.',
+      // NOT irreversible: the row survives 30 days and a restore is possible.
+      recoverable: true,
+      retentionDays: SOFT_DELETE_RETENTION_DAYS,
+      warning:
+        'حذف مؤقت قابل للاسترجاع لمدة ٣٠ يوماً: الحساب هيختفي من كل القوائم والبحث والإشعارات ومنع تسجيل الدخول، ' +
+        'والبريد ورقم الهاتف هيتحرروا لإعادة التسجيل بيهم. الاشتراكات والمحاولات والمدفوعات هتفضل محفوظة للاسترجاع.',
     };
   },
   run: async (args, ctx) => {
@@ -1483,38 +1470,56 @@ const deleteUser = confirmableActionTool({
 
     const user = await prisma.user.findUnique({
       where: { slug: args.userSlug },
-      select: { id: true, slug: true, name: true, role: true },
+      select: { id: true, slug: true, name: true, role: true, email: true, phoneNumber: true, deletedAt: true },
     });
     if (!user) return { ok: false, reason: 'USER_NOT_FOUND' };
 
-    // The approving admin cannot delete themselves: the approval would be
-    // attributed to a row that no longer exists, and the audit trail would lose
-    // its actor.
+    // Idempotence: a second delete of the same row is a stated refusal, not a
+    // silent re-stamp that would push the 30-day purge window out again.
+    if (user.deletedAt) return { ok: false, reason: 'ALREADY_DELETED', deletedAtIso: user.deletedAt.toISOString() };
+
+    // The confirming admin cannot delete themselves: the audit row would be
+    // attributed to an account that can no longer log in, and the audit trail
+    // would lose its actor.
     if (user.id === ctx.adminId) return { ok: false, reason: 'CANNOT_DELETE_SELF' };
 
-    // Course owners must release their courses first — a bulk delete would bypass
-    // the Bunny remote cleanup, leaving orphans on Bunny's servers.
+    // Admins are not soft-deletable through chat at all (Phase 8 §8.2). The
+    // original code allowed deleting a *different* admin, which would have left
+    // an unresolvable admin-less account to restore by hand.
+    if (user.role === 'ADMIN') return { ok: false, reason: 'CANNOT_DELETE_ADMIN' };
+
+    // Course owners must release their courses first — a soft delete would leave
+    // a hidden owner behind, and their courses would point at an account nobody
+    // can reach through the UI.
     const ownedCourses = await prisma.course.count({ where: { teacherId: user.id } });
     if (ownedCourses > 0) {
       return { ok: false, reason: 'USER_OWNS_COURSES', ownedCourses };
     }
 
-    // Several child relations default to Restrict, so a bare user.delete throws
-    // P2003 for any user with rows. Explicit cascade, in one transaction.
-    await prisma.$transaction([
-      prisma.quizAttempt.deleteMany({ where: { userId: user.id } }),
-      prisma.gateExemption.deleteMany({ where: { userId: user.id } }),
-      prisma.assignmentAnswer.deleteMany({ where: { userId: user.id } }),
-      prisma.submission.deleteMany({ where: { userId: user.id } }),
-      prisma.bunnyVideoProgress.deleteMany({ where: { userId: user.id } }),
-      prisma.enrollment.deleteMany({ where: { userId: user.id } }),
-      prisma.payment.deleteMany({ where: { userId: user.id } }),
-      prisma.certificate.deleteMany({ where: { userId: user.id } }),
-      prisma.user.delete({ where: { id: user.id } }),
-    ]);
+    const enrollments = await prisma.enrollment.count({ where: { userId: user.id } });
 
-    // Their access token stays valid until it expires, but the enrollment rows are
-    // gone — a cached gate verdict would answer allowed:true in the meantime.
+    // One UPDATE, no deletes: enrollments, attempts, progress, payments and
+    // certificates all stay so a restore inside the window is lossless (8.2).
+    // The tombstone is unique by construction (slug is unique) and sits under the
+    // RFC-2606 reserved .invalid TLD, so it can never collide with a real address
+    // nor be reachable by mail.
+    const deletedAt = new Date();
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        deletedEmail: user.email,
+        deletedPhoneNumber: user.phoneNumber ?? null,
+        email: softDeleteTombstoneEmail(user.slug),
+        phoneNumber: null,
+        refreshToken: null,
+        refreshTokenFamily: null,
+        deletedAt,
+      },
+    });
+
+    // Their access token stays valid until it expires (~15 min, accepted residual),
+    // but every cached gate verdict and the cached /user/me profile must go now —
+    // a cached allowed:true would otherwise outlive the delete.
     const quizService = require('../../quizService');
     await quizService.invalidateGateForUser(user.id);
     await invalidateMeCache(user.id);
@@ -1523,7 +1528,11 @@ const deleteUser = confirmableActionTool({
       ok: true,
       targetId: user.id,
       user: { slug: user.slug, name: user.name, role: user.role },
-      note: 'الحساب حُذف. رمز الدخول الحالي يبقى صالحاً حتى انتهاء صلاحيته القصيرة (١٥ دقيقة)، ولا يستطيع الوصول لأي دورة.',
+      enrollments,
+      retentionDays: SOFT_DELETE_RETENTION_DAYS,
+      note:
+        'الحساب اتحذف حذفاً مؤقتاً. البريد ورقم الهاتف اتحرروا، ومش هيقدر يسجّل دخول. ' +
+        'البيانات كلها محفوظة ويمكن استرجاعها خلال ٣٠ يوماً، بعده بيتحذف نهائياً.',
     };
   },
 });

@@ -32,16 +32,22 @@ const COURSE_SLUG = 'crs123abc456';
  * 'confirm' means the tool previews first and only executes with a token its own
  * preview issued.
  */
+// `twoStep` = the preview/confirm flow (all four deletes keep it).
+// `recoverable` = Phase 8: a soft delete the admin can undo for 30 days. It is a
+// SEPARATE axis from `twoStep`, which is exactly the distinction the pre-Phase-8
+// single `irreversible` flag could not express — and the reason delete_course /
+// delete_user had to stop claiming "غير قابل للتراجع" in their descriptions while
+// delete_video / delete_quiz still must.
 const CRUD_TOOLS = [
   { name: 'create_student', audit: 'USER_CREATE', target: 'user' },
   { name: 'update_student', audit: 'USER_UPDATE', target: 'user' },
   { name: 'create_course', audit: 'COURSE_CREATE', target: 'course' },
   { name: 'update_course', audit: 'COURSE_UPDATE', target: 'course' },
   { name: 'upsert_quiz', audit: 'QUIZ_UPSERT', target: 'quiz' },
-  { name: 'delete_video', audit: 'VIDEO_DELETE', target: 'video', irreversible: true, kind: 'confirm' },
-  { name: 'delete_quiz', audit: 'QUIZ_DELETE', target: 'quiz', irreversible: true, kind: 'confirm' },
-  { name: 'delete_course', audit: 'COURSE_DELETE', target: 'course', irreversible: true, kind: 'confirm' },
-  { name: 'delete_user', audit: 'USER_DELETE', target: 'user', irreversible: true, kind: 'confirm' },
+  { name: 'delete_video', audit: 'VIDEO_DELETE', target: 'video', twoStep: true, recoverable: false, kind: 'confirm' },
+  { name: 'delete_quiz', audit: 'QUIZ_DELETE', target: 'quiz', twoStep: true, recoverable: false, kind: 'confirm' },
+  { name: 'delete_course', audit: 'COURSE_DELETE', target: 'course', twoStep: true, recoverable: true, kind: 'confirm' },
+  { name: 'delete_user', audit: 'USER_DELETE', target: 'user', twoStep: true, recoverable: true, kind: 'confirm' },
 ];
 
 const NEW_STUDENT_ARGS = {
@@ -174,9 +180,21 @@ describe('agent CRUD tools — catalogue contract', () => {
     for (const forbidden of ['delete_user', 'delete_course', 'delete_video', 'delete_quiz']) {
       const def = getDefinition(forbidden);
       assert.ok(def, `${forbidden} should now be registered`);
-      // An irreversible tool the model cannot recognise as irreversible is the
-      // failure mode that matters: the description must SAY so in Arabic.
-      assert.match(def.description, /غير قابل للتراجع/, `${forbidden} must warn that it is irreversible`);
+      // Phase 8 re-pin: the warning a delete tool must carry now depends on whether
+      // it is RECOVERABLE, not on whether it is destructive. delete_video/delete_quiz
+      // are still permanent and must still say so; delete_user/delete_course are soft
+      // deletes and must say THAT instead — a soft delete still advertising
+      // "غير قابل للتراجع" would scare the admin off a reversible action.
+      const recoverable = forbidden === 'delete_user' || forbidden === 'delete_course';
+      if (recoverable) {
+        // Match on للاسترجاع alone: the descriptions write "قابلاً للاسترجاع" (with
+        // the tanween), and pinning the un-diacriticised spelling would fail on a
+        // difference the admin never sees.
+        assert.match(def.description, /للاسترجاع/, `${forbidden} must state it is recoverable`);
+        assert.doesNotMatch(def.description, /غير قابل للتراجع/, `${forbidden} must NOT claim to be irreversible`);
+      } else {
+        assert.match(def.description, /غير قابل للتراجع/, `${forbidden} must warn that it is irreversible`);
+      }
     }
   });
 
@@ -209,13 +227,17 @@ describe('agent CRUD tools — catalogue contract', () => {
   });
 
   it('descriptions state the Phase 3 contract: immediate for actions, two steps for deletes', () => {
-    for (const { name, irreversible } of CRUD_TOOLS) {
+    for (const { name, twoStep } of CRUD_TOOLS) {
       const desc = getDefinition(name).description;
       // The removed approval flow must not be PROMISED anywhere: a description
       // telling the model to wait for an approval gate re-creates the old dead end
       // where the tool existed but the flow never completed.
       assert.equal(desc.includes('موافقة المشرف'), false, `${name} must not promise the removed approval gate`);
-      if (irreversible) {
+      // Phase 8 re-pin: the axis this assertion reads is `twoStep` (does the tool
+      // require a preview + a later-turn confirmation?), not `recoverable`. A soft
+      // delete is still two-step, so it must still announce خطوتين even though it
+      // is no longer irreversible.
+      if (twoStep) {
         assert.match(desc, /خطوتين/, `${name} must announce the two-step preview/confirm flow`);
       } else {
         assert.match(desc, /ينفّذ فورا/, `${name} must announce immediate execution`);
@@ -618,7 +640,9 @@ describe('agent CRUD tools — P2b semantics', () => {
       getDefinition('delete_user'),
       { userSlug: STUDENT_SLUG },
       approved({
-        user: { findUnique: async () => ({ id: ADMIN_ID, slug: STUDENT_SLUG, name: 'المشرف', role: 'ADMIN' }) },
+        user: {
+          findUnique: async () => ({ id: ADMIN_ID, slug: STUDENT_SLUG, name: 'المشرف', role: 'ADMIN', deletedAt: null }),
+        },
       })
     );
     assert.equal(self.data.reason, 'CANNOT_DELETE_SELF');
@@ -628,7 +652,13 @@ describe('agent CRUD tools — P2b semantics', () => {
       getDefinition('delete_user'),
       { userSlug: STUDENT_SLUG },
       approved({
-        user: { findUnique: async () => ({ id: 7, slug: STUDENT_SLUG, name: 'معلم', role: 'ADMIN' }) },
+        // Phase 8 re-pin: this fixture used to carry role 'ADMIN'. That is now a
+        // refusal in its own right (CANNOT_DELETE_ADMIN) and would short-circuit
+        // BEFORE the course-owner check this case exists to prove. It is a STUDENT
+        // here so the test still asserts what its own name says.
+        user: {
+          findUnique: async () => ({ id: 7, slug: STUDENT_SLUG, name: 'معلم', role: 'STUDENT', deletedAt: null }),
+        },
         course: { count: async () => 2 },
         $transaction: async () => {
           transactionCalls += 1;
@@ -639,6 +669,47 @@ describe('agent CRUD tools — P2b semantics', () => {
     assert.equal(owner.data.reason, 'USER_OWNS_COURSES');
     assert.equal(owner.data.ownedCourses, 2, 'the refusal tells the admin what is blocking it');
     assert.equal(transactionCalls, 0, 'nothing may be deleted while a course still references the user');
+  });
+
+  it('delete_user refuses another admin, and refuses a row that is already soft-deleted', async () => {
+    // Phase 8: the pre-Phase-8 code allowed deleting a DIFFERENT admin, which left
+    // an account nobody could reach through the UI to restore by hand.
+    const otherAdmin = await execute(
+      getDefinition('delete_user'),
+      { userSlug: STUDENT_SLUG },
+      approved({
+        user: {
+          findUnique: async () => ({ id: 8, slug: STUDENT_SLUG, name: 'مشرف تاني', role: 'ADMIN', deletedAt: null }),
+        },
+      })
+    );
+    assert.equal(otherAdmin.data.reason, 'CANNOT_DELETE_ADMIN');
+
+    let updates = 0;
+    const already = await execute(
+      getDefinition('delete_user'),
+      { userSlug: STUDENT_SLUG },
+      approved({
+        user: {
+          findUnique: async () => ({
+            id: 9,
+            slug: STUDENT_SLUG,
+            name: 'طالب',
+            role: 'STUDENT',
+            deletedAt: new Date('2026-09-01T00:00:00Z'),
+          }),
+          update: async () => {
+            updates += 1;
+          },
+        },
+      })
+    );
+    assert.equal(
+      already.data.reason,
+      'ALREADY_DELETED',
+      'a second delete must be a stated refusal, not a silent re-stamp that pushes the purge window out'
+    );
+    assert.equal(updates, 0, 'a refused re-delete must not write anything at all');
   });
 
   it('upsert_quiz rejects an invalid SurveyJS document through the REAL validator', async () => {

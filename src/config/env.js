@@ -389,6 +389,16 @@ const config = {
   rateLimit: {
     requireRedis: resolveRateLimitRequireRedis(),
   },
+  // Phase 8: soft delete. `retentionDays` is NOT env-tunable — the delete path
+  // promises the admin a specific window in the chat confirmation ("قابل للاسترجاع
+  // لمدة ٣٠ يوماً"), so it must come from ONE constant (src/services/softDelete.js)
+  // rather than a second, driftable value. The dry-run switch below IS env-tunable
+  // because it is an operational safety catch, not a user-facing promise.
+  softDelete: {
+    retentionDays: require('../services/softDelete').SOFT_DELETE_RETENTION_DAYS,
+    // Default TRUE: the sweep must be armed deliberately, never by omission.
+    purgeDryRun: resolveFlag(process.env.SOFT_DELETE_PURGE_DRY_RUN, true),
+  },
   aiGrader: resolveAiGrader(),
   aiAgent,
   sentry: {

@@ -129,8 +129,9 @@ async function createCourseCheckout(userId, courseSlug, urls = {}) {
   requirePaymentsOn();
   if (!isValidSlug(courseSlug)) throw new AppError('Course slug is required.', 400, 'INVALID_SLUG');
 
+  // Phase 8 (DENY-ACCESS): a soft-deleted course cannot be purchased.
   const course = await prisma.course.findUnique({
-    where: { slug: courseSlug },
+    where: { slug: courseSlug, deletedAt: null },
     select: { id: true, slug: true, title: true, price: true },
   });
   if (!course) throw new AppError('Course not found.', 404, 'COURSE_NOT_FOUND');
@@ -150,7 +151,10 @@ async function createCourseCheckout(userId, courseSlug, urls = {}) {
   }
 
   const user = await prisma.user.findUnique({
-    where: { id: userId },
+    // Phase 8 (DENY-ACCESS): a soft-deleted student cannot start a checkout. Their
+    // access token may still be live (~15 min), so this is the checkpoint that
+    // stops a deleted account from creating a NEW payment row.
+    where: { id: userId, deletedAt: null },
     select: { id: true, name: true, email: true, phoneNumber: true },
   });
   if (!user) throw new AppError('User not found.', 404, 'USER_NOT_FOUND');
