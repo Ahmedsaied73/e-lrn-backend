@@ -43,6 +43,35 @@ const MESSAGES_TAKE_DEFAULT = 50;
 const MESSAGES_TAKE_MIN = 1;
 const MESSAGES_TAKE_MAX = 100;
 
+// ── Phase 9 (conversation features) ───────────────────────────────────────────
+// Search: a 1-character query matches almost every message and is not a search, so
+// the floor is 2. The ceiling is a guard against a client pasting a whole document
+// into a `contains`, which would scan forever for a match that cannot exist.
+const SEARCH_QUERY_MIN = 2;
+const SEARCH_QUERY_MAX = 100;
+const SEARCH_TAKE_DEFAULT = 20;
+const SEARCH_TAKE_MIN = 1;
+const SEARCH_TAKE_MAX = 50;
+
+/** Chars of context returned per hit. Enough to place the match, not the message. */
+const SNIPPET_MAX = 120;
+/** How much text precedes the match inside the snippet. */
+const SNIPPET_LEAD = 40;
+
+/**
+ * A renamed title is the admin's own words, so it gets a wider budget than an
+ * auto-derived one (TITLE_MAX_CHARS = 80, a prefix of the first question). Both are
+ * single-line values; 120 is the ceiling the route validates against.
+ */
+const TITLE_INPUT_MIN = 1;
+const TITLE_INPUT_MAX = 120;
+
+/**
+ * The regenerate/edit cap. Same number the /ask route enforces, restated here because
+ * regenerate rewrites a stored question and must not be able to widen it.
+ */
+const QUESTION_MAX = 2000;
+
 const METADATA_STRING_MAX = 96;
 const TOOL_CALLS_MAX = 20;
 // Phase 4: the grounding check no longer discards an answer — it names the figures
@@ -519,6 +548,201 @@ async function getMessages({ prisma, adminId, conversationId, take = MESSAGES_TA
   }));
 }
 
+/** Collapse whitespace and cut at a code-point boundary (never split a surrogate). */
+function toSnippet(content) {
+  return Array.from(String(content == null ? '' : content).replace(/\s+/g, ' ').trim());
+}
+
+/**
+ * A short window of the message AROUND the match, so the admin can tell two hits
+ * apart. Returns code points, not UTF-16 units — Arabic and emoji are both multi-unit
+ * and a naive slice would emit half a character.
+ */
+function buildSnippet(content, query) {
+  const chars = toSnippet(content);
+  const flat = chars.join('');
+  const at = flat.toLowerCase().indexOf(String(query).toLowerCase());
+  if (at < 0) return chars.slice(0, SNIPPET_MAX).join('');
+
+  const codePointIndex = Array.from(flat.slice(0, at)).length;
+  const start = Math.max(0, codePointIndex - SNIPPET_LEAD);
+  return chars.slice(start, start + SNIPPET_MAX).join('');
+}
+
+/**
+ * Search this admin's conversations over their MESSAGE text (Phase 9, §9.1).
+ *
+ * Scoping is by the owning conversation's adminId, applied INSIDE the query — a
+ * post-filter would still have read another admin's rows into the process, and the
+ * whole point of the ownership doctrine in this file is that they never get that far.
+ *
+ * Pagination is by message id (newest first) rather than an offset: a new turn
+ * arriving between two requests cannot make the second page skip or repeat a hit, and
+ * `id` is already the unique, monotonic column the index gives us. No new index is
+ * added in this phase — one admin, a 30-day window, and a `contains` over a few
+ * thousand short rows is a plain scan the planner handles; see PHASE_9_REPORT §4.
+ *
+ * @returns {Promise<{ rows: Array<object>, nextCursor: number|null, truncated: boolean }>}
+ */
+async function searchConversations({ prisma, adminId, q, take = SEARCH_TAKE_DEFAULT, cursor = null } = {}) {
+  assertAdminId(adminId);
+
+  const query = typeof q === 'string' ? q.trim() : '';
+  const length = Array.from(query).length;
+  if (length < SEARCH_QUERY_MIN || length > SEARCH_QUERY_MAX) {
+    throw new AgentConversationError(
+      'INVALID_QUERY',
+      `q must be between ${SEARCH_QUERY_MIN} and ${SEARCH_QUERY_MAX} characters`
+    );
+  }
+
+  const size = clampTake(take, SEARCH_TAKE_DEFAULT, SEARCH_TAKE_MIN, SEARCH_TAKE_MAX);
+  const cursorId = Number.isSafeInteger(cursor) && cursor > 0 ? cursor : null;
+
+  // take + 1 is what makes `truncated` provable instead of a guess.
+  const messages = await prisma.agentMessage.findMany({
+    where: {
+      content: { contains: query, mode: 'insensitive' },
+      conversation: { adminId },
+      ...(cursorId === null ? {} : { id: { lt: cursorId } }),
+    },
+    orderBy: { id: 'desc' },
+    take: size + 1,
+    select: {
+      id: true,
+      content: true,
+      conversationId: true,
+      createdAt: true,
+      conversation: { select: { id: true, title: true, updatedAt: true } },
+    },
+  });
+
+  const truncated = messages.length > size;
+  const page = truncated ? messages.slice(0, size) : messages;
+
+  return {
+    rows: page.map((message) => ({
+      conversationId: message.conversationId,
+      title: message.conversation ? message.conversation.title ?? null : null,
+      messageId: message.id,
+      snippet: buildSnippet(message.content, query),
+      matchedAt: toIso(message.createdAt),
+      updatedAt: message.conversation ? toIso(message.conversation.updatedAt) : null,
+    })),
+    nextCursor: truncated && page.length > 0 ? page[page.length - 1].id : null,
+    truncated,
+  };
+}
+
+/**
+ * Rename a conversation (Phase 9, §9.1). Ownership first, so a foreign id is a
+ * NOT_FOUND from requireOwnedConversation — never a 403 and never a silent no-op.
+ */
+async function renameConversation({ prisma, adminId, conversationId, title } = {}) {
+  await requireOwnedConversation(prisma, adminId, conversationId);
+
+  const value = typeof title === 'string' ? title.trim() : '';
+  const length = Array.from(value).length;
+  if (length < TITLE_INPUT_MIN || length > TITLE_INPUT_MAX) {
+    throw new AgentConversationError(
+      'INVALID_TITLE',
+      `title must be between ${TITLE_INPUT_MIN} and ${TITLE_INPUT_MAX} characters`
+    );
+  }
+
+  const updated = await prisma.agentConversation.update({
+    where: { id: conversationId },
+    data: { title: value },
+    select: { id: true, title: true, updatedAt: true },
+  });
+
+  return { id: updated.id, title: updated.title, updatedAt: toIso(updated.updatedAt) };
+}
+
+/**
+ * Delete a conversation and its transcript (Phase 9, §9.1).
+ *
+ * The memories learned in it SURVIVE by construction: `AgentMemory.sourceConversation`
+ * is `onDelete: SetNull`, so the fact stays and only its provenance is cleared. That
+ * is deliberate — deleting a chat must not silently un-teach the agent something the
+ * admin confirmed.
+ */
+async function deleteConversation({ prisma, adminId, conversationId } = {}) {
+  await requireOwnedConversation(prisma, adminId, conversationId);
+
+  // AgentMessage and AgentApproval both cascade from the parent, so this one
+  // statement removes the transcript and any bound confirmation rows with it.
+  await prisma.agentConversation.delete({ where: { id: conversationId } });
+
+  return { id: conversationId, deleted: true };
+}
+
+/**
+ * Rewind a conversation to its last question, optionally replacing that question's
+ * text (Phase 9, §9.1 — the transactional half of regenerate/edit).
+ *
+ * Returns the question to re-run; the CALLER then drives `answerQuestion` so a
+ * regenerated turn goes through the normal path (limits, budget, guard, audit, memory)
+ * rather than a parallel implementation of it.
+ *
+ * One transaction, in this order, because each step invalidates the next if done out
+ * of order:
+ *   1. find the last USER message — no USER message means there is nothing to
+ *      regenerate, which is a typed refusal rather than an empty re-run;
+ *   2. optionally rewrite that message's text, validated against the same 2000-char
+ *      cap the /ask route applies, so editing cannot widen the question;
+ *   3. drop everything AFTER it — by id, which is monotonic, so the drop set is
+ *      exactly "the answer being regenerated";
+ *   4. expire the PENDING confirmation tokens that belonged to the dropped turn.
+ *      This is the security-relevant step: a preview issued by the answer we just
+ *      deleted must not stay spendable, or a regenerated turn could inherit a live
+ *      token for a destructive action the admin never re-confirmed.
+ */
+async function rewindToLastUserMessage({ prisma, adminId, conversationId, content = null } = {}) {
+  await requireOwnedConversation(prisma, adminId, conversationId);
+
+  return prisma.$transaction(async (tx) => {
+    const lastUser = await tx.agentMessage.findFirst({
+      where: { conversationId, role: ROLES.USER },
+      orderBy: { id: 'desc' },
+      select: { id: true, content: true, createdAt: true },
+    });
+    if (!lastUser) {
+      throw new AgentConversationError('NO_USER_MESSAGE', 'this conversation has no question to regenerate');
+    }
+
+    let question = lastUser.content;
+    if (content !== null && content !== undefined) {
+      const next = typeof content === 'string' ? content.trim() : '';
+      if (next === '') {
+        throw new AgentConversationError('EMPTY_MESSAGE', 'a regenerated question cannot be empty');
+      }
+      if (Array.from(next).length > QUESTION_MAX) {
+        throw new AgentConversationError('INVALID_INPUT', `question is too long (max ${QUESTION_MAX} characters)`);
+      }
+      await tx.agentMessage.update({ where: { id: lastUser.id }, data: { content: next } });
+      question = next;
+    }
+
+    const dropped = await tx.agentMessage.deleteMany({
+      where: { conversationId, id: { gt: lastUser.id } },
+    });
+
+    const expired = await tx.agentApproval.updateMany({
+      where: { conversationId, status: 'PENDING', requestedAt: { gte: lastUser.createdAt } },
+      data: { status: 'EXPIRED', decidedAt: new Date() },
+    });
+
+    return {
+      conversationId,
+      question,
+      userMessageId: lastUser.id,
+      droppedMessages: dropped.count,
+      expiredApprovals: expired.count,
+    };
+  });
+}
+
 /**
  * Delete conversations whose LAST ACTIVITY is older than the retention window.
  *
@@ -591,5 +815,10 @@ module.exports = {
   recordTurn,
   listConversations,
   getMessages,
+  // Phase 9
+  searchConversations,
+  renameConversation,
+  deleteConversation,
+  rewindToLastUserMessage,
   pruneExpiredConversations,
 };
