@@ -15,7 +15,7 @@ const cache = require('../integrations/redis/cache');
  * Returns enrolled courses with per-course progress + quiz results summary,
  * plus overall totals (courses, videos, exams taken/passed, average score).
  *
- * Cache-aside, 60s TTL — per-user key (`achievements:{userId}`) because the
+ * Cache-aside, 120s TTL — per-user key (`achievements:{userId}`) because the
  * payload embeds that user's progress + quiz scores. Invalidated by
  * invalidateAchievementsForUser() on every mutation that flips it:
  * video completion, quiz grade, enroll/unenroll.
@@ -25,7 +25,7 @@ async function getAchievements(req, res) {
     const userId = req.user.id;
     const cacheKey = cache.buildKey('achievements', String(userId));
 
-    const payload = await cache.withCache(cacheKey, 60, async () => {
+    const payload = await cache.withCache(cacheKey, 120, async () => {
       return buildAchievements(userId);
     });
 

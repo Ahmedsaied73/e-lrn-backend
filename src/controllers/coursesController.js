@@ -46,12 +46,12 @@ const getAllCourses = async (req, res) => {
 
     const where = search ? { title: { contains: search, mode: 'insensitive' } } : {};
 
-    // Cache-aside, 90s TTL. Raw rows are cached (host-independent); thumbnail
+    // Cache-aside, 180s TTL. Raw rows are cached (host-independent); thumbnail
     // absolutization happens after, per request. Search text is hashed so keys
     // stay bounded regardless of input length.
     const searchHash = search ? cache.shortHash(search) : 'none';
     const cacheKey = cache.buildKey('courses', 'list', `p${page}`, `l${take}`, `s${searchHash}`);
-    const { courses, total } = await cache.withCache(cacheKey, 90, async () => {
+    const { courses, total } = await cache.withCache(cacheKey, 180, async () => {
       const [rows, count] = await Promise.all([
         prisma.course.findMany({
           skip,
@@ -124,7 +124,7 @@ const getCourseById = async (req, res) => {
     // enrollment (if any) are all fetched via filtered relation includes, so no
     // additional per-video or per-user round trips are needed (no N+1).
     //
-    // Cache-aside 60s (P2). IMPORTANT: the payload is user-scoped (progress +
+    // Cache-aside 120s (P2). IMPORTANT: the payload is user-scoped (progress +
     // enrollment below include `where: { userId }`), so the key MUST carry the
     // userId — a courseId-only key would serve one student's completion state
     // to every other student viewing the same course (cross-user leak). This
@@ -132,7 +132,7 @@ const getCourseById = async (req, res) => {
     // create/update/delete already invalidate all `v1:courses:*` keys via
     // delPrefix; enrollment/progress mutations del their own key below.
     const cacheKey = cache.buildKey('courses', 'byid', courseId, `u${userId}`);
-    const cachedResult = await cache.withCache(cacheKey, 60, async () => {
+    const cachedResult = await cache.withCache(cacheKey, 120, async () => {
       const row = await prisma.course.findUnique({
         where: { id: courseId },
         include: {

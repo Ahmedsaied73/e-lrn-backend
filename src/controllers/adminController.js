@@ -39,13 +39,13 @@ function toMap(grouped) {
  */
 async function getDashboardStats(req, res) {
   try {
-    // Cache-aside 30s (P3). Admin-only endpoint, admin-only data — no per-user
+    // Cache-aside 60s (P3). Admin-only endpoint, admin-only data — no per-user
     // scope, so a single global key is safe (cross-admin visibility is already
-    // the model). Counts and alert lists may lag up to 30s on the dashboard;
+    // the model). Counts and alert lists may lag up to 60s on the dashboard;
     // Date fields round-trip through Redis as ISO strings, but JSON.stringify
     // produces the same wire format, so the client sees no difference.
     const cacheKey = cache.buildKey('admin', 'dashboard');
-    const data = await cache.withCache(cacheKey, 30, async () => {
+    const data = await cache.withCache(cacheKey, 60, async () => {
       const now = Date.now();
       const sinceWeek = new Date(now - RECENT_WINDOW_DAYS * 24 * 60 * 60 * 1000);
       const staleBefore = new Date(now - STALE_PROCESSING_MS);
