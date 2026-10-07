@@ -36,11 +36,12 @@ const allowedOrigins = [
   ...(process.env.FRONTEND_URL || '').split(',').map((s) => s.trim()).filter(Boolean),
 ].filter(Boolean);
 
-// Explicit allowed origins only — wildcard regex matching (*.vercel.app)
-// has been removed. Any preview/prod deployments must be declared in FRONTEND_URL.
+// Allow configured origins plus any *.vercel.app deployment (prod, previews, PR aliases)
+const VERCEL_ORIGIN_RE = /^https:\/\/[a-z0-9-]+\.vercel\.app$/i;
+
 function isAllowedOrigin(origin) {
   if (!origin || typeof origin !== 'string') return false;
-  return allowedOrigins.includes(origin);
+  return allowedOrigins.includes(origin) || VERCEL_ORIGIN_RE.test(origin);
 }
 
 function getAllowedOrigins() {
