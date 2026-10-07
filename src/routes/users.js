@@ -3,12 +3,16 @@ const Userrouter = express.Router();
 const { authenticateToken, authorizeAdmin } = require('../middlewares/index');
 const { deleteUser , updateUser , getUser , getUserById , getAllUsers } = require('../controllers/userController');
 const { getAchievements } = require('../controllers/achievementsController');
+const { getMyDevices } = require('../controllers/deviceController');
 
 // Get authenticated user data
 Userrouter.get('/me', authenticateToken, getUser);
 
 // Achievements aggregate: course progress + quiz results summary
 Userrouter.get('/me/achievements', authenticateToken, getAchievements);
+
+// Registered devices for student profile
+Userrouter.get('/me/devices', authenticateToken, getMyDevices);
  
 // Delete user (admin only)
 Userrouter.delete('/:userSlug', authenticateToken, authorizeAdmin, deleteUser);

@@ -1,9 +1,0 @@
-2026-09-22T20:12:27.9139825+03:00 server PID=5600 (LOAD_TEST=true, DATABASE_CONNECTION_LIMIT=40)
-2026-09-22T20:12:30.9573456+03:00 port ownership verified: PID 5600
-2026-09-22T20:12:32.0748677+03:00 server healthy after 1s
-2026-09-22T20:12:32.6124774+03:00 [snapshot l0v-pre] total_requests=0 5xx=0 GåÆ H:\e-learning-platform\loadtest\results\metrics-l0v-pre.txt
-2026-09-22T20:12:32.6294781+03:00 k6 start: k6 run -e STAGE_CAP=1 H:\e-learning-platform\loadtest\scenarios\browse-10k.js
-2026-09-22T20:15:43.2064154+03:00 k6 exit= duration=3.2min
-2026-09-22T20:15:43.8224175+03:00 [snapshot l0v-post] total_requests=0 5xx=0 GåÆ H:\e-learning-platform\loadtest\results\metrics-l0v-post.txt
-2026-09-22T20:15:44.2634371+03:00 [flush] Redis unreachable GÇö skipping bucket flush (fail-open).
-2026-09-22T20:15:49.0669479+03:00 stage l0v COMPLETE (k6 exit ) - server stopped

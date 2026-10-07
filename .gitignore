@@ -29,3 +29,12 @@ AGENTS.md
 *.patch
 skills-lock.json
 upload-typescript-*.txt
+
+# loadtest tokens & artifacts
+loadtest/.tokens.json
+loadtest/results/*.log
+
+# logs
+logs/
+*.log
+*.err.log

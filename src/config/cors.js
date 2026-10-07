@@ -29,20 +29,18 @@
 const allowedOrigins = [
   'http://localhost:3000',
   'http://127.0.0.1:3000',
+  'http://localhost:3002',
   'http://127.0.0.1:3002',
   // FRONTEND_URL may be comma-separated: prod Vercel domain plus any PR/preview
   // deployments share the same cookie + JWT machinery without code changes.
   ...(process.env.FRONTEND_URL || '').split(',').map((s) => s.trim()).filter(Boolean),
 ].filter(Boolean);
 
-// Vercel deploys a fresh random subdomain per git push (https://<hash>.vercel.app)
-// plus stable aliases (prod, preview) — allow every *.vercel.app deployment so
-// any branch/PR/preview origin works out-of-the-box after the next deploy.
-const VERCEL_ORIGIN_RE = /^https:\/\/[a-z0-9-]+\.vercel\.app$/i;
-
+// Explicit allowed origins only — wildcard regex matching (*.vercel.app)
+// has been removed. Any preview/prod deployments must be declared in FRONTEND_URL.
 function isAllowedOrigin(origin) {
   if (!origin || typeof origin !== 'string') return false;
-  return allowedOrigins.includes(origin) || VERCEL_ORIGIN_RE.test(origin);
+  return allowedOrigins.includes(origin);
 }
 
 function getAllowedOrigins() {

@@ -32,6 +32,8 @@ certificates      Certificate[]
   agentConversations AgentConversation[] // AI admin agent chat sessions (admin-owned)
   agentApprovals     AgentApproval[]     @relation("AgentApprovalAdmin") // HITL approvals this admin requested
   agentDecisions     AgentApproval[]     @relation("AgentApprovalDecider") // HITL approvals this admin decided on
+  maxDevices         Int?                       // null = platform default (3); integer = custom admin grant
+  devices            UserDevice[]               // Relation to registered devices
   refreshToken      String?            @db.Text
   refreshTokenFamily String?           @db.VarChar(36) // groups rotated refresh tokens; null = quarantined/logged out everywhere
   createdAt         DateTime           @default(now())
@@ -559,4 +561,28 @@ model AgentApproval {
   @@index([conversationId, requestedAt])
   @@index([status, expiresAt])
 }
+
+model UserDevice {
+  id                 Int       @id @default(autoincrement())
+  userId             Int
+  deviceIdentifier   String    @db.VarChar(64)  // FingerprintJS visitorId or fallback UUID
+  deviceName         String?   @db.VarChar(128) // Parsed via ua-parser-js (e.g. "Apple iPhone 15 Pro", "Windows 11 PC")
+  deviceType         String?   @db.VarChar(32)  // "DESKTOP", "MOBILE", "TABLET"
+  browser            String?   @db.VarChar(64)  // e.g. "Chrome 128.0", "Safari 17.4"
+  os                 String?   @db.VarChar(64)  // e.g. "iOS 17.5", "Windows 11"
+  ipAddress          String?   @db.VarChar(64)  // Last observed IP (for audit & fraud detection)
+  userAgent          String?   @db.Text         // Raw User-Agent string
+  refreshToken       String?   @db.Text         // SHA-256 hashed refresh token for this specific device
+  refreshTokenFamily String?   @db.VarChar(36)  // UUID family for token rotation on this device
+  lastActiveAt       DateTime  @default(now())
+  createdAt          DateTime  @default(now())
+  revokedAt          DateTime?                  // null = Active; timestamp = Unbound / Revoked
+
+  user               User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, deviceIdentifier])
+  @@index([userId, revokedAt])
+  @@index([deviceIdentifier])
+}
+
 

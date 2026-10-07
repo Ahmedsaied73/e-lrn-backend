@@ -102,10 +102,9 @@ app.use((req, res, next) => {
 // See src/middlewares/csrfProtection.js.
 app.use(csrfProtection);
 
-// S-5: security headers. CSP was previously OFF ("needs FE coordination") —
-// now locked to our real asset origins. The backend is a JSON API, so the
-// script/style directives are tight; connect-src permits the FE (Vercel) +
-// Supabase + Bunny CDN the browser talks to when proxying through this API.
+// S-5: security headers. Content Security Policy (CSP) directives suited
+// for this platform: Bunny stream embeds (*.mediadelivery.net, iframe.mediadelivery.net,
+// *.b-cdn.net), Supabase (*.supabase.co), and self.
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
@@ -114,7 +113,9 @@ app.use(helmet({
       styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: ["'self'", 'data:', 'https:'],
       fontSrc: ["'self'", 'data:', 'https:'],
-      connectSrc: ["'self'", 'https://*.b-cdn.net', 'https://*.supabase.co'],
+      connectSrc: ["'self'", 'https://*.b-cdn.net', 'https://*.supabase.co', 'https://*.mediadelivery.net'],
+      frameSrc: ["'self'", 'https://iframe.mediadelivery.net', 'https://*.mediadelivery.net'],
+      mediaSrc: ["'self'", 'https://*.b-cdn.net', 'https://*.mediadelivery.net', 'blob:', 'data:'],
       frameAncestors: ["'self'"],
       objectSrc: ["'none'"],
       baseUri: ["'self'"],
@@ -122,6 +123,7 @@ app.use(helmet({
     },
   },
   crossOriginEmbedderPolicy: false,
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
 }));
 
 
@@ -242,8 +244,97 @@ app.get('/healthz', (req, res) => {
   res.status(200).json({ status: 'ok', uptime: Math.round(process.uptime()) });
 });
 
+const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
 const { renderPrometheus } = require('./src/metrics/metrics');
+
+function isMetricsAuthorized(req) {
+  const configuredToken = process.env.METRICS_TOKEN ? String(process.env.METRICS_TOKEN).trim() : null;
+
+  // 1. Dedicated METRICS_TOKEN via Bearer header, Basic auth, X-Metrics-Token, or query param (?token=)
+  const candidateProvidedTokens = [];
+  const authHeader = req.headers && req.headers['authorization'];
+  if (authHeader) {
+    const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i);
+    if (bearerMatch && bearerMatch[1]) {
+      candidateProvidedTokens.push(bearerMatch[1].trim());
+    }
+    const basicMatch = authHeader.match(/^Basic\s+(.+)$/i);
+    if (basicMatch && basicMatch[1]) {
+      try {
+        const creds = Buffer.from(basicMatch[1].trim(), 'base64').toString('utf8');
+        const colonIdx = creds.indexOf(':');
+        if (colonIdx !== -1) {
+          const u = creds.slice(0, colonIdx).trim();
+          const p = creds.slice(colonIdx + 1).trim();
+          if (p) candidateProvidedTokens.push(p);
+          if (u) candidateProvidedTokens.push(u);
+        } else {
+          candidateProvidedTokens.push(creds.trim());
+        }
+      } catch {
+        // ignore malformed basic auth
+      }
+    }
+  }
+
+  if (req.headers && req.headers['x-metrics-token']) {
+    candidateProvidedTokens.push(String(req.headers['x-metrics-token']).trim());
+  }
+
+  if (req.query && req.query.token) {
+    candidateProvidedTokens.push(String(req.query.token).trim());
+  }
+
+  if (configuredToken && candidateProvidedTokens.length > 0) {
+    const bufConfigured = Buffer.from(configuredToken);
+    for (const token of candidateProvidedTokens) {
+      const bufProvided = Buffer.from(token);
+      if (bufConfigured.length === bufProvided.length && crypto.timingSafeEqual(bufConfigured, bufProvided)) {
+        return true;
+      }
+    }
+  }
+
+  // 2. Admin JWT authentication (cookie or Bearer token)
+  const candidateJwts = [];
+  if (authHeader) {
+    const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i);
+    if (bearerMatch && bearerMatch[1]) {
+      candidateJwts.push(bearerMatch[1].trim());
+    }
+  }
+  if (req.cookies) {
+    if (req.cookies.accessToken) candidateJwts.push(String(req.cookies.accessToken).trim());
+    if (req.cookies.token) candidateJwts.push(String(req.cookies.token).trim());
+  }
+
+  for (const jwtToken of candidateJwts) {
+    try {
+      const decoded = jwt.verify(jwtToken, config.jwt.secret);
+      if (decoded && decoded.type === 'access' && decoded.role === 'ADMIN') {
+        return true;
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+
+  return false;
+}
+
+app.isMetricsAuthorized = isMetricsAuthorized;
+
 app.get('/metrics', (req, res) => {
+  if (!isMetricsAuthorized(req)) {
+    res.setHeader('WWW-Authenticate', 'Bearer realm="metrics"');
+    return res.status(401).json({
+      success: false,
+      error: 'Unauthorized. Metrics access requires a valid METRICS_TOKEN or admin authentication.',
+      code: 'METRICS_AUTH_REQUIRED',
+    });
+  }
+
   res.setHeader('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
   res.send(renderPrometheus());
 });

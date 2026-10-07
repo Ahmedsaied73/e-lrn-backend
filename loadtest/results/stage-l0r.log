@@ -1,9 +1,0 @@
-2026-09-22T20:08:06.1193608+03:00 server PID=4380 (LOAD_TEST=true, DATABASE_CONNECTION_LIMIT=40)
-2026-09-22T20:08:07.2365250+03:00 server healthy after 1s
-2026-09-22T20:08:07.8617569+03:00 [snapshot l0r-pre] total_requests=0 5xx=0 GåÆ H:\e-learning-platform\loadtest\results\metrics-l0r-pre.txt
-2026-09-22T20:08:07.8877582+03:00 k6 start: k6 run -e STAGE_CAP=1 H:\e-learning-platform\loadtest\scenarios\browse-10k.js
-2026-09-22T20:11:18.1213272+03:00 k6 exit= duration=3.2min
-2026-09-22T20:11:19.0228290+03:00 [snapshot l0r-post] total_requests=0 5xx=0 GåÆ H:\e-learning-platform\loadtest\results\metrics-l0r-post.txt
-2026-09-22T20:11:20.3415401+03:00 [WARN] Redis error (#1): read ECONNRESET
-2026-09-22T20:11:20.3445189+03:00 [flush] Redis unreachable GÇö skipping bucket flush (fail-open).
-2026-09-22T20:11:24.6268176+03:00 stage l0r COMPLETE (k6 exit ) - server stopped

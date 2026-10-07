@@ -1,3 +1,5 @@
+'use strict';
+
 const prisma = require('../config/db');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
@@ -7,6 +9,10 @@ const { accessTokenCookieOptions, refreshTokenCookieOptions } = require('../conf
 const { getLockState, recordFailure, clearFailures } = require('../integrations/redis/accountLockout');
 const { randomBase36Slug } = require('../utils/slugs');
 const { createSemaphore } = require('../utils/concurrency');
+const deviceService = require('../services/deviceService');
+const { AppError } = require('../utils/AppError');
+const { isValidDeviceId } = require('../utils/deviceHelper');
+
 // Bounds simultaneous credential checks. Pending logins queue in the semaphore
 // (no DB pool held) instead of stamping the pool with serial round-trips.
 // LOGIN_CONCURRENCY env-tunable; 8 matches the measured pool headroom.
@@ -60,23 +66,45 @@ async function login(req, res) {
     // Success clears the failure counter.
     await clearFailures(email);
 
-    const payload = { id: user.id, email: user.email, name: user.name, role: user.role };
+    // Device binding & validation
+    const devicePayload = req.body.device || (req.headers['x-device-id'] ? { id: req.headers['x-device-id'] } : null);
+    const device = await deviceService.validateOrRegisterDevice({
+      user,
+      devicePayload,
+      ip: req.ip || req.connection?.remoteAddress,
+      userAgent: req.headers['user-agent'] || '',
+    });
+
+    const payload = {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      deviceId: device.deviceIdentifier,
+    };
     const token = createToken(payload, jwtConfig.secret);
     const refreshToken = createRefreshToken(payload, jwtConfig.refreshSecret);
 
-    // Fresh login = a NEW family. Only the SHA-256 hash of the refresh token is
-    // stored (never the raw JWT), so a DB leak can't be replayed here.
+    // Fresh login = a NEW family for this specific device.
+    // Stored directly on UserDevice (isolated multi-device sessions).
+    const family = createRefreshTokenFamily();
+    await prisma.userDevice.update({
+      where: { id: device.id },
+      data: {
+        refreshToken: hashRefreshToken(refreshToken),
+        refreshTokenFamily: family,
+        lastActiveAt: new Date(),
+      },
+    });
+
     await prisma.user.update({
       where: { id: user.id },
       data: {
-        refreshToken: hashRefreshToken(refreshToken),
-        refreshTokenFamily: createRefreshTokenFamily(),
         lastLoginAt: new Date(),
-      }
+      },
     });
 
     // lastLoginAt is part of the cached /user/me payload (v1:me:{id}) — drop it.
-    // Never-throw: a Redis failure leaves a ≤60s-stale lastLoginAt, nothing worse.
     try {
       const cache = require('../integrations/redis/cache');
       await cache.del(cache.buildKey('me', String(user.id)));
@@ -84,13 +112,19 @@ async function login(req, res) {
       /* best-effort */
     }
 
-    // Set HttpOnly Cookies on Response. Tokens are NEVER returned in the body —
-    // the browser holds them in cookies (cookie-only auth model).
+    // Set HttpOnly Cookies on Response.
     res.cookie('accessToken', token, accessTokenCookieOptions);
     res.cookie('refreshToken', refreshToken, refreshTokenCookieOptions);
 
     return res.json({ success: true, data: { user: payload } });
   } catch (error) {
+    if (error instanceof AppError || (error.statusCode && error.code)) {
+      return res.status(error.statusCode).json({
+        success: false,
+        error: error.message,
+        code: error.code,
+      });
+    }
     console.error('Login error:', error);
     return res.status(500).json({ success: false, error: 'An error occurred during login.' });
   }
@@ -123,26 +157,48 @@ async function register(req, res) {
       data: { name: name.trim(), email: email.trim().toLowerCase(), phoneNumber: phoneNumber.trim(), password: hashedPassword, grade, slug: randomBase36Slug() }
     });
 
-    const payload = { id: newUser.id, slug: newUser.slug, email: newUser.email, name: newUser.name, phoneNumber: newUser.phoneNumber, grade: newUser.grade, role: newUser.role };
+    const devicePayload = req.body.device || (req.headers['x-device-id'] ? { id: req.headers['x-device-id'] } : null);
+    let device = null;
+
+    if (!req.user) {
+      // Public self-registration: register Device #1
+      const effectivePayload = (devicePayload && isValidDeviceId(devicePayload.id))
+        ? devicePayload
+        : { id: 'reg_' + Buffer.from(randomBase36Slug()).toString('hex').slice(0, 16) + '_' + Date.now() };
+
+      device = await deviceService.validateOrRegisterDevice({
+        user: newUser,
+        devicePayload: effectivePayload,
+        ip: req.ip || req.connection?.remoteAddress,
+        userAgent: req.headers['user-agent'] || '',
+      });
+    }
+
+    const payload = {
+      id: newUser.id,
+      slug: newUser.slug,
+      email: newUser.email,
+      name: newUser.name,
+      phoneNumber: newUser.phoneNumber,
+      grade: newUser.grade,
+      role: newUser.role,
+      ...(device ? { deviceId: device.deviceIdentifier } : {}),
+    };
     const token = createToken(payload, jwtConfig.secret);
     const refreshToken = createRefreshToken(payload, jwtConfig.refreshSecret);
 
-    // Same hashed storage + fresh family as login. (When an admin adds a student
-    // from an authenticated context, only the DB rows are written — the caller's
-    // cookies are untouched, see below.)
-    await prisma.user.update({
-      where: { id: newUser.id },
-      data: {
-        refreshToken: hashRefreshToken(refreshToken),
-        refreshTokenFamily: createRefreshTokenFamily(),
-      }
-    });
+    if (device) {
+      await prisma.userDevice.update({
+        where: { id: device.id },
+        data: {
+          refreshToken: hashRefreshToken(refreshToken),
+          refreshTokenFamily: createRefreshTokenFamily(),
+          lastActiveAt: new Date(),
+        },
+      });
+    }
 
-    // Set HttpOnly Cookies ONLY when there is no existing session. When an
-    // already-authenticated caller registers (e.g. an admin adding a student),
-    // setting these cookies would silently replace their session with the new
-    // user's — hijacking the caller. Public signups (no session) still get
-    // auto-login via cookies. `req.user` is populated by optionalAuth.
+    // Set HttpOnly Cookies ONLY when there is no existing session.
     if (!req.user) {
       res.cookie('accessToken', token, accessTokenCookieOptions);
       res.cookie('refreshToken', refreshToken, refreshTokenCookieOptions);
@@ -150,6 +206,13 @@ async function register(req, res) {
 
     return res.status(201).json({ success: true, message: 'User registered successfully.', data: { user: payload } });
   } catch (error) {
+    if (error instanceof AppError || (error.statusCode && error.code)) {
+      return res.status(error.statusCode).json({
+        success: false,
+        error: error.message,
+        code: error.code,
+      });
+    }
     console.error('Registration error:', error);
     return res.status(500).json({ success: false, error: 'An error occurred during registration.' });
   }
@@ -161,10 +224,22 @@ async function logout(req, res) {
     if (token) {
       try {
         const decoded = jwt.verify(token, jwtConfig.refreshSecret);
-        await prisma.user.update({
-          where: { id: decoded.id },
-          data: { refreshToken: null }
-        });
+        if (decoded.deviceId) {
+          await prisma.userDevice.updateMany({
+            where: {
+              userId: decoded.id,
+              deviceIdentifier: decoded.deviceId,
+            },
+            data: {
+              refreshToken: null,
+            },
+          });
+        } else {
+          await prisma.user.update({
+            where: { id: decoded.id },
+            data: { refreshToken: null },
+          }).catch(() => {});
+        }
       } catch {
         // Silently ignore if token is invalid or expired
       }
@@ -181,42 +256,106 @@ async function logout(req, res) {
 }
 
 async function refreshToken(req, res) {
-  // Cookie-only: refresh tokens are NEVER accepted from the request body. The
-  // FE keeps them HttpOnly (authService reads nothing from the body), and
-  // accepting body tokens would let a leaked access token in a CSRF-style
-  // submission mint fresh cookies. The refresh cookie is path-scoped to /auth.
   const token = req.cookies && req.cookies.refreshToken;
   if (!token) return res.status(401).json({ success: false, error: 'Refresh token not provided.' });
 
   try {
     const decoded = jwt.verify(token, jwtConfig.refreshSecret);
 
-    // Reject access tokens that were handed to the refresh endpoint
+    // Reject access tokens handed to refresh endpoint
     if (decoded.type !== 'refresh') {
       return res.status(403).json({ success: false, error: 'Invalid or revoked refresh token.' });
     }
 
     const user = await prisma.user.findUnique({
       where: { id: decoded.id },
-      select: { id: true, email: true, name: true, role: true, refreshToken: true, refreshTokenFamily: true },
+      select: { id: true, email: true, name: true, role: true, maxDevices: true },
     });
 
-    // Nothing stored for this user (logged out or never logged in) → refuse.
-    if (!user || user.refreshToken === null) {
+    if (!user) {
       return res.status(403).json({ success: false, error: 'Invalid or revoked refresh token.' });
     }
 
-    // Stored token is a 64-char hex SHA-256 hash. Legacy rows still hold the raw
-    // JWT — accepting them here makes the upgrade transparent, and hashing the
-    // presented token on the next rotate permanently upgrades the row.
-    const stored = user.refreshToken;
+    // Multi-device path if token has deviceId
+    if (decoded.deviceId) {
+      const device = await prisma.userDevice.findUnique({
+        where: {
+          userId_deviceIdentifier: {
+            userId: user.id,
+            deviceIdentifier: decoded.deviceId,
+          },
+        },
+      });
+
+      if (!device || device.revokedAt !== null) {
+        res.clearCookie('accessToken', { ...accessTokenCookieOptions, maxAge: 0 });
+        res.clearCookie('refreshToken', { ...refreshTokenCookieOptions, maxAge: 0 });
+        return res.status(403).json({
+          success: false,
+          error: 'تم إلغاء ربط هذا الجهاز. يرجى إعادة تسجيل الدخول.',
+          code: 'DEVICE_REVOKED',
+        });
+      }
+
+      if (!device.refreshToken) {
+        return res.status(403).json({ success: false, error: 'Invalid or revoked refresh token.' });
+      }
+
+      const stored = device.refreshToken;
+      const isHashed = /^[0-9a-f]{64}$/.test(stored);
+      const tokenValid = isHashed ? stored === hashRefreshToken(token) : stored === token;
+
+      if (!tokenValid) {
+        // REUSE DETECTED on this device: revoke this device's session
+        await prisma.userDevice.update({
+          where: { id: device.id },
+          data: { refreshToken: null, refreshTokenFamily: null },
+        });
+        return res.status(403).json({ success: false, error: 'Invalid or revoked refresh token.' });
+      }
+
+      const payload = {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        deviceId: device.deviceIdentifier,
+      };
+      const newToken = createToken(payload, jwtConfig.secret);
+      const newRefreshToken = createRefreshToken(payload, jwtConfig.refreshSecret);
+      const family = device.refreshTokenFamily || createRefreshTokenFamily();
+
+      await prisma.userDevice.update({
+        where: { id: device.id },
+        data: {
+          refreshToken: hashRefreshToken(newRefreshToken),
+          refreshTokenFamily: family,
+          lastActiveAt: new Date(),
+          ipAddress: req.ip || req.connection?.remoteAddress,
+        },
+      });
+
+      res.cookie('accessToken', newToken, accessTokenCookieOptions);
+      res.cookie('refreshToken', newRefreshToken, refreshTokenCookieOptions);
+
+      return res.json({ success: true, message: 'Token refreshed successfully.' });
+    }
+
+    // Legacy fallback (no deviceId in token)
+    const userLegacy = await prisma.user.findUnique({
+      where: { id: decoded.id },
+      select: { refreshToken: true, refreshTokenFamily: true },
+    });
+
+    if (!userLegacy || userLegacy.refreshToken === null) {
+      return res.status(403).json({ success: false, error: 'Invalid or revoked refresh token.' });
+    }
+
+    const stored = userLegacy.refreshToken;
     const isHashed = /^[0-9a-f]{64}$/.test(stored);
     const tokenValid = isHashed ? stored === hashRefreshToken(token) : stored === token;
 
     if (!tokenValid) {
-      // REUSE DETECTED: the presented token is an already-rotated/superseded one
-      // (someone replayed it, or logged in elsewhere which killed this family).
-      // Quarantine the WHOLE family — every device in it must re-login.
       await prisma.user.update({
         where: { id: user.id },
         data: { refreshToken: null, refreshTokenFamily: null },
@@ -226,11 +365,8 @@ async function refreshToken(req, res) {
 
     const payload = { id: user.id, email: user.email, name: user.name, role: user.role };
     const newToken = createToken(payload, jwtConfig.secret);
-
-    // ROTATE within the SAME family (uuid generated on login/register; legacy
-    // plaintext rows get a family the first time they rotate through here).
     const newRefreshToken = createRefreshToken(payload, jwtConfig.refreshSecret);
-    const family = user.refreshTokenFamily || createRefreshTokenFamily();
+    const family = userLegacy.refreshTokenFamily || createRefreshTokenFamily();
     await prisma.user.update({
       where: { id: user.id },
       data: { refreshToken: hashRefreshToken(newRefreshToken), refreshTokenFamily: family },

@@ -370,6 +370,9 @@ const config = {
   rateLimit: {
     requireRedis: resolveRateLimitRequireRedis(),
   },
+  deviceBinding: {
+    maxDevicesPerStudent: Math.max(1, Number(process.env.MAX_DEVICES_PER_STUDENT) || 3),
+  },
   aiGrader: resolveAiGrader(),
   aiAgent,
   sentry: {
