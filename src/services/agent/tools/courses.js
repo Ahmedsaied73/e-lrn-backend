@@ -56,7 +56,8 @@ const coursesList = readTool({
         : [{ createdAt: 'desc' }, { id: 'desc' }];
 
     const found = await prisma.course.findMany({
-      where: args.grade ? { grade: args.grade } : {},
+      // Phase 8 (FILTER): a soft-deleted course is hidden from every agent read.
+      where: args.grade ? { grade: args.grade, deletedAt: null } : { deletedAt: null },
       orderBy,
       take: take + 1,
       select: {
@@ -113,8 +114,9 @@ const courseDetail = readTool({
   run: async (args, ctx) => {
     const prisma = ctx.prisma;
 
-    const course = await prisma.course.findUnique({
-      where: { slug: args.courseSlug },
+    const course = await prisma.course.findFirst({
+      // Phase 8 (FILTER): a soft-deleted course reads as "not found" to the agent.
+      where: { slug: args.courseSlug, deletedAt: null },
       select: { id: true, slug: true, title: true, grade: true, category: true, price: true, createdAt: true },
     });
     if (!course) return { found: false, courseSlug: args.courseSlug };
@@ -174,7 +176,7 @@ const courseCompletionRates = readTool({
     const take = clampTake(args.take, 25);
 
     const courses = await prisma.course.findMany({
-      where: args.grade ? { grade: args.grade } : {},
+      where: args.grade ? { grade: args.grade, deletedAt: null } : { deletedAt: null },
       select: { id: true, slug: true, title: true, grade: true },
     });
     if (courses.length === 0) return { grade: args.grade || null, rows: [], returned: 0, truncated: false };
@@ -238,10 +240,16 @@ const coursesByGrade = readTool({
     const prisma = ctx.prisma;
 
     const [grouped, courses, enrollmentGroups] = await Promise.all([
-      prisma.course.groupBy({ by: ['grade'], _count: { _all: true }, _avg: { price: true } }),
+      // Phase 8 (FILTER): deleted courses are excluded from every rollup.
+      prisma.course.groupBy({
+        by: ['grade'],
+        _count: { _all: true },
+        _avg: { price: true },
+        where: { deletedAt: null },
+      }),
       // Enrollment rows carry a courseId, not a grade — the grade mapping arrives
       // with the courses and the rollup happens in JS, never as an N+1 query.
-      prisma.course.findMany({ select: { id: true, grade: true } }),
+      prisma.course.findMany({ where: { deletedAt: null }, select: { id: true, grade: true } }),
       prisma.enrollment.groupBy({ by: ['courseId'], _count: { _all: true } }),
     ]);
 
@@ -379,8 +387,8 @@ const videoEngagement = readTool({
 
     let courseId = null;
     if (args.courseSlug) {
-      const course = await prisma.course.findUnique({
-        where: { slug: args.courseSlug },
+      const course = await prisma.course.findFirst({
+        where: { slug: args.courseSlug, deletedAt: null },
         select: { id: true },
       });
       if (!course) return { found: false, courseSlug: args.courseSlug };

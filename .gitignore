@@ -23,6 +23,7 @@ uploads-migration-manifest.json
 .agents/
 .opencode/
 .trae/
+.superpowers/
 plans/
 tasks/
 AGENTS.md

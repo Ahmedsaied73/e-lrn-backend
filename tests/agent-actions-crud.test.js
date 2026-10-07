@@ -1,13 +1,13 @@
 'use strict';
-/* Agent CRUD action contract tests (P2a: students + courses, NO deletes) — pure:
- * no DB, no Redis, no network.
+/* Agent CRUD action contract tests — pure: no DB, no Redis, no network.
  *
  * WHY this file is separate from agent-tools-contract.test.js: that suite pins the
- * CROSS-CUTTING contract (registry shape, approval gate, redaction) and the exact
- * approved catalogue. These four tools have per-tool semantics worth pinning one
- * by one — the field sets mirrored from the HTTP controllers, the structured
- * refusals (taken email/phone, unknown student/course, a vanished admin row) and
- * the hard rule that no credential material can ever leave a tool payload.
+ * CROSS-CUTTING contract (registry shape, attribution/confirmation gates, redaction)
+ * and the catalogue. These tools have per-tool semantics worth pinning one by one —
+ * the field sets mirrored from the HTTP controllers, the structured refusals (taken
+ * email/phone, unknown student/course), the two-step preview→confirm flow of the
+ * destructive tools (Phase 3), and the hard rule that no credential material can
+ * ever leave a tool payload.
  *
  * Run: npm test
  */
@@ -28,20 +28,26 @@ const COURSE_SLUG = 'crs123abc456';
 /**
  * Every mutating tool this phase added, with the audit action it must declare. The
  * deletes are listed LAST and kept in one block on purpose: they are the only
- * irreversible tools in the catalogue, and a reviewer scanning this file should see
- * immediately which ones they are.
+ * irreversible tools in the catalogue, and Phase 3 makes that structural — kind
+ * 'confirm' means the tool previews first and only executes with a token its own
+ * preview issued.
  */
+// `twoStep` = the preview/confirm flow (all four deletes keep it).
+// `recoverable` = Phase 8: a soft delete the admin can undo for 30 days. It is a
+// SEPARATE axis from `twoStep`, which is exactly the distinction the pre-Phase-8
+// single `irreversible` flag could not express — and the reason delete_course /
+// delete_user had to stop claiming "غير قابل للتراجع" in their descriptions while
+// delete_video / delete_quiz still must.
 const CRUD_TOOLS = [
   { name: 'create_student', audit: 'USER_CREATE', target: 'user' },
   { name: 'update_student', audit: 'USER_UPDATE', target: 'user' },
   { name: 'create_course', audit: 'COURSE_CREATE', target: 'course' },
   { name: 'update_course', audit: 'COURSE_UPDATE', target: 'course' },
-  { name: 'create_video', audit: 'VIDEO_CREATE', target: 'video' },
   { name: 'upsert_quiz', audit: 'QUIZ_UPSERT', target: 'quiz' },
-  { name: 'delete_video', audit: 'VIDEO_DELETE', target: 'video', irreversible: true },
-  { name: 'delete_quiz', audit: 'QUIZ_DELETE', target: 'quiz', irreversible: true },
-  { name: 'delete_course', audit: 'COURSE_DELETE', target: 'course', irreversible: true },
-  { name: 'delete_user', audit: 'USER_DELETE', target: 'user', irreversible: true },
+  { name: 'delete_video', audit: 'VIDEO_DELETE', target: 'video', twoStep: true, recoverable: false, kind: 'confirm' },
+  { name: 'delete_quiz', audit: 'QUIZ_DELETE', target: 'quiz', twoStep: true, recoverable: false, kind: 'confirm' },
+  { name: 'delete_course', audit: 'COURSE_DELETE', target: 'course', twoStep: true, recoverable: true, kind: 'confirm' },
+  { name: 'delete_user', audit: 'USER_DELETE', target: 'user', twoStep: true, recoverable: true, kind: 'confirm' },
 ];
 
 const NEW_STUDENT_ARGS = {
@@ -156,7 +162,11 @@ function prismaStub(overrides = {}) {
   };
 }
 
-const approved = (prisma) => ({ prisma, approved: true, adminId: ADMIN_ID });
+// Phase 3 (Decision #1): an attributable admin id is the ONLY precondition a plain
+// action needs — the legacy `approved: true` flag is gone from the tool layer. The
+// destructive (kind 'confirm') tools additionally require a confirmationToken their
+// own preview issued; those flows build their ctx explicitly below.
+const approved = (prisma) => ({ prisma, adminId: ADMIN_ID });
 
 describe('agent CRUD tools — catalogue contract', () => {
   it('registers the whole CRUD surface, deletes included', () => {
@@ -170,23 +180,44 @@ describe('agent CRUD tools — catalogue contract', () => {
     for (const forbidden of ['delete_user', 'delete_course', 'delete_video', 'delete_quiz']) {
       const def = getDefinition(forbidden);
       assert.ok(def, `${forbidden} should now be registered`);
-      // An irreversible tool the model cannot recognise as irreversible is the
-      // failure mode that matters: the description must SAY so in Arabic.
-      assert.match(def.description, /غير قابل للتراجع/, `${forbidden} must warn that it is irreversible`);
+      // Phase 8 re-pin: the warning a delete tool must carry now depends on whether
+      // it is RECOVERABLE, not on whether it is destructive. delete_video/delete_quiz
+      // are still permanent and must still say so; delete_user/delete_course are soft
+      // deletes and must say THAT instead — a soft delete still advertising
+      // "غير قابل للتراجع" would scare the admin off a reversible action.
+      const recoverable = forbidden === 'delete_user' || forbidden === 'delete_course';
+      if (recoverable) {
+        // Match on للاسترجاع alone: the descriptions write "قابلاً للاسترجاع" (with
+        // the tanween), and pinning the un-diacriticised spelling would fail on a
+        // difference the admin never sees.
+        assert.match(def.description, /للاسترجاع/, `${forbidden} must state it is recoverable`);
+        assert.doesNotMatch(def.description, /غير قابل للتراجع/, `${forbidden} must NOT claim to be irreversible`);
+      } else {
+        assert.match(def.description, /غير قابل للتراجع/, `${forbidden} must warn that it is irreversible`);
+      }
     }
   });
 
-  it('every CRUD tool is an approval-gated, uncached, Arabic, audited action', () => {
-    for (const { name, audit, target } of CRUD_TOOLS) {
+  it('every CRUD tool is immediate-or-confirmable, uncached, Arabic, audited', () => {
+    for (const { name, audit, target, kind = 'action' } of CRUD_TOOLS) {
       const def = getDefinition(name);
       assert.ok(def, `${name} not registered`);
-      assert.equal(def.kind, 'action', `${name} kind`);
-      assert.equal(def.requiresApproval, true, `${name} requiresApproval`);
+      assert.equal(def.kind, kind, `${name} kind`);
+      // Phase 3: the static approval gate is GONE. Pinning its absence keeps the
+      // "tools exist but no schema ever reached the model" door closed — a
+      // resurrected requiresApproval:true would again make mutations silently dead.
+      assert.equal(def.requiresApproval, false, `${name} must not claim the removed approval gate`);
       assert.equal(def.cacheTtlSeconds, 0, `${name} must never be cached`);
       assert.equal(def.audit.action, audit, `${name} audit action`);
       assert.equal(def.audit.targetType, target, `${name} audit target type`);
       assert.match(def.description, ARABIC_RE, `${name} description must be Arabic`);
       assert.ok(def.description.length >= 20, `${name} description must be explanatory`);
+      if (kind === 'confirm') {
+        // The two-step contract lives IN the definition: a read-only preview, and
+        // a token field the model is allowed to carry back.
+        assert.equal(typeof def.preview, 'function', `${name} must expose a read-only preview`);
+        assert.ok(def.schema.shape.confirmationToken, `${name} model schema must expose confirmationToken`);
+      }
       // A tool the model cannot understand is a tool it will not call correctly:
       // every argument carries its own Arabic hint.
       for (const [key, field] of Object.entries(def.schema.shape || {})) {
@@ -195,9 +226,22 @@ describe('agent CRUD tools — catalogue contract', () => {
     }
   });
 
-  it('every new tool states in Arabic that admin approval is required', () => {
-    for (const { name } of CRUD_TOOLS) {
-      assert.match(getDefinition(name).description, /موافقة المشرف/, `${name} must announce the gate`);
+  it('descriptions state the Phase 3 contract: immediate for actions, two steps for deletes', () => {
+    for (const { name, twoStep } of CRUD_TOOLS) {
+      const desc = getDefinition(name).description;
+      // The removed approval flow must not be PROMISED anywhere: a description
+      // telling the model to wait for an approval gate re-creates the old dead end
+      // where the tool existed but the flow never completed.
+      assert.equal(desc.includes('موافقة المشرف'), false, `${name} must not promise the removed approval gate`);
+      // Phase 8 re-pin: the axis this assertion reads is `twoStep` (does the tool
+      // require a preview + a later-turn confirmation?), not `recoverable`. A soft
+      // delete is still two-step, so it must still announce خطوتين even though it
+      // is no longer irreversible.
+      if (twoStep) {
+        assert.match(desc, /خطوتين/, `${name} must announce the two-step preview/confirm flow`);
+      } else {
+        assert.match(desc, /ينفّذ فورا/, `${name} must announce immediate execution`);
+      }
     }
   });
 });
@@ -247,13 +291,317 @@ describe('agent CRUD tools — P2b semantics', () => {
     delete_user: { userSlug: STUDENT_SLUG },
   };
 
-  it('every delete refuses without approval BEFORE it resolves its target', async () => {
+  it('every delete refuses an unattributable call BEFORE it resolves its target', async () => {
+    // Phase 3 replaced the approval flag with ATTRIBUTION: a mutation with no real
+    // admin behind it is not allowed to happen — and the refusal must precede every
+    // query, so even the read-only preview never runs against an unknown caller.
     for (const [name, args] of Object.entries(DELETE_ARGS)) {
       await assert.rejects(
         () => execute(getDefinition(name), args, { prisma: forbiddenPrisma() }),
-        (err) => err instanceof AgentToolError && err.code === 'APPROVAL_REQUIRED',
-        `${name} must refuse an unapproved call`
+        (err) => err instanceof AgentToolError && err.code === 'ADMIN_REQUIRED',
+        `${name} must refuse a call it cannot attribute to an admin`
       );
+    }
+  });
+
+  /**
+   * AgentApproval stand-in for the confirm flow — the same CAS state machine
+   * Postgres runs (only one caller can flip PENDING), with no database. Rows are
+   * created through the REAL requestApproval() the preview path calls, so
+   * argsHash/expiresAt come from production code, not from hand-written fixtures.
+   */
+  function approvalStub() {
+    const rows = new Map();
+    let nextId = 901;
+    return {
+      rows,
+      agentApproval: {
+        async create({ data }) {
+          const row = { id: nextId, ...data };
+          rows.set(nextId, row);
+          nextId += 1;
+          return row;
+        },
+        async findUnique({ where }) {
+          return rows.get(where.id) || null;
+        },
+        async updateMany({ where, data }) {
+          const row = rows.get(where.id);
+          if (!row || (where.status !== undefined && row.status !== where.status)) return { count: 0 };
+          Object.assign(row, data);
+          return { count: 1 };
+        },
+      },
+    };
+  }
+
+  /** Prisma whose ONLY reachable model is agentApproval: a refused confirmation
+   *  that went on to resolve its target would throw instead of passing. */
+  function gateOnlyPrisma(stub) {
+    return new Proxy(stub, {
+      get: (target, prop) =>
+        prop in target
+          ? target[prop]
+          : () => {
+              throw new Error('a refused confirmation must never resolve its target');
+            },
+    });
+  }
+
+  const VIDEO_ARGS = { videoSlug: 'vid123abc456' };
+  const previewableVideo = {
+    id: 5,
+    slug: VIDEO_ARGS.videoSlug,
+    title: 'فيديو',
+    status: 'READY',
+    course: { title: 'دورة' },
+    quiz: { title: 'اختبار' },
+    _count: { progress: 12 },
+  };
+
+  /** Preview delete_video through the real path and hand back the stub, token, result. */
+  async function issuedVideoToken() {
+    const stub = approvalStub();
+    const prisma = { ...stub, bunnyVideo: { findUnique: async () => previewableVideo } };
+    const result = await execute(getDefinition('delete_video'), VIDEO_ARGS, { prisma, adminId: ADMIN_ID });
+    return { stub, token: result.data.confirmationToken, result };
+  }
+
+  it('a no-token call PREVIEWs, issues one PENDING token, and mutates nothing', async () => {
+    const { stub, token, result } = await issuedVideoToken();
+    assert.match(token, /^\d+$/, 'the token is the AgentApproval row id as a string');
+    assert.equal(result.data.ok, true);
+    assert.equal(result.data.stage, 'PREVIEW');
+    assert.equal(result.data.confirmationRequired, true);
+    assert.ok(Date.parse(result.data.confirmationExpiresAt) > Date.now(), 'the token carries a future expiry');
+    assert.equal(result.data.preview.target.video.studentProgressRows, 12, 'the admin sees the real blast radius');
+    assert.equal(result.data.preview.irreversible, true);
+    assert.equal(stub.rows.size, 1, 'exactly one row becomes pending');
+    assert.equal(stub.rows.get(Number(token)).status, 'PENDING');
+    assert.equal(stub.rows.get(Number(token)).adminId, ADMIN_ID, 'the token is bound to the requesting admin');
+    assert.equal(auditCalls.at(-1).metadata.stage, 'preview', 'the preview itself is evidence');
+    // Phase 3.1 (F2): a preview is NOT a deletion. The audit readers group by `action`
+    // alone, so filing this row under VIDEO_DELETE made a preview count as a delete.
+    assert.equal(auditCalls.at(-1).action, 'VIDEO_DELETE_PREVIEW', 'a preview carries its own action name');
+  });
+
+  it('a preview refusal is the answer: no token, nothing pending', async () => {
+    const stub = approvalStub();
+    const result = await execute(getDefinition('delete_video'), { videoSlug: 'missing123ab' }, {
+      prisma: { ...stub, bunnyVideo: { findUnique: async () => null } },
+      adminId: ADMIN_ID,
+    });
+    assert.equal(result.data.ok, false);
+    assert.equal(result.data.reason, 'VIDEO_NOT_FOUND');
+    assert.equal(result.data.confirmationToken, undefined);
+    assert.equal(stub.rows.size, 0, 'there is nothing to confirm, so no token may exist');
+  });
+
+  it('confirming the exact previewed args executes exactly once, and the spent token cannot replay', async () => {
+    const bunnyVideoService = require('../src/services/bunnyVideoService');
+    const original = bunnyVideoService.deleteVideo;
+    let destructiveCalls = 0;
+    bunnyVideoService.deleteVideo = async () => {
+      destructiveCalls += 1;
+      return { id: 5, bunnyVideoId: 'bunny-9' };
+    };
+    try {
+      const stub = approvalStub();
+      const ctx = {
+        prisma: { ...stub, bunnyVideo: { findUnique: async () => previewableVideo } },
+        adminId: ADMIN_ID,
+      };
+      const preview = await execute(getDefinition('delete_video'), VIDEO_ARGS, ctx);
+      assert.equal(destructiveCalls, 0, 'the preview call must not delete');
+
+      const done = await execute(
+        getDefinition('delete_video'),
+        { ...VIDEO_ARGS, confirmationToken: preview.data.confirmationToken },
+        ctx
+      );
+      assert.equal(done.data.ok, true);
+      assert.equal(done.data.video.bunnyVideoId, 'bunny-9');
+      assert.equal(destructiveCalls, 1);
+      assert.equal(auditCalls.at(-1).metadata.stage, 'confirmed');
+      assert.equal(stub.rows.get(Number(preview.data.confirmationToken)).status, 'CONSUMED');
+
+      const replay = await execute(
+        getDefinition('delete_video'),
+        { ...VIDEO_ARGS, confirmationToken: preview.data.confirmationToken },
+        ctx
+      );
+      assert.equal(replay.data.ok, false);
+      assert.equal(replay.data.reason, 'CONFIRMATION_MISMATCH');
+      assert.equal(destructiveCalls, 1, 'a spent token must never delete twice');
+    } finally {
+      bunnyVideoService.deleteVideo = original;
+    }
+  });
+
+  it('the confirm path refuses every stale token BEFORE resolving the target', async () => {
+    // Foreign admin and unknown id → NOT_FOUND (no ownership oracle; and the
+    // gate-only prisma THROWS if a refused call dares to look the video up).
+    const { stub, token } = await issuedVideoToken();
+    const foreign = await execute(getDefinition('delete_video'), { ...VIDEO_ARGS, confirmationToken: token }, {
+      prisma: gateOnlyPrisma(stub),
+      adminId: 777,
+    });
+    assert.equal(foreign.data.reason, 'CONFIRMATION_NOT_FOUND');
+
+    const ghost = await execute(getDefinition('delete_video'), { ...VIDEO_ARGS, confirmationToken: '999999' }, {
+      prisma: gateOnlyPrisma(stub),
+      adminId: ADMIN_ID,
+    });
+    assert.equal(ghost.data.reason, 'CONFIRMATION_NOT_FOUND');
+
+    // A token issued for a DIFFERENT tool must not authorise this one.
+    const crossed = await issuedVideoToken();
+    crossed.stub.rows.get(Number(crossed.token)).toolName = 'delete_course';
+    const hijack = await execute(getDefinition('delete_video'), { ...VIDEO_ARGS, confirmationToken: crossed.token }, {
+      prisma: gateOnlyPrisma(crossed.stub),
+      adminId: ADMIN_ID,
+    });
+    assert.equal(hijack.data.reason, 'CONFIRMATION_MISMATCH');
+
+    // Expiry: refused, and the row's bookkeeping still flips to EXPIRED.
+    const stale = await issuedVideoToken();
+    stale.stub.rows.get(Number(stale.token)).expiresAt = new Date(Date.now() - 1000);
+    const expired = await execute(getDefinition('delete_video'), { ...VIDEO_ARGS, confirmationToken: stale.token }, {
+      prisma: gateOnlyPrisma(stale.stub),
+      adminId: ADMIN_ID,
+    });
+    assert.equal(expired.data.reason, 'CONFIRMATION_EXPIRED');
+    assert.equal(stale.stub.rows.get(Number(stale.token)).status, 'EXPIRED');
+
+    // Args drift: the token authorises the HASH of what was previewed, nothing else.
+    const drifted = await issuedVideoToken();
+    const moved = await execute(
+      getDefinition('delete_video'),
+      { videoSlug: 'oth123abc456', confirmationToken: drifted.token },
+      { prisma: gateOnlyPrisma(drifted.stub), adminId: ADMIN_ID }
+    );
+    assert.equal(moved.data.reason, 'CONFIRMATION_MISMATCH');
+
+    // A malformed token never reaches the gate at all — the schema refuses it first.
+    await assert.rejects(
+      () =>
+        execute(getDefinition('delete_video'), { ...VIDEO_ARGS, confirmationToken: 'abc' }, {
+          prisma: gateOnlyPrisma(approvalStub()),
+          adminId: ADMIN_ID,
+        }),
+      (err) => err instanceof AgentToolError && err.code === 'INVALID_ARGS',
+      'a non-numeric token must be rejected as an argument error'
+    );
+  });
+
+  it('refuses a confirmation made inside the SAME turn as its preview (handoff C1)', async () => {
+    // The hole this closes: a preview and its confirmation inside ONE turn means the
+    // model approved its own request — so prompt-injected student text (an essay, a
+    // notification body) could delete without the admin ever answering. The turn stamp
+    // is server-set, which is why a model argument cannot move it.
+    const bunnyVideoService = require('../src/services/bunnyVideoService');
+    const original = bunnyVideoService.deleteVideo;
+    let destructiveCalls = 0;
+    bunnyVideoService.deleteVideo = async () => {
+      destructiveCalls += 1;
+      return { id: 5, bunnyVideoId: 'bunny-9' };
+    };
+    try {
+      const stub = approvalStub();
+      const ctx = {
+        prisma: { ...stub, bunnyVideo: { findUnique: async () => previewableVideo } },
+        adminId: ADMIN_ID,
+        conversationId: 12,
+        turnStartedAt: new Date().toISOString(),
+      };
+      const preview = await execute(getDefinition('delete_video'), VIDEO_ARGS, ctx);
+      assert.equal(preview.data.stage, 'PREVIEW');
+      const token = preview.data.confirmationToken;
+
+      const sameTurn = await execute(
+        getDefinition('delete_video'),
+        { ...VIDEO_ARGS, confirmationToken: token },
+        ctx
+      );
+      assert.equal(sameTurn.data.ok, false);
+      assert.equal(sameTurn.data.reason, 'CONFIRMATION_SAME_TURN');
+      assert.equal(destructiveCalls, 0, 'a same-turn confirmation must never delete');
+      assert.equal(
+        stub.rows.get(Number(token)).status,
+        'PENDING',
+        'the refusal must not spend the token the admin was shown'
+      );
+      assert.equal(auditCalls.at(-1).action, 'VIDEO_DELETE_REFUSED');
+
+      // The SAME token still works in a LATER turn, because the guard is about WHEN the
+      // confirmation arrives — not a poisoned token the admin could never use.
+      const nextTurn = await execute(
+        getDefinition('delete_video'),
+        { ...VIDEO_ARGS, confirmationToken: token },
+        { ...ctx, turnStartedAt: new Date(Date.now() + 60_000).toISOString() }
+      );
+      assert.equal(nextTurn.data.ok, true);
+      assert.equal(destructiveCalls, 1);
+      assert.equal(auditCalls.at(-1).action, 'VIDEO_DELETE', 'the executed deletion keeps the historical name');
+    } finally {
+      bunnyVideoService.deleteVideo = original;
+    }
+  });
+
+  it('a confirmation token is bound to the conversation that issued it', async () => {
+    const { stub, token } = await issuedVideoToken();
+    const elsewhere = await execute(
+      getDefinition('delete_video'),
+      { ...VIDEO_ARGS, confirmationToken: token },
+      { prisma: gateOnlyPrisma(stub), adminId: ADMIN_ID, conversationId: 77 }
+    );
+    assert.equal(elsewhere.data.ok, false);
+    assert.equal(elsewhere.data.reason, 'CONFIRMATION_MISMATCH');
+    assert.equal(stub.rows.get(Number(token)).status, 'PENDING', 'another thread spends nothing');
+  });
+
+  it('broadcast_notification previews the REAL audience and only tokens a sendable one', async () => {
+    const notificationService = require('../src/services/notifications/notificationService');
+    const original = notificationService.resolveAudience;
+    notificationService.resolveAudience = async () => [1, 2, 3];
+    try {
+      const args = { title: 'صيانة الأسبوع', audience: { kind: 'all' }, expectedRecipients: 3 };
+      const ctx = { prisma: approvalStub(), adminId: ADMIN_ID };
+
+      const preview = await execute(getDefinition('broadcast_notification'), args, ctx);
+      assert.equal(preview.data.stage, 'PREVIEW');
+      assert.equal(preview.data.preview.recipients, 3, 'the admin confirms against the real count');
+
+      // Audience drift is NOT a blank cheque: run() re-resolves the audience and
+      // still enforces expectedRecipients, so a preview token cannot over-send.
+      notificationService.resolveAudience = async () => [1, 2, 3, 4];
+      const drift = await execute(
+        getDefinition('broadcast_notification'),
+        { ...args, confirmationToken: preview.data.confirmationToken },
+        ctx
+      );
+      assert.equal(drift.data.ok, false);
+      assert.equal(drift.data.reason, 'RECIPIENT_COUNT_MISMATCH');
+
+      // The cap: an audience over the stated ceiling never earns a token at all.
+      const capped = await execute(getDefinition('broadcast_notification'), { ...args, maxRecipients: 2 }, ctx);
+      assert.equal(capped.data.ok, false);
+      assert.equal(capped.data.reason, 'TOO_MANY_RECIPIENTS');
+      assert.equal(capped.data.confirmationToken, undefined);
+
+      // Phase 3.1 (F3): a WRONG count is answered at the preview itself — the same guard
+      // run() applies. A token issued for an audience nobody confirmed could only ever
+      // come back as CONFIRMATION_MISMATCH, costing the admin a second round trip.
+      const wrongCount = await execute(
+        getDefinition('broadcast_notification'),
+        { ...args, expectedRecipients: 99 },
+        ctx
+      );
+      assert.equal(wrongCount.data.ok, false);
+      assert.equal(wrongCount.data.reason, 'RECIPIENT_COUNT_MISMATCH');
+      assert.equal(wrongCount.data.confirmationToken, undefined, 'no token for an unconfirmed audience');
+    } finally {
+      notificationService.resolveAudience = original;
     }
   });
 
@@ -274,10 +622,12 @@ describe('agent CRUD tools — P2b semantics', () => {
       assert.equal(result.data.ok, false);
       assert.equal(result.data.reason, 'VIDEO_NOT_FOUND');
       assert.equal(destructiveCalls, 0, 'an unknown slug must never reach the destructive call');
-      // The refusal is still EVIDENCE: an attempt to delete a video is recorded
-      // against the tool's own audit action, so a failed or mistaken request is
-      // visible in the trail rather than silently disappearing.
-      assert.equal(auditCalls.at(-1).action, 'VIDEO_DELETE');
+      // The refusal is still EVIDENCE: an attempt to delete a video is recorded against
+      // the tool's own audit action, so a failed or mistaken request is visible in the
+      // trail rather than silently disappearing. Since Phase 3.1 that row is named for the
+      // STAGE it happened in (a preview that found nothing to delete is still a preview),
+      // so neither it nor a refused confirmation can ever be counted as a deletion.
+      assert.equal(auditCalls.at(-1).action, 'VIDEO_DELETE_PREVIEW');
       assert.equal(auditCalls.at(-1).targetType, 'video');
       assert.equal(auditCalls.at(-1).metadata.via, 'agent');
     } finally {
@@ -290,7 +640,9 @@ describe('agent CRUD tools — P2b semantics', () => {
       getDefinition('delete_user'),
       { userSlug: STUDENT_SLUG },
       approved({
-        user: { findUnique: async () => ({ id: ADMIN_ID, slug: STUDENT_SLUG, name: 'المشرف', role: 'ADMIN' }) },
+        user: {
+          findUnique: async () => ({ id: ADMIN_ID, slug: STUDENT_SLUG, name: 'المشرف', role: 'ADMIN', deletedAt: null }),
+        },
       })
     );
     assert.equal(self.data.reason, 'CANNOT_DELETE_SELF');
@@ -300,7 +652,13 @@ describe('agent CRUD tools — P2b semantics', () => {
       getDefinition('delete_user'),
       { userSlug: STUDENT_SLUG },
       approved({
-        user: { findUnique: async () => ({ id: 7, slug: STUDENT_SLUG, name: 'معلم', role: 'ADMIN' }) },
+        // Phase 8 re-pin: this fixture used to carry role 'ADMIN'. That is now a
+        // refusal in its own right (CANNOT_DELETE_ADMIN) and would short-circuit
+        // BEFORE the course-owner check this case exists to prove. It is a STUDENT
+        // here so the test still asserts what its own name says.
+        user: {
+          findUnique: async () => ({ id: 7, slug: STUDENT_SLUG, name: 'معلم', role: 'STUDENT', deletedAt: null }),
+        },
         course: { count: async () => 2 },
         $transaction: async () => {
           transactionCalls += 1;
@@ -311,6 +669,47 @@ describe('agent CRUD tools — P2b semantics', () => {
     assert.equal(owner.data.reason, 'USER_OWNS_COURSES');
     assert.equal(owner.data.ownedCourses, 2, 'the refusal tells the admin what is blocking it');
     assert.equal(transactionCalls, 0, 'nothing may be deleted while a course still references the user');
+  });
+
+  it('delete_user refuses another admin, and refuses a row that is already soft-deleted', async () => {
+    // Phase 8: the pre-Phase-8 code allowed deleting a DIFFERENT admin, which left
+    // an account nobody could reach through the UI to restore by hand.
+    const otherAdmin = await execute(
+      getDefinition('delete_user'),
+      { userSlug: STUDENT_SLUG },
+      approved({
+        user: {
+          findUnique: async () => ({ id: 8, slug: STUDENT_SLUG, name: 'مشرف تاني', role: 'ADMIN', deletedAt: null }),
+        },
+      })
+    );
+    assert.equal(otherAdmin.data.reason, 'CANNOT_DELETE_ADMIN');
+
+    let updates = 0;
+    const already = await execute(
+      getDefinition('delete_user'),
+      { userSlug: STUDENT_SLUG },
+      approved({
+        user: {
+          findUnique: async () => ({
+            id: 9,
+            slug: STUDENT_SLUG,
+            name: 'طالب',
+            role: 'STUDENT',
+            deletedAt: new Date('2026-09-01T00:00:00Z'),
+          }),
+          update: async () => {
+            updates += 1;
+          },
+        },
+      })
+    );
+    assert.equal(
+      already.data.reason,
+      'ALREADY_DELETED',
+      'a second delete must be a stated refusal, not a silent re-stamp that pushes the purge window out'
+    );
+    assert.equal(updates, 0, 'a refused re-delete must not write anything at all');
   });
 
   it('upsert_quiz rejects an invalid SurveyJS document through the REAL validator', async () => {

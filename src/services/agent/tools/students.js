@@ -58,7 +58,8 @@ const studentsCountByGrade = readTool({
     const grouped = await ctx.prisma.user.groupBy({
       by: ['grade'],
       _count: { _all: true },
-      where: { role },
+      // Phase 8 (FILTER): a soft-deleted student must not be counted anywhere.
+      where: { role, deletedAt: null },
     });
 
     const counts = new Map();
@@ -93,7 +94,8 @@ const studentsNewTrend = readTool({
     const counts = await Promise.all(
       buckets.map((bucket) =>
         ctx.prisma.user.count({
-          where: { role: 'STUDENT', createdAt: { gte: bucket.start, lt: bucket.end } },
+          // Phase 8 (FILTER): a new-student trend must not count deleted accounts.
+          where: { role: 'STUDENT', deletedAt: null, createdAt: { gte: bucket.start, lt: bucket.end } },
         })
       )
     );
@@ -127,6 +129,10 @@ const studentSearch = readTool({
     const query = args.query.trim();
 
     const where = {
+      // Phase 8 (FILTER): search must never surface a soft-deleted account. The
+      // tombstoned email is skipped on purpose — matching deletedEmail here would
+      // let a deleted student be found by the address the delete just freed.
+      deletedAt: null,
       OR: [
         { name: { contains: query, mode: 'insensitive' } },
         { phoneNumber: { contains: query } },
@@ -180,8 +186,11 @@ const studentProfileSummary = readTool({
   cacheTtlSeconds: 30,
   run: async (args, ctx) => {
     const prisma = ctx.prisma;
-    const user = await prisma.user.findUnique({
-      where: { slug: args.userSlug },
+    const user = await prisma.user.findFirst({
+      // Phase 8 (FILTER): a soft-deleted student must not be reachable by the
+      // agent's profile read — findFirst rather than findUnique because the extra
+      // predicate is not part of a unique index.
+      where: { slug: args.userSlug, deletedAt: null },
       select: {
         id: true,
         slug: true,
@@ -279,7 +288,10 @@ const studentPerformanceRanking = readTool({
     // groupBy cannot join User, so names come from ONE follow-up findMany keyed by id.
     const users = page.length
       ? await prisma.user.findMany({
-          where: { id: { in: page.map((row) => row.userId) } },
+          // Phase 8 (FILTER): names come back only for rows that still exist —
+          // a soft-deleted student drops out of the ranking instead of being
+          // rendered with a placeholder.
+          where: { id: { in: page.map((row) => row.userId) }, deletedAt: null },
           select: { id: true, slug: true, name: true, grade: true },
         })
       : [];

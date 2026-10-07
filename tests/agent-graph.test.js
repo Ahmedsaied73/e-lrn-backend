@@ -20,8 +20,16 @@ const assert = require('node:assert/strict');
 const { AIMessage, HumanMessage } = require('@langchain/core/messages');
 const config = require('../src/config/env');
 const prisma = require('../src/config/db');
-const { toolNames: allToolNames } = require('../src/services/agent/tools');
-const { createAgentGraph, finalAnswerText, toolCallSummary, countToolCalls } = require('../src/services/agent/graph');
+const { readDefinitions, actionDefinitions, toolNames: allToolNames } = require('../src/services/agent/tools');
+const {
+  createAgentGraph,
+  finalAnswerText,
+  toolCallSummary,
+  countToolCalls,
+  buildSystemPrompt,
+  formatCairoDate,
+  MEMORY_BLOCK_LABEL,
+} = require('../src/services/agent/graph');
 
 let threadCounter = 0;
 function threadId(label) {
@@ -38,6 +46,7 @@ function scriptedModel(script) {
       calls.push({
         messageCount: messages.length,
         toolNames: tools.map((t) => t.name),
+        firstMessage: messages[0],
         lastMessage: messages[messages.length - 1],
       });
       const next = script.shift();
@@ -130,7 +139,7 @@ test('the tool budget is enforced, and the refused calls are answered explicitly
   }
 });
 
-test('the model cannot mutate anything by asking: no approval, no action', async () => {
+test('the model cannot mutate anything it cannot attribute: visibility is not authority', async () => {
   const agentConfig = config.aiAgent;
   const originalAllow = agentConfig.allowMutations;
   // Arm the mutations switch so the action tools are even VISIBLE to the model —
@@ -144,9 +153,11 @@ test('the model cannot mutate anything by asking: no approval, no action', async
       toolCall(actionName, { userSlug: 'aaaaaaaaaaaa', courseSlug: 'bbbbbbbbbbbb' }, 'call_action'),
       textAnswer('تم.'),
     ]);
-    // The resolver deliberately grants NOTHING: this is an unapproved request.
+    // Phase 3: authority IS attribution. The resolver deliberately grants NO
+    // adminId — the tool layer must refuse before it ever resolves a target,
+    // so the model sees the typed refusal, never a mutation result.
     const { graph, hasMutatingTools } = createAgentGraph({
-      resolveToolContext: () => ({ prisma, adminId: 1 }),
+      resolveToolContext: () => ({ prisma }),
       invokeModel: model.invokeModel,
     });
     assert.equal(hasMutatingTools, true);
@@ -158,8 +169,9 @@ test('the model cannot mutate anything by asking: no approval, no action', async
 
     const toolMessages = result.messages.filter((m) => typeof m.getType === 'function' && m.getType() === 'tool');
     assert.equal(toolMessages.length, 1);
-    // The tool layer refused, and the refusal is what the model sees.
-    assert.match(String(toolMessages[0].content), /APPROVAL_REQUIRED|موافقة|requires human approval/i);
+    // The tool layer refused (unattributable call), and the refusal is what the
+    // model sees — the mutation never ran against any target.
+    assert.match(String(toolMessages[0].content), /ADMIN_REQUIRED/i);
     assert.doesNotMatch(String(toolMessages[0].content), /paymentStatus/);
   } finally {
     agentConfig.allowMutations = originalAllow;
@@ -188,82 +200,273 @@ test('the tool context resolver is told WHICH tool is asking, so authority can b
 });
 
 /**
- * Phase 4.5 — the tool SURFACE the model is shown.
+ * Phase 3.1 / handoff C1 — the turn boundary, END TO END through the graph.
  *
- * Binding all 28 read tools shipped ~7k tokens of schema per call against an 8k
- * tokens/minute free tier, so the agentic tier was structurally unable to answer
- * anything. The trim is what makes it work — and these tests exist because a silent
- * re-fattening would not fail anything else: the tier would just start 413ing again
- * in production while every other suite stayed green.
+ * The unit pins live in tests/agent-actions-crud.test.js; this one proves the wiring those
+ * units cannot see: a model that previews AND confirms inside a SINGLE turn is refused and
+ * nothing destructive runs. That pair is exactly what a prompt injection inside
+ * student-authored text (an essay, a notification body) would try to produce, and before
+ * this guard the only thing stopping it was a sentence in the prompt.
+ *
+ * The audit writer is swapped for a spy for the duration: a real preview or refusal row
+ * would otherwise be inserted into the shared database by a "unit" test.
  */
-test('the model is shown a SHORT tool surface, not the whole catalogue', async () => {
-  const model = scriptedModel([textAnswer('لا حاجة لأداة.')]);
-  const { graph, toolNames } = createAgentGraph({ resolveToolContext: ctx, invokeModel: model.invokeModel });
+test('a preview and its confirmation inside ONE turn cannot mutate anything', async () => {
+  const agentConfig = config.aiAgent;
+  const originalAllow = agentConfig.allowMutations;
+  const auditLog = require('../src/services/auditLog');
+  const bunnyVideoService = require('../src/services/bunnyVideoService');
+  const realRecord = auditLog.record;
+  const realDelete = bunnyVideoService.deleteVideo;
+  let deletions = 0;
+  agentConfig.allowMutations = true;
+  auditLog.record = async () => true;
+  bunnyVideoService.deleteVideo = async () => {
+    deletions += 1;
+    return { id: 9, bunnyVideoId: 'bunny-x' };
+  };
+
+  // AgentApproval stand-in: the same single-winner CAS the database runs.
+  const rows = new Map();
+  let nextId = 401;
+  const prismaStub = {
+    agentApproval: {
+      async create({ data }) {
+        const row = { id: nextId, ...data };
+        rows.set(nextId, row);
+        nextId += 1;
+        return row;
+      },
+      async findUnique({ where }) {
+        return rows.get(where.id) || null;
+      },
+      async updateMany({ where, data }) {
+        const row = rows.get(where.id);
+        if (!row || (where.status !== undefined && row.status !== where.status)) return { count: 0 };
+        Object.assign(row, data);
+        return { count: 1 };
+      },
+    },
+    bunnyVideo: {
+      findUnique: async () => ({
+        id: 9,
+        slug: 'vid123abc456',
+        title: 'فيديو',
+        status: 'READY',
+        course: { title: 'دورة' },
+        quiz: { title: 'اختبار' },
+        _count: { progress: 0 },
+      }),
+    },
+  };
+
+  /** The second step of the script: confirm with the token the FIRST call just returned. */
+  const confirmWithPreviewedToken = (messages) => {
+    const toolMessages = messages.filter((m) => typeof m.getType === 'function' && m.getType() === 'tool');
+    const payload = JSON.parse(String(toolMessages[toolMessages.length - 1].content));
+    return toolCall(
+      'delete_video',
+      { videoSlug: 'vid123abc456', confirmationToken: payload.data.confirmationToken },
+      'call_confirm'
+    );
+  };
+
+  try {
+    const model = scriptedModel([
+      toolCall('delete_video', { videoSlug: 'vid123abc456' }, 'call_preview'),
+      confirmWithPreviewedToken,
+      textAnswer('العملية متوقفة في انتظار تأكيدك.'),
+    ]);
+    // Stamped ONCE, outside the resolver, exactly as agentService does it: the resolver is
+    // invoked per TOOL CALL, so a `new Date()` inside it would re-stamp the turn for every
+    // call and the boundary would never be crossed (the guard would look correct and
+    // prove nothing).
+    const turnStartedAt = new Date().toISOString();
+    const { graph } = createAgentGraph({
+      resolveToolContext: () => ({
+        prisma: prismaStub,
+        adminId: 1,
+        conversationId: 3,
+        turnStartedAt,
+      }),
+      invokeModel: model.invokeModel,
+    });
+
+    const result = await graph.invoke(
+      { messages: [new HumanMessage('امسح الفيديو ده')] },
+      { configurable: { thread_id: threadId('same-turn') } }
+    );
+
+    const toolMessages = result.messages.filter((m) => typeof m.getType === 'function' && m.getType() === 'tool');
+    assert.equal(toolMessages.length, 2, 'the preview and its confirmation both had to run');
+    const preview = JSON.parse(String(toolMessages[0].content));
+    assert.equal(preview.data.stage, 'PREVIEW');
+    assert.match(String(preview.data.confirmationToken), /^\d+$/);
+    assert.match(String(toolMessages[1].content), /CONFIRMATION_SAME_TURN/);
+    assert.equal(deletions, 0, 'a same-turn confirmation must never reach the destructive call');
+    assert.equal([...rows.values()][0].status, 'PENDING', 'the token stays spendable for the admin reply');
+  } finally {
+    agentConfig.allowMutations = originalAllow;
+    auditLog.record = realRecord;
+    bunnyVideoService.deleteVideo = realDelete;
+  }
+});
+
+/**
+ * Phase 1 (v2 rebuild) — the tool SURFACE the model is shown.
+ *
+ * The Phase 4.5 shortlist that used to live here is GONE (handoff 3.1 + Decision #15):
+ * the surface is the catalogue, and AI_AGENT_ALLOW_MUTATIONS is the only filter. The two
+ * tests below pin both directions of that switch; the per-turn measurement the audit row
+ * carries is asserted with them, because that number is what the revisit trigger reads.
+ */
+const ACTION_NAMES = new Set(actionDefinitions.map((d) => d.name));
+
+/** Pins the mutation switch for one test: a developer .env must not decide what this proves. */
+function pinMutations(value) {
+  const original = config.aiAgent.allowMutations;
+  config.aiAgent.allowMutations = value;
+  return () => {
+    config.aiAgent.allowMutations = original;
+  };
+}
+
+test('binds every read tool and no action while mutations are off', async () => {
+  const restore = pinMutations(false);
+  try {
+    const model = scriptedModel([textAnswer('لا حاجة لأداة.')]);
+    const { graph, toolNames } = createAgentGraph({ resolveToolContext: ctx, invokeModel: model.invokeModel });
+
+    await graph.invoke(
+      { messages: [new HumanMessage('نظرة عامة')] },
+      { configurable: { thread_id: threadId('surface-reads') } }
+    );
+
+    const bound = model.calls[0].toolNames;
+    assert.ok(bound.includes('platform_overview'), 'a read tool must be on the surface');
+    assert.deepEqual(
+      [...bound].sort(),
+      readDefinitions.map((d) => d.name).sort(),
+      'the read catalogue is bound WHOLE — the keyword shortlist is gone'
+    );
+    assert.equal(bound.some((n) => ACTION_NAMES.has(n)), false, 'no action while the switch is off');
+    assert.deepEqual([...toolNames].sort(), [...bound].sort(), 'the executable catalogue follows the same switch');
+  } finally {
+    restore();
+  }
+});
+
+test('binds the WHOLE catalogue — actions included — for a question with no write verb', async () => {
+  // The definition of done for this phase: «إزيك؟» carries no imperative, and the Phase 4.5
+  // keyword heuristic would have hidden every action tool for exactly this message.
+  const restore = pinMutations(true);
+  try {
+    const model = scriptedModel([textAnswer('أهلاً!')]);
+    const { graph, turnMetrics } = createAgentGraph({ resolveToolContext: ctx, invokeModel: model.invokeModel });
+
+    await graph.invoke(
+      { messages: [new HumanMessage('إزيك؟')] },
+      { configurable: { thread_id: threadId('surface-armed') } }
+    );
+
+    const bound = model.calls[0].toolNames;
+    assert.equal(bound.length, readDefinitions.length + actionDefinitions.length, 'reads + actions, every turn');
+    assert.ok(bound.includes('delete_user'), 'even a destructive action is on the surface — the confirm gate is what stops it');
+    assert.ok(bound.every((n) => allToolNames().includes(n)), 'the model is never shown a tool outside the catalogue');
+
+    // The per-turn measurement the AGENT_TURN audit row carries (Decision Q3).
+    const metrics = turnMetrics();
+    assert.equal(metrics.modelCalls, 1, 'one text answer is one model call');
+    assert.equal(metrics.toolSurface.tools, bound.length, 'the measured surface is the bound surface');
+    assert.ok(metrics.toolSurface.chars > 0 && metrics.toolSurface.tokens > 0, 'the surface has a measured weight');
+  } finally {
+    restore();
+  }
+});
+
+test('the mutation switch, not the display surface, decides what the ToolNode can execute', async () => {
+  // Replaces "trimming the surface does not shrink the execution authority": the trim is
+  // gone, so the invariant is stated where it still bites — with the switch OFF an action is
+  // neither offered to the model nor present in the executable catalogue.
+  const restore = pinMutations(false);
+  try {
+    const model = scriptedModel([textAnswer('لا.')]);
+    const { graph, tools, toolNames } = createAgentGraph({ resolveToolContext: ctx, invokeModel: model.invokeModel });
+
+    await graph.invoke(
+      { messages: [new HumanMessage('مرحبا')] },
+      { configurable: { thread_id: threadId('authority') } }
+    );
+
+    assert.equal(toolNames.some((n) => ACTION_NAMES.has(n)), false, 'the switch keeps actions out of the catalogue');
+    assert.equal(tools.some((t) => ACTION_NAMES.has(t.name)), false, 'and out of the bound ToolNode');
+    assert.ok(model.calls[0].toolNames.every((n) => toolNames.includes(n)), 'never offer what cannot run');
+  } finally {
+    restore();
+  }
+});
+
+/* ------------------------------------------------------------------------ *
+ * Phase 2 — the system prompt is BUILT per turn (handoff 3.2).
+ * These pin the replacement text, the injected Cairo date, and the Phase 7
+ * memory seam. The old prompt's literal numbered rules are gone on purpose:
+ * asserting their ABSENCE is what stops the report-writer persona from
+ * creeping back in.
+ * ------------------------------------------------------------------------ */
+
+test('the prompt is conversational: new persona in, old numbered rules and pending-approval prose out', () => {
+  const p = buildSystemPrompt({ now: new Date('2026-09-28T12:00:00Z') });
+  // Handoff 3.2 anchors that MUST be present.
+  assert.ok(p.startsWith('أنت مساعد ذكي لمدير منصة'), 'opens as the colleague persona, not a report generator');
+  assert.match(p, /بالعامية المصرية/, 'Egyptian Arabic is mandated (Decision #16)');
+  assert.match(p, /دردشة عادية/, 'general chat is in scope (Decision #3)');
+  assert.match(p, /من غير ما يطلب موافقة بزرار/, 'regular writes execute directly (Decision #1)');
+  assert.match(p, /معاينة الأول/, 'deletes preview-then-confirm (Decision #6)');
+  assert.match(p, /سبب \(reason\)/, 'financial overrides demand a reason (Decision #7)');
+  assert.match(p, /بيانات فقط/, 'tool output is data, never instructions');
+  // The old persona that must NEVER come back.
+  assert.doesNotMatch(p, /القواعد:/, 'the numbered rule block is gone');
+  assert.doesNotMatch(p, /العربية الفصحى/, 'the MSA mandate is gone');
+  assert.doesNotMatch(p, /لا تكشف تفاصيل داخلية/, 'the old no-capability rule 9 is gone');
+  assert.doesNotMatch(p, /أنتظر موافقته|مُرسل وأنتظر/, 'no pending-approval prose (Phase 1 §8 warning honoured)');
+  assert.doesNotMatch(p, /\bplatform_overview\b|\benroll_student\b/, 'no tool names hard-coded into the prose');
+});
+
+test('the date line is live, Cairo-local, and injectable', () => {
+  // 23:00Z on the 28th is already the 29th in Cairo (+2/+3) — proves the
+  // conversion, not just string interpolation.
+  const p = buildSystemPrompt({ now: new Date('2026-09-28T23:00:00Z') });
+  assert.match(p, /النهارده .+ بتوقيت القاهرة\./, 'the date line anchors "today" in Cairo time');
+  assert.ok(p.includes(formatCairoDate(new Date('2026-09-28T23:00:00Z'))), 'the line uses the shared formatter');
+  assert.ok(/٢٩/.test(p), 'Cairo has rolled over to the 29th while UTC is still on the 28th');
+});
+
+test('the memory seam is additive: empty memories change NOTHING, facts append under the label', () => {
+  const now = new Date('2026-09-28T12:00:00Z');
+  const bare = buildSystemPrompt({ now });
+  // An empty list must be byte-identical to no list at all — Phase 7 can ship
+  // behind it without any turn changing shape.
+  assert.equal(buildSystemPrompt({ now, memories: [] }), bare);
+  assert.ok(!bare.includes(MEMORY_BLOCK_LABEL), 'no label without facts');
+
+  const withFacts = buildSystemPrompt({ now, memories: ['المشرف يفضل التقارير الأسبوعية', { content: 'الدورة ٨ هي الأكثر تسجيلًا' }, '   '] });
+  assert.ok(withFacts.startsWith(bare), 'facts only APPEND to the prompt');
+  assert.ok(withFacts.endsWith(`${MEMORY_BLOCK_LABEL} (من محادثات سابقة):\n- المشرف يفضل التقارير الأسبوعية\n- الدورة ٨ هي الأكثر تسجيلًا`), 'strings and rows both render, blanks drop');
+});
+
+test('agentNode feeds the model a freshly built prompt, not a frozen constant', async () => {
+  const model = scriptedModel([textAnswer('أهلاً!')]);
+  const { graph } = createAgentGraph({ resolveToolContext: ctx, invokeModel: model.invokeModel });
 
   await graph.invoke(
-    { messages: [new HumanMessage('نظرة عامة')] },
-    { configurable: { thread_id: threadId('trim') } }
+    { messages: [new HumanMessage('إزيك؟')] },
+    { configurable: { thread_id: threadId('prompt-live') } }
   );
 
-  const bound = model.calls[0].toolNames;
-  assert.ok(
-    bound.length < toolNames.length,
-    `the surface was not trimmed at all: ${bound.length} of ${toolNames.length}`
-  );
-  assert.ok(bound.length <= 8, `the surface must stay small, got ${bound.length}: ${bound.join(', ')}`);
-  assert.ok(bound.includes('platform_overview'), 'the core tool must be on the surface');
-  assert.equal(model.calls[0].toolNames.join(','), bound.join(','), 'the surface must be stable within a turn');
-});
-
-test('a tool the question names is exposed even though it is not core', async () => {
-  const model = scriptedModel([
-    toolCall('payment_issues', { windowDays: 30 }, 'call_pay'),
-    textAnswer('لا توجد مشاكل دفع.'),
-  ]);
-  const { graph, selectFor } = createAgentGraph({ resolveToolContext: ctx, invokeModel: model.invokeModel });
-
-  const result = await graph.invoke(
-    { messages: [new HumanMessage('مشاكل الدفع')] },
-    { configurable: { thread_id: threadId('surface') } }
-  );
-
-  assert.ok(
-    model.calls[0].toolNames.includes('payment_issues'),
-    `the model must be shown the tool the question is about, got: ${model.calls[0].toolNames.join(', ')}`
-  );
-  assert.deepEqual(toolCallSummary(result), ['payment_issues'], 'and it must actually run');
-  // WHY it was on the surface matters as much as that it was: 'router' (the fast
-  // path would have chosen it) or a lexical score both mean "chosen for THIS
-  // question", whereas 'core' would mean it was only there by accident.
-  assert.notEqual(
-    selectFor('مشاكل الدفع').reasons.payment_issues,
-    'core',
-    'payment_issues must be selected because the question is about it'
-  );
-});
-
-test('trimming the surface does not shrink the execution authority', async () => {
-  // The shortlist is a DISPLAY decision; the ToolNode still holds the full
-  // catalogue, so the guards (row caps, redaction, the approval gate) apply to
-  // every tool exactly as before. If this ever fails, the surface has started
-  // deciding what is executable — which would make a prompt an authority.
-  const model = scriptedModel([
-    toolCall('admin_audit_recent', { windowDays: 7 }, 'call_audit'),
-    textAnswer('تم.'),
-  ]);
-  const { graph, selectFor } = createAgentGraph({ resolveToolContext: ctx, invokeModel: model.invokeModel });
-
-  const exposed = selectFor('مرحبا').names;
-  assert.equal(
-    exposed.includes('admin_audit_recent'),
-    false,
-    'precondition: this tool is NOT on the surface for an unrelated question'
-  );
-
-  const result = await graph.invoke(
-    { messages: [new HumanMessage('مرحبا')] },
-    { configurable: { thread_id: threadId('authority') } }
-  );
-  assert.deepEqual(toolCallSummary(result), ['admin_audit_recent'], 'the tool node still executes it');
+  const sys = model.calls[0].firstMessage;
+  assert.equal(sys.constructor.name, 'SystemMessage');
+  assert.ok(String(sys.content).startsWith('أنت مساعد ذكي لمدير منصة'), 'the live turn starts with the new persona');
+  assert.ok(String(sys.content).includes('بتوقيت القاهرة'), 'the per-turn date line reached the model');
+  assert.ok(String(sys.content).includes(formatCairoDate(new Date())), 'the date belongs to TODAY (the turn), not to boot time');
 });
 

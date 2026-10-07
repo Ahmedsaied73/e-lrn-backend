@@ -44,7 +44,12 @@ const getAllCourses = async (req, res) => {
     const skip = (page - 1) * take;
     const search = (req.query.search || '').trim();
 
-    const where = search ? { title: { contains: search, mode: 'insensitive' } } : {};
+    // Phase 8 (FILTER): the public course list must never show a soft-deleted
+    // course. Always present, so the empty-search and search branches cannot drift.
+    const where = {
+      deletedAt: null,
+      ...(search ? { title: { contains: search, mode: 'insensitive' } } : {}),
+    };
 
     // Cache-aside, 180s TTL. Raw rows are cached (host-independent); thumbnail
     // absolutization happens after, per request. Search text is hashed so keys
@@ -113,7 +118,7 @@ const getCourseById = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid course slug' });
     }
 
-    const courseRow = await prisma.course.findUnique({ where: { slug }, select: { id: true } });
+    const courseRow = await prisma.course.findUnique({ where: { slug, deletedAt: null }, select: { id: true } });
     if (!courseRow) return res.status(404).json({ success: false, error: 'Course not found' });
 
     // Numeric id stays internal — cache keys, gate checks and progress lookups
@@ -134,7 +139,9 @@ const getCourseById = async (req, res) => {
     const cacheKey = cache.buildKey('courses', 'byid', courseId, `u${userId}`);
     const cachedResult = await cache.withCache(cacheKey, 120, async () => {
       const row = await prisma.course.findUnique({
-        where: { id: courseId },
+        // Phase 8 (FILTER): belt-and-braces beside the slug lookup above — a course
+        // soft-deleted between the two reads must still 404, not serve its detail.
+        where: { id: courseId, deletedAt: null },
         include: {
           teacher: { select: { id: true, name: true, email: true } },
           // BunnyVideo is the only video system. No `url` is exposed here — a
@@ -255,7 +262,8 @@ const createCourse = async (req, res) => {
 
     if (!teacherId) {
       const admin = await prisma.user.findFirst({
-        where: { role: 'ADMIN' }
+        // Phase 8 (FILTER): never attribute a course to a soft-deleted account.
+        where: { role: 'ADMIN', deletedAt: null }
       });
 
       if (!admin) {
@@ -307,7 +315,10 @@ const updateCourse = async (req, res) => {
     }
 
     const existingCourse = await prisma.course.findUnique({
-      where: { slug }
+      // Phase 8 (FILTER): a soft-deleted course must not be editable — it is gone
+      // as far as every reader is concerned, so an update would write to a row
+      // nobody can see.
+      where: { slug, deletedAt: null }
     });
 
     if (!existingCourse) {
@@ -359,6 +370,15 @@ const deleteCourse = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid course slug' });
     }
 
+    // Phase 8 verdict: LEAVE (no `deletedAt: null`), and this one is deliberate.
+    // This is the admin CONSOLE's delete route, a separate surface from the chat
+    // tool: §8.2/§8.3 scope the soft delete to `delete_user` / `delete_course` in
+    // the agent, and §8.9's definition of done is phrased around "deleted from
+    // chat". The route below still hard-deletes, so it can reach a course that is
+    // ALREADY soft-deleted and finish the job. Filtering here would make the
+    // console unable to purge a course it can no longer see.
+    // OPEN QUESTION FOR THE OWNER (D5): see PHASE_8_REPORT.md §7 — should the
+    // console delete also become a soft delete for consistency?
     const existingCourse = await prisma.course.findUnique({
       where: { slug },
       select: {

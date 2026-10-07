@@ -815,8 +815,9 @@ const getCourseAssignments = async (req, res) => {
       return res.status(400).json({ error: 'Invalid courseId' });
     }
     // Verify the course exists
+    // Phase 8 (DENY-ACCESS): assignments are not reachable for a deleted course.
     const course = await prisma.course.findUnique({
-      where: { id: parseInt(courseId, 10) },
+      where: { id: parseInt(courseId, 10), deletedAt: null },
       select: { id: true, title: true }
     });
     if (!course) {

@@ -64,7 +64,11 @@ const searchContent = async (req, res) => {
     let videos = [];
     
     // Build the where clause for courses
+    // Phase 8 (FILTER): seeded here rather than at the call site so every branch —
+    // course search AND the video branch that reuses this clause via
+    // `course: { is: courseWhereClause }` — inherits the soft-delete rule.
     const courseWhereClause = {
+      deletedAt: null,
       AND: []
     };
     
@@ -272,7 +276,8 @@ const getTrendingCourses = async (req, res) => {
     const take = Number.isSafeInteger(parsedLimit) ? Math.max(1, Math.min(parsedLimit, 100)) : 10;
 
     // Build filter conditions
-    const whereClause = {};
+    // Phase 8 (FILTER): soft-deleted courses never appear in the browse grid.
+    const whereClause = { deletedAt: null };
 
     if (category) {
       whereClause.category = category;
@@ -378,6 +383,8 @@ const getRecommendedCourses = async (req, res) => {
     // Find similar courses (not enrolled) based on categories and grades
     const recommendedCourses = await prisma.course.findMany({
       where: {
+        // Phase 8 (FILTER): never recommend a soft-deleted course.
+        deletedAt: null,
         id: { notIn: enrolledCourseIds },
         OR: [
           { category: { in: userCategories } },
@@ -439,6 +446,9 @@ const getCategoriesList = async () => {
       category: true
     },
     where: {
+      // Phase 8 (FILTER): a category facet must not be kept alive by a course that
+      // no longer appears in any list.
+      deletedAt: null,
       category: {
         not: null
       }

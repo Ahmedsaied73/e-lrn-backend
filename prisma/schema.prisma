@@ -9,6 +9,22 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
+model AgentMemory {
+  // One freeform fact the agent believes it learned, in the agent's own words.
+  // Loaded at turn start, last-touched-first — never as live conversation history.
+  id                   Int               @id @default(autoincrement())
+  adminId              Int
+  content              String            @db.Text
+  sourceConversationId Int? // which conversation it was learned in, for traceability/audit
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+
+  admin              User               @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  sourceConversation AgentConversation? @relation(fields: [sourceConversationId], references: [id], onDelete: SetNull)
+
+  @@index([adminId, updatedAt(sort: Desc)])
+}
+
 model User {
   id                Int                @id @default(autoincrement())
   name              String?
@@ -30,6 +46,7 @@ certificates      Certificate[]
   notifications     Notification[] // In-app inbox rows (optional module)
   auditLogs         AuditLog[] // Append-only admin-action audit trail
   agentConversations AgentConversation[] // AI admin agent chat sessions (admin-owned)
+  agentMemories      AgentMemory[] // cross-conversation facts the agent saved (Phase 7)
   agentApprovals     AgentApproval[]     @relation("AgentApprovalAdmin") // HITL approvals this admin requested
   agentDecisions     AgentApproval[]     @relation("AgentApprovalDecider") // HITL approvals this admin decided on
   maxDevices         Int?                       // null = platform default (3); integer = custom admin grant
@@ -38,6 +55,18 @@ certificates      Certificate[]
   refreshTokenFamily String?           @db.VarChar(36) // groups rotated refresh tokens; null = quarantined/logged out everywhere
   createdAt         DateTime           @default(now())
   lastLoginAt       DateTime?
+  // Phase 8 soft-delete. The column/index shipped in Phase 7 (handoff 3.6); the two
+  // identifier columns below did NOT — Phase 7's comment claimed no second schema
+  // change would be needed, which was wrong: Q5 frees the email/phone at delete
+  // time, so the originals must be parked somewhere before the live columns are
+  // overwritten. Migration 20261002000000_soft_delete_identifiers adds them.
+  deletedAt         DateTime?
+  // Originals of the two UNIQUE identifiers, preserved so a restore is lossless.
+  // Null for every live row, so the unique constraints on email/phoneNumber are
+  // unaffected by deleted rows (Postgres allows many NULLs in a unique column).
+  deletedEmail      String?
+  deletedPhoneNumber String?
+  @@index([deletedAt])
 }
 
 model Course {
@@ -61,8 +90,13 @@ model Course {
   category      String?
   grade         Grade // Required field for Egyptian secondary school year
 
+  // Phase 8 will soft-delete here — the column and index ship in Phase 7 (handoff 3.6)
+  // so the soft-delete work never needs a second schema change.
+  deletedAt     DateTime?
+
   @@index([teacherId])
   @@index([grade])
+  @@index([deletedAt])
 }
 
 model Video {
@@ -130,8 +164,13 @@ model LearningPath {
 
 model Payment {
   id                 Int            @id @default(autoincrement())
-  user               User           @relation(fields: [userId], references: [id])
-  userId             Int
+  // Phase 8 / D1 (owner decision): a payment is a FINANCIAL RECORD and outlives the
+  // student. The purge job nulls this FK and deletes the user, so the row — amount,
+  // currency, provider reference, transaction id, timestamps — is retained forever.
+  // That is the only reason this relation is optional; every payment created through
+  // the app still has a user at creation time.
+  user               User?          @relation(fields: [userId], references: [id])
+  userId             Int?
   course             Course?        @relation(fields: [courseId], references: [id])
   courseId           Int?
   amount             Int            // Whole EGP (never piasters) — *100 conversion lives in the provider only
@@ -493,6 +532,7 @@ model AgentConversation {
   admin     User            @relation(fields: [adminId], references: [id], onDelete: Cascade)
   messages  AgentMessage[]
   approvals AgentApproval[]
+  memoriesSourced AgentMemory[] // facts the agent says it learned in this conversation
 
   @@index([adminId, updatedAt(sort: Desc)])
 }

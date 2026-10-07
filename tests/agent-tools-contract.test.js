@@ -7,10 +7,12 @@
  *   2. Read-only is the default: action tools exist but are NOT exposed to the
  *      model unless AI_AGENT_ALLOW_MUTATIONS is on.
  *   3. execute() validates arguments before doing anything else.
- *   4. execute() REFUSES any action without explicit, attributable approval —
- *      the guard behind the graph interrupt.
+ *   4. execute() REFUSES any mutation that cannot be attributed to an admin
+ *      (ADMIN_REQUIRED), and the destructive tools (kind 'confirm') never mutate
+ *      until they spend a confirmationToken their own preview issued (Phase 3).
  *   5. Every payload leaving a tool is email-redacted and carries meta.
- *   6. The LangChain wrapper keeps the approval gate (it is not a bypass).
+ *   6. The LangChain wrapper keeps the attribution/confirmation gates (it is not
+ *      a bypass).
  *
  * Run: npm test
  */
@@ -26,13 +28,7 @@ const {
   listDefinitions,
   getDefinition,
   toLangChainTools,
-  selectToolSet,
-  selectDefinitions,
   approximateSchemaTokens,
-  TOOL_LEXICON,
-  TOOL_DESCRIPTION_TOKENS,
-  CORE_TOOL_NAMES,
-  MAX_READ_TOOLS_PER_TURN,
 } = require('../src/services/agent/tools');
 const { execute, readTool, AgentToolError } = require('../src/services/agent/tools/_kit');
 const { wrapReadDefinition, createTtlCache, clearCache, cacheStats } = require('../src/services/agent/toolCache');
@@ -102,9 +98,9 @@ describe('agent tools — registry contract', () => {
     // when the CRUD tools landed and again when the deletes did — and turned this
     // suite red for reasons that had nothing to do with the contract).
     // Default posture: read-only. A mutation switch that is off must not leak
-    // mutating tools into the model's tool list.
+    // ANY mutating tool — neither an immediate action nor a confirm tool.
     assert.equal(listDefinitions().length, readDefinitions.length, 'actions hidden by default');
-    assert.equal(listDefinitions().some((d) => d.kind === 'action'), false, 'no action in the default list');
+    assert.equal(listDefinitions().some((d) => d.kind !== 'read'), false, 'no mutation in the default list');
     // Derived from the catalogue rather than hardcoded: the exact membership is
     // pinned by the allowlist test above, so a second literal count here only
     // produced churn (it was missed when the CRUD tools landed and turned this
@@ -128,12 +124,23 @@ describe('agent tools — registry contract', () => {
     }
   });
 
-  it('every action declares approval + an audit action and is never cached', () => {
+  it('every mutation is immediate-or-confirmable, audited, and never cached', () => {
     for (const def of actionDefinitions) {
-      assert.equal(def.kind, 'action', `${def.name} kind`);
-      assert.equal(def.requiresApproval, true, `${def.name} requiresApproval`);
+      assert.ok(
+        def.kind === 'action' || def.kind === 'confirm',
+        `${def.name} must be an action or a confirm tool, got ${def.kind}`
+      );
+      // Phase 3 (Decision #1): the static requiresApproval gate is GONE. Pinning
+      // it to false is a regression pin — a resurrected `true` here would quietly
+      // re-introduce the "tools exist but never execute" failure class.
+      assert.equal(def.requiresApproval, false, `${def.name} must not claim the removed approval gate`);
       assert.equal(def.cacheTtlSeconds, 0, `${def.name} must not be cached`);
       assert.match(def.audit.action, /^[A-Z][A-Z0-9_]+$/, `${def.name} audit action shape`);
+      if (def.kind === 'confirm') {
+        // A confirm tool without a read-only preview is not a confirm tool.
+        assert.equal(typeof def.preview, 'function', `${def.name} needs a read-only preview`);
+        assert.ok(def.schema.shape.confirmationToken, `${def.name} model schema must expose confirmationToken`);
+      }
     }
   });
 
@@ -143,16 +150,17 @@ describe('agent tools — registry contract', () => {
       'broadcast_notification',
       'create_course',
       'create_student',
-      'create_video',
       'delete_course',
       'delete_quiz',
       'delete_user',
       'delete_video',
       'enroll_student',
+      'forget_fact',
       'grade_essay',
       'grant_gate_exemption',
       'mark_enrollment_paid',
       'mark_video_failed',
+      'remember_fact',
       'reorder_course_videos',
       'reset_quiz_attempt',
       'retry_ai_grading',
@@ -170,31 +178,33 @@ describe('agent tools — execute() guards', () => {
   it('rejects invalid arguments before touching anything', async () => {
     const gradeEssay = getDefinition('grade_essay');
     await assert.rejects(
-      () => execute(gradeEssay, {}, { prisma: prismaStub(), approved: true, adminId: 1 }),
+      () => execute(gradeEssay, {}, { prisma: prismaStub(), adminId: 1 }),
       (err) => err instanceof AgentToolError && err.code === 'INVALID_ARGS'
     );
   });
 
-  it('refuses an action with no approval, and one that cannot be attributed', async () => {
+  it('refuses every mutation that cannot be attributed to an admin', async () => {
     const enroll = getDefinition('enroll_student');
-    // Well-formed slugs on purpose: the schema must accept them so the APPROVAL
+    // Well-formed slugs on purpose: the schema must accept them so the ATTRIBUTION
     // gate — not argument validation — is what refuses the call.
     const args = { userSlug: 'abc123abc123', courseSlug: 'def456def456' };
 
     await assert.rejects(
       () => execute(enroll, args, { prisma: prismaStub() }),
-      (err) => err.code === 'APPROVAL_REQUIRED',
-      'unapproved action must refuse'
+      (err) => err.code === 'ADMIN_REQUIRED',
+      'an unattributable action must refuse'
     );
     await assert.rejects(
-      () => execute(enroll, args, { prisma: prismaStub(), approved: true }),
-      (err) => err.code === 'APPROVAL_REQUIRED',
-      'approval without an admin id must refuse'
-    );
-    await assert.rejects(
-      () => execute(enroll, args, { prisma: prismaStub(), approved: true, adminId: '1' }),
-      (err) => err.code === 'APPROVAL_REQUIRED',
+      () => execute(enroll, args, { prisma: prismaStub(), adminId: '1' }),
+      (err) => err.code === 'ADMIN_REQUIRED',
       'a string admin id is not attributable'
+    );
+    // The same gate covers the destructive kind, and it fires BEFORE any DB call
+    // or preview row is possible: only agentApproval exists on this stub.
+    await assert.rejects(
+      () => execute(getDefinition('delete_video'), { videoSlug: 'abc123abc123' }, { prisma: prismaStub() }),
+      (err) => err.code === 'ADMIN_REQUIRED',
+      'an unattributable confirm call must refuse before even previewing'
     );
   });
 
@@ -215,7 +225,10 @@ describe('agent tools — execute() guards', () => {
     assert.equal(result.data.rows[0].name, 'أحمد', 'name allowed');
     assert.equal(result.data.rows[0].phoneNumber, '01001234567', 'phone allowed');
     assert.equal(result.meta.tool, '_redaction_probe');
-    assert.equal(result.meta.cappedAt, 50, 'read tools advertise the active row cap');
+    // The ACTIVE cap, not the factory default: this developer .env may pin a
+    // different AI_AGENT_MAX_TOOL_RESULT_ROWS, and the contract is that meta
+    // reports whatever the running config enforces (same lesson as pinMutations).
+    assert.equal(result.meta.cappedAt, envConfig.aiAgent.maxToolResultRows, 'read tools advertise the active row cap');
     assert.ok(!Number.isNaN(Date.parse(result.meta.asOf)), 'asOf is a timestamp');
   });
 
@@ -228,7 +241,7 @@ describe('agent tools — execute() guards', () => {
     assert.equal(result.data.users.students, 7, 'student count passes through');
     assert.equal(result.data.enrollments.unpaid, 0, 'paid/unpaid derived correctly');
     assert.equal(result.data.videos.byStatus.GRADED, 5, 'groupBy map built');
-    assert.equal(result.meta.cappedAt, 50, 'cap advertised even for aggregates');
+    assert.equal(result.meta.cappedAt, envConfig.aiAgent.maxToolResultRows, 'cap advertised even for aggregates');
   });
 
   it('rejects an argument the tool does not declare (no silently ignored filters)', async () => {
@@ -275,12 +288,12 @@ describe('agent tools — LangChain wrapper', () => {
     assert.deepEqual(names, [...readDefinitions.map((d) => d.name)].sort());
   });
 
-  it('cannot be used to bypass the approval gate', async () => {
+  it('cannot be used to bypass the attribution gate', async () => {
     const [enrollTool] = toLangChainTools([getDefinition('enroll_student')]);
     await assert.rejects(
       () => enrollTool.invoke({ userSlug: 'abc123abc123', courseSlug: 'def456def456' }),
-      (err) => /APPROVAL_REQUIRED|requires human approval/.test(String(err.message)),
-      'the wrapper must not swallow the approval refusal'
+      (err) => /ADMIN_REQUIRED/.test(String(err.message)),
+      'the wrapper must not swallow the attribution refusal'
     );
   });
 
@@ -396,150 +409,75 @@ describe('agent tools — model-facing JSON Schema (Gemini transport)', () => {
 });
 
 /**
- * Phase 4.5 — the per-question tool surface.
+ * Phase 1 (v2 rebuild) — the model-facing surface.
  *
- * These tests protect the agentic tier from being structurally dead again. That
- * failure is invisible in ordinary use: the tier answers "لا توجد أداة مناسبة" or
- * dies on a 413 and nothing in a normal unit run goes red. So the two properties
- * that actually matter are pinned here: the surface must be SMALL, and it must
- * still CONTAIN THE TOOL THE QUESTION IS ABOUT.
+ * The Phase 4.5 per-question shortlist is GONE (handoff 3.1 + Decision #15). It existed
+ * to fit an 8k-tokens/minute free tier, and it cost more than it bought: every mutating
+ * tool was hidden behind an Arabic imperative heuristic, and a false negative in that
+ * heuristic looks exactly like "the agent has no such tool" — the bug this rebuild exists
+ * to fix.
+ *
+ * The surface is now a function of the SWITCH, not of the wording, and these tests pin
+ * both directions of it. Its measured weight is what Decision Q3 records per turn in the
+ * AGENT_TURN audit row, so the number is asserted here too.
  */
-describe('agent tools — per-question selection (Phase 4.5)', () => {
-  it('never exposes an empty surface, and always the core set', () => {
-    for (const question of ['', 'مرحبا', 'zzz qqq', '؟؟؟', 'كيف حال المنصة؟']) {
-      const { reads, defs } = selectToolSet({ question });
-      assert.ok(reads.length > 0, `an empty surface for "${question}" makes the tier useless`);
-      for (const name of CORE_TOOL_NAMES) {
-        assert.ok(
-          defs.some((d) => d.name === name),
-          `core tool ${name} missing for "${question}"`
-        );
-      }
-    }
-  });
-
-  it('caps the read surface and hides actions unless mutations are armed', () => {
-    const { reads, actions } = selectToolSet({ question: 'اشتراكات الدورات' });
-    assert.ok(reads.length <= MAX_READ_TOOLS_PER_TURN, `read surface too wide: ${reads.length}`);
-    assert.equal(actions.length, 0, 'read-only by default');
-
-    const armed = selectToolSet({ question: 'اشتراكات الدورات', includeActions: true });
-    assert.equal(armed.actions.length, actionDefinitions.length, 'arming mutations must expose the whole action catalogue');
-    assert.equal(armed.defs.length, armed.reads.length + actionDefinitions.length);
-  });
-
-  /* REGRESSION (P0): the reported bug was the agent answering «لا تتوفر لدي أداة مناسبة…
-   * يمكنك تنفيذ هذا الإجراء من خلال لوحة التحكم الإدارية» to «سجّل الطالب … في دورة …».
-   * The cause was NOT the model: actions are opt-in in selectToolSet, and with the
-   * switch off the surface handed to the model contained zero action tools, so it
-   * answered honestly and pointed at the admin console instead.
-   *
-   * The assertion is deliberately generic (at least ONE action tool) rather than a
-   * named one: what must never regress is that arming mutations produces a bound
-   * action tool for a write question. The LangChain half matters because the graph
-   * binds the selected surface — action DEFINITIONS that never become bound tools
-   * are the failure mode being pinned here.
-   */
-  it('binds an action tool for a write question when mutations are armed', () => {
-    const restore = pinMutations(true);
-    try {
-      const { defs } = selectToolSet({
-        question: 'سجّل الطالب في دورة الفيزياء',
-        includeActions: true,
-      });
-      const actionNames = new Set(actionDefinitions.map((d) => d.name));
-      assert.ok(
-        defs.some((d) => actionNames.has(d.name)),
-        `a write question with mutations armed got no action tool: ${defs.map((d) => d.name).join(', ')}`
-      );
-
-      const bound = toLangChainTools(defs);
-      assert.ok(
-        bound.some((t) => actionNames.has(t.name)),
-        'the action definitions never reached the bound tool surface'
-      );
-    } finally {
-      restore();
-    }
-  });
-
-  it('keeps the write question action-free under the read-only default', () => {
-    // The inverse guard. Always binding the action catalogue would also make the
-    // test above pass, while destroying the property the rest of this file — and
-    // the tool layer's whole safety argument — rests on: read-only is the default.
+describe('agent tools — the model-facing surface (Phase 1)', () => {
+  it('binds the whole read catalogue, and no action, while mutations are off', () => {
     const restore = pinMutations(false);
     try {
-      const { defs } = selectToolSet({ question: 'سجّل الطالب في دورة الفيزياء' });
-      const actionNames = new Set(actionDefinitions.map((d) => d.name));
-      assert.equal(
-        defs.some((d) => actionNames.has(d.name)),
-        false,
-        'the read-only default must never carry an action tool'
-      );
+      const defs = listDefinitions();
+      assert.equal(defs.length, readDefinitions.length, 'every read tool is bound on every turn');
+      assert.equal(defs.some((d) => d.kind === 'action'), false, 'read-only is still the default');
     } finally {
       restore();
     }
   });
 
-  it('picks the tool the question is actually about', () => {
-    const cases = [
-      ['مشاكل الدفع', 'payment_issues'],
-      ['حالة الفيديوهات', 'video_pipeline_status'],
-      ['الطلاب غير النشطين', 'inactive_students'],
-      ['طابور التصحيح', 'grading_backlog'],
-      ['قائمة الدورات', 'courses_list'],
-    ];
-    for (const [question, expected] of cases) {
-      const names = selectDefinitions({ question }).map((d) => d.name);
-      assert.ok(
-        names.includes(expected),
-        `"${question}" should expose ${expected}, got: ${names.join(', ')}`
-      );
+  it('binds the WHOLE catalogue for any question once mutations are armed', () => {
+    const restore = pinMutations(true);
+    try {
+      const defs = listDefinitions();
+      assert.equal(defs.length, readDefinitions.length + actionDefinitions.length, 'reads + actions');
+      // No question is consulted any more, so no wording can drop a tool. The LangChain
+      // half is asserted because action DEFINITIONS that never become bound tools are the
+      // exact failure this phase removes.
+      const bound = toLangChainTools(defs).map((t) => t.name).sort();
+      const expected = [...readDefinitions, ...actionDefinitions].map((d) => d.name).sort();
+      assert.deepEqual(bound, expected, 'the bound surface must be the whole catalogue');
+    } finally {
+      restore();
     }
   });
 
-
-  it('keeps the tools a follow-up turn already used, even when the wording matches nothing', () => {
-    const names = selectDefinitions({
-      question: 'وماذا عن ذلك؟',
-      historyTools: ['video_engagement'],
-    }).map((d) => d.name);
-    assert.ok(
-      names.includes('video_engagement'),
-      `a follow-up must keep its context, got: ${names.join(', ')}`
-    );
-  });
-
-  it('is deterministic: the same question always gets the same surface', () => {
-    const first = selectDefinitions({ question: 'اشتراكات الدورات' }).map((d) => d.name);
-    const second = selectDefinitions({ question: 'اشتراكات الدورات' }).map((d) => d.name);
-    assert.deepEqual(first, second);
-  });
-
-  it('is SMALLER than the full catalogue — the reason this module exists', () => {
-    const full = approximateSchemaTokens(readDefinitions);
-    for (const question of ['اشتراكات الدورات', 'حالة الفيديوهات', 'طابور التصحيح', 'مرحبا']) {
-      const trimmed = approximateSchemaTokens(selectDefinitions({ question }));
-      assert.ok(
-        trimmed.tokens < full.tokens * 0.5,
-        `"${question}" ships ${trimmed.tokens} tokens vs ${full.tokens} for the full catalogue`
-      );
+  it('can bind every tool in the catalogue (nothing is undeliverable)', () => {
+    // Replaces the Phase 4.5 "leaves no read tool unreachable" test. Reachability used to
+    // depend on each tool's Arabic description carrying selectable vocabulary; it no
+    // longer does — every tool is bound — so what must hold now is that every tool can
+    // actually BE bound, i.e. carries a schema the transport can serialise and a
+    // description the model can read.
+    for (const def of [...readDefinitions, ...actionDefinitions]) {
+      assert.equal(typeof def.schema.safeParse, 'function', `${def.name} needs a Zod schema`);
+      const bound = toLangChainTools([def]);
+      assert.equal(bound.length, 1, `${def.name} must convert into a bound tool`);
+      assert.ok(bound[0].description && bound[0].description.length >= 20, `${def.name} needs a description`);
     }
-    const typical = approximateSchemaTokens(selectDefinitions({ question: 'اشتراكات الدورات' }));
-    console.log(
-      `      [tool surface] full catalogue ${full.chars} chars (~${full.tokens} tokens) -> ` +
-        `per-turn ${typical.chars} chars (~${typical.tokens} tokens)`
-    );
   });
 
-  it('leaves no read tool unreachable: every tool has selectable vocabulary', () => {
-    for (const def of readDefinitions) {
-      const hasPhrases = (TOOL_LEXICON.get(def.name) || []).length > 0;
-      const hasWords = (TOOL_DESCRIPTION_TOKENS.get(def.name) || []).length > 0;
-      assert.ok(
-        hasPhrases || hasWords,
-        `${def.name} has no selection vocabulary — the model could never be shown it`
+  it('measures the surface it binds, for the per-turn audit row (Decision Q3)', () => {
+    const restore = pinMutations(true);
+    try {
+      const readsOnly = approximateSchemaTokens(listDefinitions({ includeActions: false }));
+      const armed = approximateSchemaTokens(listDefinitions());
+      assert.ok(readsOnly.chars > 0, 'the read surface must have weight');
+      assert.ok(armed.chars > readsOnly.chars, 'the action half must be visible in the number');
+      assert.equal(readsOnly.tokens, Math.round(readsOnly.chars / 4));
+      assert.equal(armed.tokens, Math.round(armed.chars / 4));
+      console.log(
+        `      [tool surface] read-only ${readsOnly.chars} chars (~${readsOnly.tokens} tokens) | ` +
+          `all ${armed.chars} chars (~${armed.tokens} tokens)`
       );
+    } finally {
+      restore();
     }
   });
 });
