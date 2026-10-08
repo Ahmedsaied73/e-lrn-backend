@@ -36,12 +36,12 @@ const allowedOrigins = [
   ...(process.env.FRONTEND_URL || '').split(',').map((s) => s.trim()).filter(Boolean),
 ].filter(Boolean);
 
-// Allow configured origins plus any *.vercel.app deployment (prod, previews, PR aliases)
-const VERCEL_ORIGIN_RE = /^https:\/\/[a-z0-9-]+\.vercel\.app$/i;
-
+// SEC-001 fix: Never allow arbitrary *.vercel.app wildcards with credentials: true.
+// All trusted frontend origins (prod, preview, staging) must be explicitly
+// specified via FRONTEND_URL or the static localhost list.
 function isAllowedOrigin(origin) {
   if (!origin || typeof origin !== 'string') return false;
-  return allowedOrigins.includes(origin) || VERCEL_ORIGIN_RE.test(origin);
+  return allowedOrigins.includes(origin);
 }
 
 function getAllowedOrigins() {

@@ -187,7 +187,7 @@ async function runAgentTurn(graph, question, conversationId, emit, priorMessages
         // New AI tool calls → a progress event, deduplicated across snapshots.
         const calls = (message && message.tool_calls) || [];
         for (const call of calls) {
-          if (call && cal‌l.id && !seenToolCalls.has(call.id)) {
+          if (call && call.id && !seenToolCalls.has(call.id)) {
             seenToolCalls.add(call.id);
             emit({ type: 'tool_call', name: call.name, args: call.args });
           }

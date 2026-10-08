@@ -1,5 +1,6 @@
 const prisma = require('../config/db');
 const { isAdmin } = require('../middlewares');
+const quizService = require('../services/quizService');
 
 /**
  * Parse a positive-signed 32-bit integer from a route/body param.
@@ -153,19 +154,20 @@ const getAssignment = async (req, res) => {
       return res.status(404).json({ error: 'Assignment not found' });
     }
 
-    // Check if user is enrolled in the course (DB-verified admin bypass)
+    // Check if user is enrolled in the course (DB-verified admin bypass, SEC-005)
     if (!(await isAdmin(req))) {
       const enrollment = await prisma.enrollment.findFirst({
         where: {
           userId: userId,
-          courseId: assignment.video.courseId,
-          isPaid: true
+          courseId: assignment.video.courseId
         }
       });
 
-      if (!enrollment) {
+      const access = quizService.checkEnrollmentAccess(enrollment);
+      if (!access.ok) {
         return res.status(403).json({
-          error: 'You must be enrolled in this course to access this assignment'
+          error: access.reason || 'You must be enrolled in this course to access this assignment',
+          code: access.code
         });
       }
     }
@@ -278,19 +280,20 @@ const submitAssignment = async (req, res) => {
       }
     }
 
-    // Verify user is enrolled in the course (DB-verified admin bypass)
+    // Verify user is enrolled in the course (DB-verified admin bypass, SEC-005)
     if (!(await isAdmin(req))) {
       const enrollment = await prisma.enrollment.findFirst({
         where: {
           userId: userId,
-          courseId: assignment.video.courseId,
-          isPaid: true
+          courseId: assignment.video.courseId
         }
       });
 
-      if (!enrollment) {
+      const access = quizService.checkEnrollmentAccess(enrollment);
+      if (!access.ok) {
         return res.status(403).json({
-          error: 'You must be enrolled in this course to submit assignments'
+          error: access.reason || 'You must be enrolled in this course to submit assignments',
+          code: access.code
         });
       }
     }

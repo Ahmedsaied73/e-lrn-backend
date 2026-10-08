@@ -1,7 +1,6 @@
 const prisma = require('../config/db');
 const { 
-  getYoutubeStreamUrl, 
-  getHLSStreamInfo 
+  getYoutubeStreamUrl 
 } = require('../utils/youtubeApi');
 const { 
   generatePlayerHTML, 
@@ -219,23 +218,6 @@ const getCoursePlayer = async (req, res) => {
     res.status(500).json({ error: 'Failed to generate course player' });
   }
 };
-
-/**
- * Format duration in seconds to human readable format
- * @param {number} seconds - Duration in seconds
- * @returns {string} Formatted duration (HH:MM:SS)
- */
-function formatDuration(seconds) {
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const secs = seconds % 60;
-  
-  if (hours > 0) {
-    return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  } else {
-    return `${minutes}:${secs.toString().padStart(2, '0')}`;
-  }
-}
 
 module.exports = {
   getVideoStreamUrl,

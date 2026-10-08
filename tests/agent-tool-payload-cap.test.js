@@ -29,6 +29,7 @@ const {
   finalize,
   readTool,
   actionTool,
+  maxRows,
   maxToolResultChars,
   trimPayloadToBudget,
 } = require('../src/services/agent/tools/_kit');
@@ -147,7 +148,7 @@ describe('agent tool payload cap — a small payload is untouched', () => {
     assert.equal('payloadChars' in result.data, false, 'no size field on an untrimmed payload');
     assert.equal('payloadRows' in result.data, false, 'no row-count field on an untrimmed payload');
     assert.equal(result.meta.tool, '_payload_cap_probe', 'meta is unchanged');
-    assert.equal(result.meta.cappedAt, 50, 'the ROW cap is untouched by this change');
+    assert.equal(result.meta.cappedAt, maxRows(), 'the ROW cap is untouched by this change');
   });
 
   it('leaves a normal 50-row read completely alone at the default cap', () => {

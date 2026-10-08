@@ -4,6 +4,7 @@ const config = require('../config/env');
 const quizService = require('../services/quizService');
 const audit = require('../services/auditLog');
 const cache = require('../integrations/redis/cache');
+const { isAdmin: checkIsAdmin } = require('../middlewares/index');
 const { isValidSlug } = require('../utils/slugs');
 
 const selectWithoutPassword = {
@@ -154,7 +155,6 @@ const updateUser = async (req, res) => {
   const { userSlug } = req.params;
   const { name, email, password, grade, phoneNumber } = req.body;
   const requesterId = req.user.id;
-  const requesterRole = req.user.role;
 
   try {
     if (!isValidSlug(userSlug)) {
@@ -165,12 +165,13 @@ const updateUser = async (req, res) => {
       return res.status(404).json({ success: false, error: 'User not found.' });
     }
 
+    // SEC-004: Authoritative DB-verified admin check (never trust stale JWT claim)
+    const isAdmin = await checkIsAdmin(req);
+
     // Check if the requester is the user themselves or an admin
-    if (requesterId !== parsedUserId && requesterRole !== 'ADMIN') {
+    if (requesterId !== parsedUserId && !isAdmin) {
       return res.status(403).json({ success: false, error: "You do not have permission to update this user's data." });
     }
-
-    const isAdmin = requesterRole === 'ADMIN';
 
     // Self-service password/email changes must prove the current password —
     // otherwise a hijacked session becomes a permanent lockout. Admins acting
