@@ -110,13 +110,50 @@ async function validateOrRegisterDevice({ user, devicePayload, ip, userAgent }) 
       });
     }
 
-    const activeCount = await tx.userDevice.count({
+    // Fetch all active devices for this user
+    const activeDevices = await tx.userDevice.findMany({
       where: {
         userId: user.id,
         revokedAt: null,
       },
+      orderBy: {
+        lastActiveAt: 'desc',
+      },
     });
 
+    // Check if there is an existing logged-out device matching this hardware profile
+    // (e.g. user logged out, and browser updated or storage was refreshed)
+    const loggedOutCandidate = activeDevices.find((d) => {
+      // Must be a previously authenticated device that is now logged out
+      if (d.refreshToken !== null || !d.refreshTokenFamily) return false;
+
+      // Never match on unknown OS/browser fallbacks
+      if (!d.os || d.os === 'Unknown OS' || !parsed.os || parsed.os === 'Unknown OS') return false;
+      if (!d.browser || d.browser === 'Unknown Browser' || !parsed.browser || parsed.browser === 'Unknown Browser') return false;
+
+      const sameType = d.deviceType === parsed.deviceType;
+      const sameOs = d.os === parsed.os || d.os.split(' ')[0] === parsed.os.split(' ')[0];
+      const sameBrowserFamily = d.browser === parsed.browser || d.browser.split(' ')[0] === parsed.browser.split(' ')[0];
+      return sameType && sameOs && sameBrowserFamily;
+    });
+
+    if (loggedOutCandidate) {
+      return await tx.userDevice.update({
+        where: { id: loggedOutCandidate.id },
+        data: {
+          deviceIdentifier: deviceId,
+          deviceName: parsed.deviceName,
+          deviceType: parsed.deviceType,
+          browser: parsed.browser,
+          os: parsed.os,
+          ipAddress: ip,
+          userAgent: userAgent || loggedOutCandidate.userAgent,
+          lastActiveAt: new Date(),
+        },
+      });
+    }
+
+    const activeCount = activeDevices.length;
     const maxAllowed = user.maxDevices || config.deviceBinding.maxDevicesPerStudent || 3;
 
     if (activeCount >= maxAllowed) {
@@ -176,7 +213,7 @@ async function unbindDevice(req, userId, deviceIdentifier) {
     throw new AppError('الجهاز غير موجود أو تم إلغاء ربطه بالفعل.', 404, 'DEVICE_NOT_FOUND');
   }
 
-  const updated = await prisma.userDevice.update({
+  await prisma.userDevice.update({
     where: { id: device.id },
     data: {
       revokedAt: new Date(),

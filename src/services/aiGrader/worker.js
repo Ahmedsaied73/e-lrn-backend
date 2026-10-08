@@ -278,6 +278,11 @@ function startAiGradingWorker(options = {}) {
   const { Worker } = require('bullmq');
   const { createRedisConnection } = require('../../integrations/redis/redisClient');
   const providerFactory = options.providerFactory || defaultProviderFactory;
+  const concurrency =
+    options.concurrency ||
+    (Number.isSafeInteger(Number(process.env.AI_GRADER_CONCURRENCY)) && Number(process.env.AI_GRADER_CONCURRENCY) > 0
+      ? Number(process.env.AI_GRADER_CONCURRENCY)
+      : 2);
   worker = new Worker(
     QUEUE_NAME,
     (job) => processGradingJob(job, providerFactory),
@@ -285,7 +290,7 @@ function startAiGradingWorker(options = {}) {
       // BullMQ mandates maxRetriesPerRequest: null (blocking semantics) —
       // always a dedicated connection, never the shared cache client.
       connection: createRedisConnection({ maxRetriesPerRequest: null }),
-      concurrency: 2,
+      concurrency,
     }
   );
   worker.on('failed', (job, err) => {
@@ -294,7 +299,7 @@ function startAiGradingWorker(options = {}) {
   worker.on('error', (err) => {
     logWarn('ai.worker.error', { error: err && err.message });
   });
-  logInfo('ai.worker.started', { queue: QUEUE_NAME, concurrency: 2 });
+  logInfo('ai.worker.started', { queue: QUEUE_NAME, concurrency });
   return worker;
 }
 

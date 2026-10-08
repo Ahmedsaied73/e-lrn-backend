@@ -5,7 +5,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { jwt: jwtConfig } = require('../config/env');
 const { createToken, createRefreshToken, hashRefreshToken, createRefreshTokenFamily } = require('../utils');
-const { accessTokenCookieOptions, refreshTokenCookieOptions } = require('../config/cookie');
+const { accessTokenCookieOptions, refreshTokenCookieOptions, deviceIdCookieOptions } = require('../config/cookie');
 const { getLockState, recordFailure, clearFailures } = require('../integrations/redis/accountLockout');
 const { randomBase36Slug } = require('../utils/slugs');
 const { createSemaphore } = require('../utils/concurrency');
@@ -153,6 +153,7 @@ async function login(req, res) {
     // Set HttpOnly Cookies on Response.
     res.cookie('accessToken', token, accessTokenCookieOptions);
     res.cookie('refreshToken', refreshToken, refreshTokenCookieOptions);
+    res.cookie('elrn_device_id', device.deviceIdentifier, deviceIdCookieOptions);
 
     return res.json({ success: true, data: { user: payload } });
   } catch (error) {
@@ -241,6 +242,9 @@ async function register(req, res) {
       res.cookie('accessToken', token, accessTokenCookieOptions);
       res.cookie('refreshToken', refreshToken, refreshTokenCookieOptions);
     }
+    if (device) {
+      res.cookie('elrn_device_id', device.deviceIdentifier, deviceIdCookieOptions);
+    }
 
     return res.status(201).json({ success: true, message: 'User registered successfully.', data: { user: payload } });
   } catch (error) {
@@ -308,11 +312,11 @@ async function refreshToken(req, res) {
     const user = await prisma.user.findUnique({
       // Phase 8 (REJECT-AS-DELETED): a soft-deleted account must not be able to
       // roll its session forward.
-      where: { id: decoded.id, deletedAt: null },
-      select: { id: true, email: true, name: true, role: true, maxDevices: true, refreshToken: true, refreshTokenFamily: true },
+      where: { id: decoded.id },
+      select: { id: true, email: true, name: true, role: true, maxDevices: true, refreshToken: true, refreshTokenFamily: true, deletedAt: true },
     });
 
-    if (!user) {
+    if (!user || user.deletedAt) {
       return res.status(403).json({ success: false, error: 'Invalid or revoked refresh token.' });
     }
 

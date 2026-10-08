@@ -3,7 +3,7 @@
 const prisma = require('../config/db');
 const deviceService = require('../services/deviceService');
 const { AppError } = require('../utils/AppError');
-const { isValidSlug } = require('../utils/slugs');
+
 
 async function findUserBySlugOrId(identifier) {
   if (!identifier || typeof identifier !== 'string') return null;

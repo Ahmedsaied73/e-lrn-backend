@@ -26,7 +26,18 @@ const refreshTokenCookieOptions = {
   path: '/auth',
 };
 
+// Long-lived Device Identifier cookie options (10 Years)
+const deviceIdCookieOptions = {
+  httpOnly: false, // Accessible to client-side JS to sync with localStorage
+  secure: isProduction,
+  sameSite,
+  maxAge: 10 * 365 * 24 * 60 * 60 * 1000,
+  path: '/',
+};
+
 module.exports = {
   accessTokenCookieOptions,
   refreshTokenCookieOptions,
+  deviceIdCookieOptions,
 };
+

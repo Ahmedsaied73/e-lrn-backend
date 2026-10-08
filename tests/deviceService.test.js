@@ -214,6 +214,94 @@ test('deviceService: Student 3-device binding and Admin bypass', async (t) => {
     await prisma.user.delete({
       where: { id: student.id },
     }).catch(() => {});
+  }
+});
+
+test('deviceService: Re-login exact match and logged-out device reconciliation', async () => {
+  const student = await prisma.user.create({
+    data: {
+      name: 'Reconciliation Student',
+      email: 'reconcile_' + Date.now() + '@example.test',
+      phoneNumber: '010' + Math.floor(10000000 + Math.random() * 90000000),
+      password: 'hash',
+      slug: 'u_rec_' + Date.now(),
+      role: 'STUDENT',
+      grade: 'FIRST_SECONDARY',
+    },
+  });
+
+  const devId1 = 'dev_win_chrome_1_' + Date.now();
+  const devId2 = 'dev_win_chrome_2_' + Date.now();
+  const windowsUA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36';
+  const updatedWindowsUA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36';
+
+  try {
+    // 1. Initial login on Windows Chrome
+    const d1 = await deviceService.validateOrRegisterDevice({
+      user: student,
+      devicePayload: { id: devId1 },
+      ip: '79.127.178.82',
+      userAgent: windowsUA,
+    });
+    assert.equal(d1.deviceIdentifier, devId1);
+
+    // Set active refreshToken and family
+    await prisma.userDevice.update({
+      where: { id: d1.id },
+      data: { refreshToken: 'token_active_123', refreshTokenFamily: 'family_123' },
+    });
+
+    let devices = await deviceService.getStudentDevices(student.id);
+    assert.equal(devices.activeCount, 1);
+
+    // 2. User logs out: refreshToken is cleared to null
+    await prisma.userDevice.update({
+      where: { id: d1.id },
+      data: { refreshToken: null },
+    });
+
+    // 3. User logs back in with the SAME device ID -> exact match reuses same row
+    const d1Relogin = await deviceService.validateOrRegisterDevice({
+      user: student,
+      devicePayload: { id: devId1 },
+      ip: '79.127.178.82',
+      userAgent: windowsUA,
+    });
+    assert.equal(d1Relogin.id, d1.id);
+    assert.equal(d1Relogin.deviceIdentifier, devId1);
+
+    devices = await deviceService.getStudentDevices(student.id);
+    assert.equal(devices.activeCount, 1, 'Exact re-login should not create a new device');
+
+    // 4. User logs out again
+    await prisma.userDevice.update({
+      where: { id: d1.id },
+      data: { refreshToken: null },
+    });
+
+    // 5. User logs back in on the SAME PC, but browser updated to Chrome 155 with a new device ID devId2
+    const dReconciled = await deviceService.validateOrRegisterDevice({
+      user: student,
+      devicePayload: { id: devId2 },
+      ip: '79.127.178.81',
+      userAgent: updatedWindowsUA,
+    });
+
+    // It MUST reconcile with the logged-out row (same row ID), updating the deviceIdentifier!
+    assert.equal(dReconciled.id, d1.id, 'Should reconcile existing logged-out device row');
+    assert.equal(dReconciled.deviceIdentifier, devId2, 'Should update deviceIdentifier to current ID');
+
+    devices = await deviceService.getStudentDevices(student.id);
+    assert.equal(devices.activeCount, 1, 'Reconciliation should not increase active device count');
+
+  } finally {
+    await prisma.userDevice.deleteMany({
+      where: { userId: student.id },
+    });
+    await prisma.user.delete({
+      where: { id: student.id },
+    }).catch(() => {});
     await prisma.$disconnect();
   }
 });
+
