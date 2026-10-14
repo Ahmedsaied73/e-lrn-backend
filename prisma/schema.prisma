@@ -84,6 +84,8 @@ model Course {
   enrollments   Enrollment[]
   payments      Payment[]
   certificates  Certificate[]
+  accessBatches AccessBatch[]
+  accessCodes   AccessCode[]
   learningPaths LearningPath[] @relation("CoursesInPath")
   prerequisite  LearningPath[] @relation("Prerequisites")
   createdAt     DateTime       @default(now())
@@ -624,5 +626,52 @@ model UserDevice {
   @@index([userId, revokedAt])
   @@index([deviceIdentifier])
 }
+
+model AccessBatch {
+  id          Int          @id @default(autoincrement())
+  course      Course       @relation(fields: [courseId], references: [id])
+  courseId    Int
+  quantity    Int          // Number of codes generated in this batch
+  codeLength  Int          @default(8) // 8, 10, or 12
+  label       String?      // Optional batch name (e.g. "Center Cairo Oct 2026")
+  tags        String[]     @default([]) // Optional tags for distribution tracking
+  generatedBy Int          // Admin userId who generated
+  createdAt   DateTime     @default(now())
+  codes       AccessCode[]
+
+  @@index([courseId])
+  @@index([generatedBy])
+}
+
+model AccessCode {
+  id          Int              @id @default(autoincrement())
+  code        String           @unique // Canonical form: uppercase, no dashes
+  batch       AccessBatch      @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  batchId     Int
+  course      Course           @relation(fields: [courseId], references: [id])
+  courseId    Int              // Denormalized from batch for fast lookup
+  status      AccessCodeStatus @default(AVAILABLE)
+
+  // Redemption audit
+  redeemedBy  Int?             // Student userId
+  redeemedAt  DateTime?
+
+  // Revocation audit
+  revokedBy   Int?             // Admin userId
+  revokedAt   DateTime?
+
+  createdAt   DateTime         @default(now())
+
+  @@index([batchId])
+  @@index([courseId])
+  @@index([status, courseId]) // Composite: "how many available for course X?"
+}
+
+enum AccessCodeStatus {
+  AVAILABLE
+  REDEEMED
+  REVOKED
+}
+
 
 

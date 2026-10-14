@@ -418,6 +418,19 @@ if (enabledFeatures.payments) {
   }
 }
 
+// Access codes (offline sales / center cards): mounted ONLY when enabled.
+// Disabled means no /access-codes routes at all (never stubs). The lazy require
+// keeps core decoupled — deleting src/services/accessCodes + its routes
+// leaves boot green (module doctrine).
+if (enabledFeatures.accessCodes) {
+  try {
+    app.use('/access-codes', require('./src/routes/accessCodeRoutes'));
+    console.log('[INFO] Access codes router mounted: /access-codes');
+  } catch (err) {
+    console.warn('[WARN] Access codes router failed to mount:', err.message);
+  }
+}
+
 // ── AI admin agent (Phase 4) — REST routes mounted BEFORE global error handler ──
 // Disabled means no /admin/agent routes at all (never stubs), the same doctrine as
 // the payments and notifications modules above.

@@ -413,6 +413,7 @@ const config = {
     notifications: resolveFlag(process.env.NOTIFICATIONS_ENABLED, true),
     aiGrader: resolveFlag(process.env.AI_GRADER_ENABLED, true),
     payments: resolveFlag(process.env.PAYMENTS_ENABLED, false),
+    accessCodes: resolveFlag(process.env.ACCESS_CODES_ENABLED, false),
     // Second exception (default FALSE). Read at MOUNT time (app.js): while it is
     // false there is no agent router, no SSE endpoint and no LLM call at all.
     aiAgent: aiAgent.enabled,
