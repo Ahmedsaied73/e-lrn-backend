@@ -54,6 +54,7 @@ async function reconcilePayments() {
     log.warn('payment.reconcile.skip_overlap');
     return { expired: 0, checked: 0, settled: 0, skipped: true };
   }
+  isRunning = true;
   let lock;
   try {
     lock = await acquireLock(LOCK_KEY, LOCK_TTL_SECONDS);
@@ -63,10 +64,10 @@ async function reconcilePayments() {
     lock = { acquired: true, token: null }; // fail-open: process-local guard only
   }
   if (!lock.acquired) {
+    isRunning = false;
     log.warn('payment.reconcile.skip_lock_held');
     return { expired: 0, checked: 0, settled: 0, skipped: true };
   }
-  isRunning = true;
 
   try {
     const paymentService = require('../services/payments/paymentService');
@@ -111,7 +112,15 @@ async function reconcilePayments() {
 
       // 2. Still inside its window: ask the provider what actually happened —
       //    only when we hold a handle to ask about.
-      if (!row.providerReference && !row.providerTxnId) continue;
+      if (!row.providerReference && !row.providerTxnId) {
+        // Abandoned row that crashed before a provider reference was assigned.
+        const flipped = await prisma.payment.updateMany({
+          where: { id: row.id, status: 'PENDING' },
+          data: { status: 'EXPIRED', failureReason: 'Checkout session abandoned before initialization.' },
+        });
+        if (flipped.count > 0) expired += 1;
+        continue;
+      }
       checked += 1;
       try {
         const remote = await getProvider('paymob').fetchTransaction({

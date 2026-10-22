@@ -54,7 +54,7 @@ function toMinorUnits(amountMajor) {
  * On any throw the caller deletes the orphan PENDING row (matrix 18), so no
  * unreachable-gateway error can strand a checkout.
  */
-async function createCheckout({ amountMajor, currency, reference, description, customer, returnUrl, webhookUrl }) {
+async function createCheckout({ amountMajor, currency, reference, idempotencyKey, description, customer, returnUrl, webhookUrl }) {
   const cfg = paymobConfig();
   const amount = toMinorUnits(amountMajor);
   const who = customer || {};
@@ -88,6 +88,9 @@ async function createCheckout({ amountMajor, currency, reference, description, c
         // Paymob requires the literal word "Token", not "Bearer".
         Authorization: `Token ${cfg.secretKey}`,
         'Content-Type': 'application/json',
+        // Idempotency key: same reference => same Paymob intention on network retry.
+        // ponytail: reuses providerReference (already unique per checkout); no new DB column.
+        'Idempotency-Key': idempotencyKey || reference,
       },
       timeout: REQUEST_TIMEOUT_MS,
       validateStatus: () => true, // map errors ourselves

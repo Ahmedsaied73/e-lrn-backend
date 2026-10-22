@@ -108,14 +108,16 @@ async function expireIfStale(payment) {
     data: { status: 'EXPIRED', failureReason: 'Checkout session expired before payment.' },
   });
   if (flipped.count === 0) {
-    // A racing callback already claimed it — reread to report the truth.
-    return prisma.payment.findUnique({ where: { id: payment.id } });
+    // A racing callback already claimed it — reread to report the truth (preserving course relation).
+    return prisma.payment.findUnique({
+      where: { id: payment.id },
+      include: { course: { select: { slug: true, title: true } } },
+    });
   }
   log.info('payments.expired', { paymentId: payment.id });
-  const fresh = await prisma.payment.findUnique({ where: { id: payment.id } });
-  // PENDING→EXPIRED flip: a cached PENDING status must not outlive it.
-  await invalidateStatusCache(fresh);
-  return fresh;
+  await invalidateStatusCache(payment);
+  // ponytail: reuse payment object in-memory; avoids redundant query and preserves relations (course).
+  return { ...payment, status: 'EXPIRED', failureReason: 'Checkout session expired before payment.' };
 }
 
 /**
@@ -167,16 +169,23 @@ async function createCourseCheckout(userId, courseSlug, urls = {}) {
   });
   if (open) {
     const live = await expireIfStale(open);
-    if (live && live.status === 'PENDING' && live.providerCheckoutUrl) {
-      return {
-        paymentId: live.id,
-        providerReference: live.providerReference,
-        amountMajor: live.amount,
-        currency: live.currency,
-        checkoutUrl: live.providerCheckoutUrl,
-        expiresAt: live.intentionExpiresAt,
-        reused: true,
-      };
+    if (live && live.status === 'PENDING') {
+      if (live.providerCheckoutUrl) {
+        return {
+          paymentId: live.id,
+          providerReference: live.providerReference,
+          amountMajor: live.amount,
+          currency: live.currency,
+          checkoutUrl: live.providerCheckoutUrl,
+          expiresAt: live.intentionExpiresAt,
+          reused: true,
+        };
+      }
+      // If an open PENDING payment has NO checkout URL and is > 15s old (exceeds provider timeout),
+      // the creating process crashed or failed before URL write. Delete orphan to unblock checkout.
+      if (Date.now() - new Date(live.createdAt).getTime() > 15000) {
+        await prisma.payment.delete({ where: { id: live.id } }).catch(() => {});
+      }
     }
   }
 
@@ -196,7 +205,7 @@ async function createCourseCheckout(userId, courseSlug, urls = {}) {
     if (err && err.code === 'P2002') {
       // The winner writes its checkout URL in a SECOND update, so a brief
       // bounded poll avoids returning an empty URL to a racing client.
-      for (let attempt = 0; attempt < 5; attempt += 1) {
+      for (let attempt = 0; attempt < 8; attempt += 1) {
         const winner = await prisma.payment.findFirst({
           where: { userId, courseId: course.id, status: 'PENDING', provider: 'paymob' },
           orderBy: { createdAt: 'desc' },
@@ -212,7 +221,7 @@ async function createCourseCheckout(userId, courseSlug, urls = {}) {
             reused: true,
           };
         }
-        await new Promise((resolve) => setTimeout(resolve, 150));
+        await new Promise((resolve) => setTimeout(resolve, 200));
       }
       throw new AppError('A checkout is already being prepared. Please retry.', 409, 'CHECKOUT_IN_PROGRESS');
     }
@@ -227,6 +236,8 @@ async function createCourseCheckout(userId, courseSlug, urls = {}) {
       amountMajor: priceMajor,
       currency: payment.currency,
       reference: providerReference,
+      // providerReference is already unique per checkout row — reuse as idempotency key.
+      idempotencyKey: providerReference,
       description: course.title,
       customer: {
         firstName: names[0] || 'Student',
@@ -424,6 +435,25 @@ async function processProviderEvent({ event }) {
         action: 'PAYMENT_DUPLICATE_CHARGE',
         targetType: 'payment', targetId: payment.id,
         metadata: { userId: payment.userId, courseId: payment.courseId, amount: payment.amount, otherCompleted },
+      });
+      // Mark only the duplicate Payment row REFUNDED. Do NOT call refundPayment():
+      // that revokes enrollment access, but the original payment's enrollment is the
+      // legitimate one and must stay intact.
+      // ponytail: inline CAS — 3 lines vs importing a full revocation path that does the wrong thing.
+      prisma.payment.updateMany({
+        where: { id: payment.id, status: 'COMPLETED' },
+        data: { status: 'REFUNDED', refundedAt: new Date(), rawEvent: redactEvent(event.raw) },
+      }).then(() => audit.record(null, {
+        action: 'PAYMENT_REFUND_INITIATED',
+        targetType: 'payment', targetId: payment.id,
+        metadata: { userId: payment.userId, courseId: payment.courseId, providerTxnId: event.providerTxnId, reason: 'duplicate_charge' },
+      })).catch((err) => {
+        log.error('payments.event.duplicate_refund_failed', { paymentId: payment.id, error: String(err && err.message).slice(0, 200) });
+        audit.record(null, {
+          action: 'PAYMENT_REFUND_FAILED',
+          targetType: 'payment', targetId: payment.id,
+          metadata: { userId: payment.userId, courseId: payment.courseId, providerTxnId: event.providerTxnId, reason: 'duplicate_charge' },
+        }).catch(() => {});
       });
     }
   } catch {
