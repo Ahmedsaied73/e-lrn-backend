@@ -16,7 +16,7 @@
 const express = require('express');
 const router = express.Router();
 
-const { authenticateToken, authorizeAdmin } = require('../middlewares/index');
+const { authenticateToken, optionalAuth, authorizeAdmin } = require('../middlewares/index');
 const { ensureBunnySequentialAccess } = require('../middlewares/bunnySequentialAccess');
 const {
   createBunnyVideo,
@@ -40,10 +40,10 @@ router.post('/:courseSlug/videos', authenticateToken, authorizeAdmin(), createBu
 /**
  * GET /courses/:courseSlug/bunny-videos
  * List all Bunny videos for a course.
- * Auth: authenticateToken (Admin sees all; students see READY metadata)
+ * Auth: optionalAuth (Admin sees all; students/visitors see READY metadata)
  * Playback access remains protected by GET /videos/:videoSlug/playback.
  */
-router.get('/:courseSlug/bunny-videos', authenticateToken, listCourseBunnyVideos);
+router.get('/:courseSlug/bunny-videos', optionalAuth, listCourseBunnyVideos);
 
 /**
  * PUT /courses/:courseSlug/reorder

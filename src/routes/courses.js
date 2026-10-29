@@ -5,20 +5,24 @@ const {
   createCourse, 
   updateCourse, 
   deleteCourse,
-  getUserEnrolledCourses
+  getUserEnrolledCourses,
+  uploadCourseImage
 } = require('../controllers/coursesController');
-const { authenticateToken, authorizeAdmin } = require('../middlewares/index');
+const { authenticateToken, optionalAuth, authorizeAdmin } = require('../middlewares/index');
 
 const router = express.Router();
 
-// Route to get all courses (with authentication)
-router.get('/', authenticateToken, getAllCourses);
+// Route to get all courses (public catalog / optional auth)
+router.get('/', optionalAuth, getAllCourses);
 
 // Route to get courses that the user is enrolled in
 router.get('/enrolled', authenticateToken, getUserEnrolledCourses);
 
-// Route to get a specific course by slug (with authentication)
-router.get('/:slug', authenticateToken, getCourseById);
+// Route to upload course image/thumbnail (admin only)
+router.post('/images', authenticateToken, authorizeAdmin(), uploadCourseImage);
+
+// Route to get a specific course by slug or numeric ID (public outline / optional auth)
+router.get('/:slug', optionalAuth, getCourseById);
 
 // Route to create a new course (admin only)
 router.post('/', authenticateToken, authorizeAdmin, createCourse);

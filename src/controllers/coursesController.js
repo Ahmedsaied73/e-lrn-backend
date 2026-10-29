@@ -1,8 +1,21 @@
+const crypto = require('crypto');
+const busboy = require('busboy');
 const prisma = require('../config/db');
 const bunnyClient = require('../integrations/bunny/bunnyStreamClient');
 const cache = require('../integrations/redis/cache');
 const audit = require('../services/auditLog');
 const { isValidSlug, randomBase36Slug } = require('../utils/slugs');
+const { isSupabaseConfigured, getSupabaseAdmin, getSupabaseBucket } = require('../integrations/supabase/supabaseClient');
+
+const COURSE_IMAGE_MIME_TYPES = {
+  'image/jpeg': '.jpg',
+  'image/jpg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+};
+const COURSE_IMAGE_MAX_BYTES = 5 * 1024 * 1024; // 5MB
+
 
 /**
  * Strip numeric identifiers from nested User rows (public resource shape uses slug).
@@ -84,7 +97,7 @@ const getAllCourses = async (req, res) => {
     const coursesWithUrls = courses.map(course => ({
       ...toPublicCourse(course),
       thumbnail: course.thumbnail && !course.thumbnail.startsWith('http') 
-        ? `${baseUrl}/${course.thumbnail}` 
+        ? `${baseUrl}/${course.thumbnail.replace(/^\/+/, '')}` 
         : course.thumbnail
     }));
 
@@ -112,13 +125,16 @@ const getAllCourses = async (req, res) => {
 const getCourseById = async (req, res) => {
   try {
     const { slug } = req.params;
-    const userId = req.user.id;
+    const userId = req.user ? req.user.id : null;
 
-    if (!isValidSlug(slug)) {
+    let courseRow = null;
+    if (isValidSlug(slug)) {
+      courseRow = await prisma.course.findUnique({ where: { slug, deletedAt: null }, select: { id: true, slug: true } });
+    } else if (Number.isSafeInteger(Number(slug)) && Number(slug) > 0) {
+      courseRow = await prisma.course.findUnique({ where: { id: Number(slug), deletedAt: null }, select: { id: true, slug: true } });
+    } else {
       return res.status(400).json({ success: false, error: 'Invalid course slug' });
     }
-
-    const courseRow = await prisma.course.findUnique({ where: { slug, deletedAt: null }, select: { id: true } });
     if (!courseRow) return res.status(404).json({ success: false, error: 'Course not found' });
 
     // Numeric id stays internal — cache keys, gate checks and progress lookups
@@ -136,7 +152,8 @@ const getCourseById = async (req, res) => {
     // mirrors the existing per-user quiz-meta cache (quizController). Course
     // create/update/delete already invalidate all `v1:courses:*` keys via
     // delPrefix; enrollment/progress mutations del their own key below.
-    const cacheKey = cache.buildKey('courses', 'byid', courseId, `u${userId}`);
+    const userScope = userId ? `u${userId}` : 'anon';
+    const cacheKey = cache.buildKey('courses', 'byid', courseId, userScope);
     const cachedResult = await cache.withCache(cacheKey, 120, async () => {
       const row = await prisma.course.findUnique({
         // Phase 8 (FILTER): belt-and-braces beside the slug lookup above — a course
@@ -158,14 +175,14 @@ const getCourseById = async (req, res) => {
               position: true,
               // Scoped to the authenticated user only
               progress: {
-                where: { userId },
+                where: userId ? { userId } : { userId: -1 },
                 select: { completed: true, watchedAt: true }
               }
             }
           },
           // Scoped to the authenticated user only — never expose other users' enrollments
           enrollments: {
-            where: { userId }
+            where: userId ? { userId } : { userId: -1 }
           }
         }
       });
@@ -185,7 +202,7 @@ const getCourseById = async (req, res) => {
       return {
         course: row,
         progress: derivedProgress,
-        enrollment: row.enrollments[0] || null
+        enrollment: (row.enrollments && row.enrollments[0]) || null
       };
     });
 
@@ -197,7 +214,7 @@ const getCourseById = async (req, res) => {
     const baseUrl = `${req.protocol}://${req.get('host')}`;
 
     if (course.thumbnail && !course.thumbnail.startsWith('http')) {
-      course.thumbnail = `${baseUrl}/${course.thumbnail}`;
+      course.thumbnail = `${baseUrl}/${course.thumbnail.replace(/^\/+/, '')}`;
     }
 
     // Derive videos from the fetched course relation (no extra queries).
@@ -218,7 +235,7 @@ const getCourseById = async (req, res) => {
     // identifier); the raw bunnyVideos/enrollments relation arrays are stripped
     // (their public forms are `videos` + `enrollment`/`progress` below).
     const courseData = toPublicCourse((({ bunnyVideos: _bv, enrollments: _en, ...rest }) => rest)(course));
-    const enrollment = course.enrollments[0]
+    const enrollment = (course.enrollments && course.enrollments[0])
       ? (({ userId: _u, courseId: _c, ...rest }) => rest)(course.enrollments[0])
       : null;
 
@@ -300,6 +317,25 @@ const createCourse = async (req, res) => {
   }
 };
 
+async function removeCourseThumbnailBestEffort(thumbnailUrl) {
+  try {
+    if (!thumbnailUrl || typeof thumbnailUrl !== 'string') return;
+    const { isSupabaseConfigured: isConfigured, getSupabaseBucket: getBucket, getSupabaseAdmin: getAdmin } = require('../integrations/supabase/supabaseClient');
+    if (!isConfigured()) return;
+    const bucket = getBucket();
+    const marker = `/storage/v1/object/public/${bucket}/`;
+    if (thumbnailUrl.includes(marker)) {
+      const rawObj = thumbnailUrl.slice(thumbnailUrl.indexOf(marker) + marker.length);
+      const cleanObj = decodeURIComponent(rawObj.split('?')[0].split('#')[0]);
+      if (cleanObj) {
+        await getAdmin().storage.from(bucket).remove([cleanObj]);
+      }
+    }
+  } catch (cleanupErr) {
+    console.error('[removeCourseThumbnailBestEffort] error:', cleanupErr.message);
+  }
+}
+
 // Update an existing course
 const updateCourse = async (req, res) => {
   try {
@@ -332,19 +368,28 @@ const updateCourse = async (req, res) => {
       }
     }
 
+    const nextThumbnail = thumbnail !== undefined
+      ? (thumbnail && typeof thumbnail === 'string' && thumbnail.trim() ? thumbnail.trim() : 'https://via.placeholder.com/640x360?text=No+Thumbnail')
+      : undefined;
+
     const updateData = {
       title: title || undefined,
       description: description || undefined,
       price: price !== undefined ? Number(price) : undefined,
       grade: grade || undefined,
       category: category || undefined,
-      thumbnail: thumbnail || undefined
+      thumbnail: nextThumbnail
     };
 
     const updatedCourse = await prisma.course.update({
       where: { slug },
       data: updateData
     });
+
+    // Storage cleanup if thumbnail changed from an old Supabase image
+    if (nextThumbnail !== undefined && nextThumbnail !== existingCourse.thumbnail) {
+      await removeCourseThumbnailBestEffort(existingCourse.thumbnail);
+    }
 
     await cache.delPrefix('v1:courses:');
     await cache.del(cache.buildKey('search', 'cats'));
@@ -384,6 +429,7 @@ const deleteCourse = async (req, res) => {
       select: {
         id: true,
         title: true,
+        thumbnail: true,
         _count: { select: { videos: true, enrollments: true, certificates: true } }
       }
     });
@@ -468,11 +514,14 @@ const deleteCourse = async (req, res) => {
 
     // ── Storage cleanup (after DB success) ───────────────────────────────────
     // The cascade already deleted the Quiz rows, so their SurveyJS images are
-    // unreferenced. Remove them from the bucket best-effort.
+    // unreferenced. Remove them and the course thumbnail from the bucket best-effort.
     try {
       const { removeQuizImagesBestEffort } = require('../integrations/supabase/supabaseClient');
       for (const surveyJson of quizSurveyJsonList) {
         await removeQuizImagesBestEffort(surveyJson);
+      }
+      if (existingCourse.thumbnail) {
+        await removeCourseThumbnailBestEffort(existingCourse.thumbnail);
       }
     } catch (cleanupErr) {
       console.error('[deleteCourse] Storage cleanup error:', cleanupErr.message);
@@ -523,7 +572,7 @@ const getUserEnrolledCourses = async (req, res) => {
       // Public course shape (numeric id/teacherId hidden; slug is the identifier).
       const publicCourse = toPublicCourse(course);
       if (publicCourse.thumbnail && !publicCourse.thumbnail.startsWith('http')) {
-        publicCourse.thumbnail = `${baseUrl}/${publicCourse.thumbnail}`;
+        publicCourse.thumbnail = `${baseUrl}/${publicCourse.thumbnail.replace(/^\/+/, '')}`;
       }
       return {
         id: enrollment.id,
@@ -539,11 +588,120 @@ const getUserEnrolledCourses = async (req, res) => {
   }
 };
 
+/**
+ * POST /courses/images
+ * Admin-only. Accepts a single image (field 'image', 'thumbnail', or 'file'),
+ * uploads it to Supabase Storage bucket, and returns the public URL.
+ */
+async function uploadCourseImage(req, res) {
+  if (!isSupabaseConfigured()) {
+    return res.status(501).json({ success: false, error: 'Image upload is not configured' });
+  }
+
+  let bb;
+  try {
+    bb = busboy({ headers: req.headers, limits: { fileSize: COURSE_IMAGE_MAX_BYTES, files: 1 } });
+  } catch {
+    return res.status(400).json({ success: false, error: 'Invalid multipart request' });
+  }
+
+  let fileHandled = false;
+  let failure = null;
+  let uploadInFlight = false;
+  let responded = false;
+
+  const respond = (status, body) => {
+    if (responded) return undefined;
+    responded = true;
+    return res.status(status).json(body);
+  };
+
+  const respondFailure = () => {
+    if (failure === 'IMAGE_TOO_LARGE') return respond(413, { success: false, error: 'Image too large (max 5MB)' });
+    if (failure === 'INVALID_IMAGE_TYPE') return respond(415, { success: false, error: 'Only JPEG, PNG, WebP or GIF images are allowed' });
+    if (failure === 'IMAGE_UPLOAD_FAILED') return respond(502, { success: false, error: 'Image upload failed' });
+    return respond(500, { success: false, error: 'Image upload failed' });
+  };
+
+  bb.on('file', (fieldName, fileStream, info) => {
+    fileStream.on('error', () => { failure = failure || 'IMAGE_READ_FAILED'; });
+    if (failure) { fileStream.resume(); return; }
+    if (!['image', 'thumbnail', 'photo', 'file'].includes(fieldName)) {
+      fileStream.resume();
+      return;
+    }
+    const ext = COURSE_IMAGE_MIME_TYPES[(info.mimeType || '').toLowerCase()];
+    if (!ext) {
+      failure = 'INVALID_IMAGE_TYPE';
+      fileStream.resume();
+      return;
+    }
+    fileHandled = true;
+    const chunks = [];
+    let size = 0;
+    fileStream.on('data', (chunk) => {
+      if (failure) return;
+      size += chunk.length;
+      if (size > COURSE_IMAGE_MAX_BYTES) {
+        failure = 'IMAGE_TOO_LARGE';
+        fileStream.resume();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    fileStream.on('limit', () => {
+      failure = failure || 'IMAGE_TOO_LARGE';
+      fileStream.resume();
+    });
+    fileStream.on('end', async () => {
+      if (failure || responded) return;
+      uploadInFlight = true;
+      try {
+        const buffer = Buffer.concat(chunks);
+        const filename = `courses/${crypto.randomUUID()}${ext}`;
+        const sb = getSupabaseAdmin();
+        const upload = sb.storage
+          .from(getSupabaseBucket())
+          .upload(filename, buffer, { contentType: info.mimeType, upsert: false });
+        const { error } = await Promise.race([
+          upload,
+          new Promise((_, reject) => setTimeout(() => reject(new Error('storage timeout')), 30000)),
+        ]);
+        if (error) throw new Error(error.message);
+        const { data } = sb.storage.from(getSupabaseBucket()).getPublicUrl(filename);
+        respond(201, { success: true, data: { url: data.publicUrl } });
+      } catch (error) {
+        console.error('[CoursesController] uploadCourseImage failed:', error.message);
+        failure = 'IMAGE_UPLOAD_FAILED';
+        respondFailure();
+      } finally {
+        uploadInFlight = false;
+      }
+    });
+  });
+
+  bb.on('error', () => {
+    failure = failure || 'IMAGE_READ_FAILED';
+  });
+
+  bb.on('finish', () => {
+    if (responded || uploadInFlight) return;
+    if (failure) return respondFailure();
+    if (!fileHandled) {
+      return respond(400, { success: false, error: 'No image file field found in the request' });
+    }
+  });
+
+  req.pipe(bb);
+}
+
 module.exports = {
   getAllCourses,
   getCourseById,
   createCourse,
   updateCourse,
   deleteCourse,
-  getUserEnrolledCourses
+  getUserEnrolledCourses,
+  uploadCourseImage
 };
+

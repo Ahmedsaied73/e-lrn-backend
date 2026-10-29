@@ -386,12 +386,13 @@ const listCourseBunnyVideos = async (req, res, next) => {
   try {
     const { courseSlug } = req.params;
 
-    if (!isValidSlug(courseSlug)) {
+    const isNumericId = Number.isSafeInteger(Number(courseSlug)) && Number(courseSlug) > 0;
+    if (!isValidSlug(courseSlug) && !isNumericId) {
       return next(new AppError('Invalid course slug', 400, ErrorCodes.COURSE_NOT_FOUND));
     }
 
-    const userId = req.user.id;
-    const role = req.user.role;
+    const userId = req.user ? req.user.id : null;
+    const role = req.user ? req.user.role : 'STUDENT';
 
     const videos = await bunnyVideoService.listCourseVideos(courseSlug, userId, role);
 

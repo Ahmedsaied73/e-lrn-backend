@@ -593,16 +593,20 @@ async function deleteVideo(videoId) {
  * @returns {Promise<object[]>}
  */
 async function listCourseVideos(courseSlug, userId, role) {
-  if (!isValidSlug(courseSlug)) {
+  let course = null;
+  if (isValidSlug(courseSlug)) {
+    course = await prisma.course.findUnique({
+      where: { slug: courseSlug, deletedAt: null },
+      select: { id: true, slug: true },
+    });
+  } else if (Number.isSafeInteger(Number(courseSlug)) && Number(courseSlug) > 0) {
+    course = await prisma.course.findUnique({
+      where: { id: Number(courseSlug), deletedAt: null },
+      select: { id: true, slug: true },
+    });
+  } else {
     throw new AppError('Invalid course slug', 400, ErrorCodes.COURSE_NOT_FOUND);
   }
-
-  const course = await prisma.course.findUnique({
-    // Phase 8 (DENY-ACCESS): a soft-deleted course's videos must not be listed to
-    // anyone — the 404 below is what stops a student deep-link from resurrecting it.
-    where: { slug: courseSlug, deletedAt: null },
-    select: { id: true, slug: true },
-  });
 
   if (!course) {
     throw new AppError('Course not found', 404, ErrorCodes.COURSE_NOT_FOUND);
