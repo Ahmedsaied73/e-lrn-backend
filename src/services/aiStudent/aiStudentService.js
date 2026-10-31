@@ -80,8 +80,9 @@ async function sendMessage({ userId, sessionId, message }, deps = {}) {
 
   const options = {
     model: config.aiStudent && config.aiStudent.model,
+    fallbackModel: config.aiAgent && config.aiAgent.fallbackModel,
     temperature: (config.aiStudent && typeof config.aiStudent.temperature === 'number') ? config.aiStudent.temperature : 0.3,
-    maxOutputTokens: (config.aiStudent && config.aiStudent.maxOutputTokens) || 600,
+    maxOutputTokens: (config.aiStudent && config.aiStudent.maxOutputTokens) || 800,
   };
 
   // Invoke Gemini with failover

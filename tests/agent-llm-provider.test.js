@@ -135,6 +135,24 @@ test('a transient failure on the primary model fails over to the fallback MODEL'
   });
 });
 
+test('a transient failure on options.model fails over to options.fallbackModel or target fallback', async () => {
+  await withGemini(async () => {
+    const seen = [];
+    const outcome = await invokeWithFailover(
+      async (model, provider, modelId) => {
+        seen.push(modelId);
+        if (modelId === 'custom-primary') throw httpError(503, 'service unavailable');
+        return `answer from ${modelId}`;
+      },
+      { model: 'custom-primary', fallbackModel: 'custom-fallback' }
+    );
+
+    assert.deepEqual(seen, ['custom-primary', 'custom-fallback']);
+    assert.equal(outcome.model, 'custom-fallback');
+    assert.equal(outcome.attempts[0].model, 'custom-primary');
+  });
+});
+
 test('a permanent failure is NOT retried on the fallback attempt', async () => {
   await withGemini(async () => {
     const seen = [];

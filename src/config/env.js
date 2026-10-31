@@ -272,8 +272,8 @@ function resolveAiAgent() {
     // Do not "restore" a non-Flash or long-retired id: a retired one answers
     // 404 model_not_found, which the provider layer retires for the process and the
     // admin then sees as an outage.
-    primaryModel: process.env.AI_AGENT_MODEL_PRIMARY || 'gemini-3-flash-preview',
-    fallbackModel: process.env.AI_AGENT_MODEL_FALLBACK || 'gemini-3.1-flash-lite',
+    primaryModel: process.env.AI_AGENT_MODEL_PRIMARY || 'gemini-3.5-flash-lite',
+    fallbackModel: process.env.AI_AGENT_MODEL_FALLBACK || 'gemini-flash-lite-latest',
     // Budgets/caps — every one CLAMPED, because a typo in an env var must never
     // be able to turn one admin question into unbounded LLM/DB spend.
     maxToolCalls: clampAgentInt(process.env.AI_AGENT_MAX_TOOL_CALLS, 6, 1, 10),

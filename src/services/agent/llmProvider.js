@@ -323,16 +323,17 @@ async function invokeWithFailover(invoke, options = {}) {
 
   for (const target of ordered) {
     const isPrimary = target.key === primaryKey;
+    const modelId = isPrimary ? (options.model || target.model) : (options.fallbackModel || target.model);
     try {
-      const model = createModel(target.name, options.model || target.model, options);
-      const result = await invoke(model, target.name, options.model || target.model);
+      const model = createModel(target.name, modelId, options);
+      const result = await invoke(model, target.name, modelId);
       if (isPrimary) primaryCooldownUntil = 0;
-      return { result, provider: target.name, model: options.model || target.model, attempts };
+      return { result, provider: target.name, model: modelId, attempts };
     } catch (err) {
       const kind = classifyFailure(err);
       attempts.push({
         provider: target.name,
-        model: target.model,
+        model: modelId,
         status: statusOf(err),
         code: codeOf(err),
         retriable: kind === 'transient',
