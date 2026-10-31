@@ -272,8 +272,8 @@ function resolveAiAgent() {
     // Do not "restore" a non-Flash or long-retired id: a retired one answers
     // 404 model_not_found, which the provider layer retires for the process and the
     // admin then sees as an outage.
-    primaryModel: process.env.AI_AGENT_MODEL_PRIMARY || 'gemini-3.7-flash',
-    fallbackModel: process.env.AI_AGENT_MODEL_FALLBACK || 'gemini-3.6-flash',
+    primaryModel: process.env.AI_AGENT_MODEL_PRIMARY || 'gemini-3-flash-preview',
+    fallbackModel: process.env.AI_AGENT_MODEL_FALLBACK || 'gemini-3.1-flash-lite',
     // Budgets/caps — every one CLAMPED, because a typo in an env var must never
     // be able to turn one admin question into unbounded LLM/DB spend.
     maxToolCalls: clampAgentInt(process.env.AI_AGENT_MAX_TOOL_CALLS, 6, 1, 10),
@@ -377,6 +377,19 @@ function resolveFlag(rawValue, defaultValue) {
 // same frozen snapshot, so a mid-request env change can never split behaviour.
 const aiAgent = resolveAiAgent();
 
+function resolveAiStudent(agent) {
+  return {
+    subject: process.env.AI_STUDENT_SUBJECT || 'اللغة العربية',
+    platformName: process.env.AI_STUDENT_PLATFORM_NAME || 'أكاديمية التميز',
+    // Dynamic: read directly from Admin Agent primaryModel, NO hardcoded string or gemini-1.5-flash fallback
+    model: process.env.AI_STUDENT_MODEL || (agent && agent.primaryModel),
+    maxHistoryMessages: 20,
+    maxMessageChars: 500,
+    temperature: 0.3,
+    maxOutputTokens: 600,
+  };
+}
+
 const config = {
   jwt: {
     secret: process.env.JWTSECRET,
@@ -404,6 +417,7 @@ const config = {
   },
   aiGrader: resolveAiGrader(),
   aiAgent,
+  aiStudent: resolveAiStudent(aiAgent),
   sentry: {
     // Optional. Present → backend errors go to Sentry (src/config/sentry.js);
     // absent → that module no-ops. Never boot-critical.
