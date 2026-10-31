@@ -49,6 +49,7 @@ certificates      Certificate[]
   agentMemories      AgentMemory[] // cross-conversation facts the agent saved (Phase 7)
   agentApprovals     AgentApproval[]     @relation("AgentApprovalAdmin") // HITL approvals this admin requested
   agentDecisions     AgentApproval[]     @relation("AgentApprovalDecider") // HITL approvals this admin decided on
+  aiStudentMessages  AiStudentMessage[]
   maxDevices         Int?                       // null = platform default (3); integer = custom admin grant
   devices            UserDevice[]               // Relation to registered devices
   refreshToken      String?            @db.Text
@@ -673,5 +674,23 @@ enum AccessCodeStatus {
   REVOKED
 }
 
+// ─── AI student (landing page) ───────────────────────────────────────────────
 
+model AiStudentMessage {
+  id        Int           @id @default(autoincrement())
+  userId    Int
+  sessionId String
+  role      AiStudentRole
+  content   String        @db.Text
+  createdAt DateTime      @default(now())
 
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, sessionId, createdAt])
+  @@index([createdAt])
+}
+
+enum AiStudentRole {
+  USER
+  ASSISTANT
+}
