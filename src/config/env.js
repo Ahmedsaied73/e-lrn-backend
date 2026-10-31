@@ -386,7 +386,7 @@ function resolveAiStudent(agent) {
     maxHistoryMessages: 20,
     maxMessageChars: 500,
     temperature: 0.3,
-    maxOutputTokens: 600,
+    maxOutputTokens: Number(process.env.AI_STUDENT_MAX_OUTPUT_TOKENS) || 800,
   };
 }
 
