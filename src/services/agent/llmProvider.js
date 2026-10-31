@@ -51,7 +51,7 @@ const RETRIABLE_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI
  * WORDING rather than on a vendor name, and a future vendor should not need this file
  * edited to be classified correctly.
  */
-const MODEL_GONE_404_RE = /model_not_found|does not exist|no longer available|not found for API version|not supported for generateContent|is not found/i;
+const MODEL_GONE_404_RE = /model_not_found|does not exist|no longer available|not found for API version|not supported for generateContent|is not found|\[404 Not Found\]/i;
 const MODEL_GONE_400_RE = /invalid model|model_decommissioned|unsupported model|model_not_found/i;
 
 class LlmProviderError extends Error {
@@ -236,16 +236,16 @@ function safeMessage(err) {
  * parameter defaults to the primary id only so a direct caller (a diagnostic, a test)
  * cannot get `undefined` handed to the SDK.
  */
-function createModel(providerName, modelId = null) {
+function createModel(providerName, modelId = null, options = {}) {
   const agent = config.aiAgent;
   if (providerName === 'gemini') {
     const { ChatGoogleGenerativeAI } = require('@langchain/google-genai');
     return new ChatGoogleGenerativeAI({
       apiKey: agent.geminiApiKey,
       model: modelId || agent.primaryModel,
-      temperature: 0,
-      maxRetries: 0, // retries are OUR job: we switch model instead
-      maxOutputTokens: agent.maxAnswerTokens,
+      temperature: typeof options.temperature === 'number' ? options.temperature : 0,
+      maxRetries: typeof options.maxRetries === 'number' ? options.maxRetries : 0,
+      maxOutputTokens: typeof options.maxOutputTokens === 'number' ? options.maxOutputTokens : agent.maxAnswerTokens,
     });
   }
   throw new LlmProviderError('UNKNOWN_PROVIDER', `unknown provider "${providerName}"`);
@@ -301,7 +301,7 @@ function unusableDetail() {
  * busy". agentService.js branches on exactly this code, so ALL_PROVIDERS_FAILED must stay
  * the one code used for "the whole model tier is down".
  */
-async function invokeWithFailover(invoke) {
+async function invokeWithFailover(invoke, options = {}) {
   const targets = failoverTargets();
   if (!targets.length) {
     throw new LlmProviderError('NOT_CONFIGURED', 'no LLM provider is configured (set GEMINI_API_KEY)');
@@ -324,9 +324,10 @@ async function invokeWithFailover(invoke) {
   for (const target of ordered) {
     const isPrimary = target.key === primaryKey;
     try {
-      const result = await invoke(createModel(target.name, target.model), target.name, target.model);
+      const model = createModel(target.name, options.model || target.model, options);
+      const result = await invoke(model, target.name, options.model || target.model);
       if (isPrimary) primaryCooldownUntil = 0;
-      return { result, provider: target.name, model: target.model, attempts };
+      return { result, provider: target.name, model: options.model || target.model, attempts };
     } catch (err) {
       const kind = classifyFailure(err);
       attempts.push({
