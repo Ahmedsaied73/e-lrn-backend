@@ -385,6 +385,14 @@ app.use('/quizzes', quizRoutes);
 // ── Admin console (all routes behind authenticateToken + authorizeAdmin) ─────
 app.use('/admin', adminRoutes);
 
+// ── AI student (landing page) ───────────────────────────────────────────────
+try {
+  app.use('/ai-student', require('./src/routes/aiStudentRoutes'));
+  console.log('[INFO] AI student router mounted: /ai-student');
+} catch (err) {
+  console.warn('[WARN] AI student router failed to mount:', err.message);
+}
+
 // ── Optional modules mount only when enabled (see src/config/env.js) ───────
 // Disabled modules are not exposed at all (no stub routes, no handlers).
 let enabledFeatures = {};
