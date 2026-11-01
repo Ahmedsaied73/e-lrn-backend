@@ -47,7 +47,7 @@ const port = process.env.PORT || 3005;
 // `req.ip` is the proxy's address and the IP-keyed rate limiters + request
 // logger see a single shared IP under load. `1` = trust one hop only; override
 // with TRUST_PROXY for other topologies (e.g. "loopback" or a hop count).
-app.set('trust proxy', process.env.TRUST_PROXY || 1);
+app.set('trust proxy', process.env.NETLIFY ? true : (process.env.TRUST_PROXY || 1));
 
 // Initialize default admin on startup
 setupDefaultAdmin().catch(console.error);
@@ -141,6 +141,7 @@ app.use(helmet({
 // auth, the limiter is defense-in-depth. `keyGenerator` uses req.ip (already
 // resolved through `trust proxy`).
 const webhookLimiter = rateLimit({
+  validate: { ip: false },
   windowMs: 5 * 60 * 1000,
   max: 600,
   message: 'Too many webhook requests, please try again later.',
@@ -200,6 +201,7 @@ app.use(requestLogger);
 // (then a dead store throws → 503 RATE_LIMIT_STORE_UNAVAILABLE). failClosed mirrors
 // requireRedisRateLimit so both the throw and the 503 stay in lock-step.
 const limiter = rateLimit({
+  validate: { ip: false },
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 1000, // limit each IP to 1000 requests per windowMs
   message: 'Too many requests from this IP, please try again later.',
@@ -213,6 +215,7 @@ const limiter = rateLimit({
 // multi-tab rotation needs it); login/register keep 20 (brute-force posture).
 function makeAuthLimiter(prefix, max) {
   return rateLimit({
+    validate: { ip: false },
     windowMs: 15 * 60 * 1000, // 15 minutes
     max,
     message: 'Too many login attempts from this IP, please try again later.',
