@@ -75,6 +75,9 @@ async function hardDeleteCourse(courseId, { prisma: db, cleanupRemote }) {
   await db.$transaction(async (tx) => {
     // Children whose FK is Restrict are removed explicitly — a bare course.delete
     // throws P2003 for any course with rows.
+    await tx.accessCode.deleteMany({ where: { courseId } });
+    await tx.accessBatch.deleteMany({ where: { courseId } });
+    await tx.payment.updateMany({ where: { courseId }, data: { courseId: null } });
     await tx.video.deleteMany({ where: { courseId } });
     await tx.enrollment.deleteMany({ where: { courseId } });
     await tx.certificate.deleteMany({ where: { courseId } });

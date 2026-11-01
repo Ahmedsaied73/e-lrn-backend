@@ -467,6 +467,16 @@ const deleteCourse = async (req, res) => {
     const enrolledUserIds = enrolledStudentIds.map((e) => e.userId);
 
     await prisma.$transaction(async (prisma) => {
+      // Access codes & batches have RESTRICT foreign keys pointing to Course
+      await prisma.accessCode.deleteMany({ where: { courseId } });
+      await prisma.accessBatch.deleteMany({ where: { courseId } });
+
+      // Financial records outlive the course — unlink payments to satisfy FK
+      await prisma.payment.updateMany({
+        where: { courseId },
+        data: { courseId: null }
+      });
+
       if (existingCourse._count.videos > 0) {
         await prisma.video.deleteMany({ where: { courseId } });
       }
@@ -478,14 +488,8 @@ const deleteCourse = async (req, res) => {
       if (existingCourse._count.certificates > 0) {
         await prisma.certificate.deleteMany({ where: { courseId } });
       }
-      
-      // Update LearningPath associations without causing errors
-      await prisma.learningPath.updateMany({
-        where: { courses: { some: { id: courseId } } },
-        data: {} // This is just to trigger the many-to-many disconnect correctly if needed. Actually we should just fetch paths and disconnect.
-      });
 
-      // Fetch paths containing this course
+      // Fetch paths containing this course and disconnect
       const paths = await prisma.learningPath.findMany({
         where: { courses: { some: { id: courseId } } },
         select: { id: true }
@@ -495,6 +499,18 @@ const deleteCourse = async (req, res) => {
         await prisma.learningPath.update({
           where: { id: p.id },
           data: { courses: { disconnect: { id: courseId } } }
+        });
+      }
+
+      // Fetch paths where this course is a prerequisite and disconnect
+      const prereqPaths = await prisma.learningPath.findMany({
+        where: { prerequisites: { some: { id: courseId } } },
+        select: { id: true }
+      });
+      for (const p of prereqPaths) {
+        await prisma.learningPath.update({
+          where: { id: p.id },
+          data: { prerequisites: { disconnect: { id: courseId } } }
         });
       }
 
@@ -537,7 +553,11 @@ const deleteCourse = async (req, res) => {
     // never-throw by contract (invalidateGateForUser swallows cache errors).
     try {
       const quizService = require('../services/quizService');
-      await Promise.all(enrolledUserIds.map((userId) => quizService.invalidateGateForUser(userId)));
+      const BATCH_SIZE = 100;
+      for (let i = 0; i < enrolledUserIds.length; i += BATCH_SIZE) {
+        const chunk = enrolledUserIds.slice(i, i + BATCH_SIZE);
+        await Promise.all(chunk.map((userId) => quizService.invalidateGateForUser(userId)));
+      }
     } catch (err) {
       console.error('[deleteCourse] gate invalidation failed:', err.message);
     }

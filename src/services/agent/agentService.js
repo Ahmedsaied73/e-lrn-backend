@@ -411,10 +411,25 @@ async function answerQuestion({
     // happened. Anything else — a bad key, a malformed request — is a different fact
     // and must not be reported as "the service is down".
     if (!err || err.code !== 'ALL_PROVIDERS_FAILED') {
+      const status = Number(err && (err.status || (err.cause && err.cause.status)));
+      const msg = String((err && err.message) || '');
+      let category = 'unknown';
+      let message = 'حصل خطأ أثناء توليد الرد. جرّب تاني، ولو كررت نفسها راجع إعدادات مزوّد الذكاء الاصطناعي.';
+      if (status === 429 || /quota|rate limit/i.test(msg)) {
+        category = 'rate_limited';
+        message = 'تم تجاوز حد الاستخدام المسموح لمزوّد الذكاء الاصطناعي حالياً (معدل الطلبات أو الكوتا). جرّب تاني بعد شوية.';
+      } else if (status === 404 || /model_not_found|not found|invalid model|does not exist/i.test(msg)) {
+        category = 'provider_config';
+        message = 'خطأ في إعدادات موديل الذكاء الاصطناعي (الموديل المحدد غير متاح). راجع إعدادات الموديل.';
+      } else if (status === 401 || /invalid api key|api key not valid/i.test(msg)) {
+        category = 'auth_error';
+        message = 'مفتاح الربط مع مزوّد الذكاء الاصطناعي غير صحيح أو منتهي الصلاحية. راجع إعدادات GEMINI_API_KEY.';
+      }
       return {
         ok: false,
         code: 'LLM_ERROR',
-        message: 'حصل خطأ أثناء توليد الرد. جرّب تاني، ولو كررت نفسها راجع إعدادات مزوّد الذكاء الاصطناعي.',
+        category,
+        message,
         declinedReason: deterministic.reason,
         conversationId: conversation.id,
       };
