@@ -39,3 +39,6 @@ loadtest/results/*.log
 logs/
 *.log
 *.err.log
+
+# Local Netlify folder
+.netlify

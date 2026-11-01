@@ -535,7 +535,9 @@ process.on('unhandledRejection', (reason) => {
   flush().finally(() => process.exit(1));
 });
 
-const server = app.listen(port, () => {
+let server = null;
+if (require.main === module) {
+  server = app.listen(port, () => {
     console.log(`Example app listening at http://localhost:${port}`);
     console.log('CORS enabled for configured origins');
 
@@ -636,6 +638,7 @@ const server = app.listen(port, () => {
       console.log('[INFO] AI_WORKER_PROCESS=true — AI grading worker running standalone; API will not start an in-process worker.');
     }
 });
+}
 
 // ── Graceful shutdown (SIGTERM/SIGINT) ──────────────────────────────────────
 // Closes the HTTP server, then drains Prisma + Redis so queued writes finish
@@ -721,7 +724,8 @@ function shutdown(signal) {
     console.warn('[WARN] AI queue stop failed:', err.message);
   }
 
-  server.close(async () => {
+  if (server) {
+    server.close(async () => {
     try {
       await Promise.allSettled(bullMqClosers);
     } catch (err) {
@@ -741,7 +745,8 @@ function shutdown(signal) {
     }
     console.log('[SHUTDOWN] clean exit');
     process.exit(0);
-  });
+    });
+  }
   // Force-exit if connections refuse to drain (keeps Railway's healthcheck honest).
   setTimeout(() => {
     console.error('[SHUTDOWN] drain timeout — forcing exit');

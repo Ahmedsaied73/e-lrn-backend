@@ -1,0 +1,13 @@
+[build]
+  command = "npx prisma generate"
+  functions = "netlify/functions"
+  publish = "public"
+
+[functions]
+  node_bundler = "esbuild"
+  included_files = ["node_modules/.prisma/**", "prisma/**"]
+
+[[redirects]]
+  from = "/*"
+  to = "/.netlify/functions/api"
+  status = 200
