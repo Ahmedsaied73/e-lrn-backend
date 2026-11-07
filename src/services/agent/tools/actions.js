@@ -25,6 +25,34 @@ const cache = require('../../../integrations/redis/cache');
 const { actionTool, confirmableActionTool } = require('./_kit');
 const { isValidSlug, randomBase36Slug } = require('../../../utils/slugs');
 const { SOFT_DELETE_RETENTION_DAYS, softDeleteTombstoneEmail } = require('../../softDelete');
+const { serializeRich, validateRich, looksRich } = require('../../../lib/richContent');
+
+const richBlockSchema = z.object({
+  t: z.enum(['text', 'math', 'chem']).describe('نوع المقطع: text أو math أو chem'),
+  v: z.string().describe('محتوى المقطع: نص عادي، كود LaTeX لمعادلة، أو صيغة كيميائية'),
+});
+
+const richTextOrBlocksSchema = z.union([
+  z.string(),
+  z.array(richBlockSchema),
+]);
+
+function processRichInput(val, fieldName = 'content') {
+  if (val === undefined || val === null) return { ok: true, value: val };
+  let serialized;
+  if (Array.isArray(val)) {
+    serialized = serializeRich(val);
+  } else if (typeof val === 'string') {
+    serialized = val;
+  } else {
+    return { ok: false, error: `${fieldName} must be a string or array of blocks`, code: 'RICH_BAD_FORMAT' };
+  }
+  const validation = validateRich(serialized);
+  if (!validation.ok) {
+    return { ok: false, error: `${fieldName} invalid rich content: ${validation.code}`, code: validation.code };
+  }
+  return { ok: true, value: serialized };
+}
 
 const GRADE_VALUES = ['FIRST_SECONDARY', 'SECOND_SECONDARY', 'THIRD_SECONDARY'];
 
@@ -432,13 +460,55 @@ const gradeEssay = actionTool({
     attemptId: z.number().int().positive().describe('رقم المحاولة'),
     essayScores: z.record(z.string(), z.number().min(0)).describe('خريطة اسم السؤال إلى الدرجة'),
     essayFeedback: z
-      .record(z.string(), z.string().max(2000))
+      .record(z.string(), z.union([z.string().max(2000), z.array(richBlockSchema)]))
       .optional()
-      .describe('خريطة اسم السؤال إلى ملاحظة التصحيح'),
+      .describe('خريطة اسم السؤال إلى ملاحظة التصحيح (نص عادي أو مصفوفة مقاطع math/chem/text)'),
+    referenceAnswers: z
+      .record(z.string(), richTextOrBlocksSchema)
+      .optional()
+      .describe('خريطة اسم السؤال إلى الإجابة المرجعية النموذجية (نص عادي أو مصفوفة مقاطع math/chem/text)'),
+    questionText: z
+      .record(z.string(), richTextOrBlocksSchema)
+      .optional()
+      .describe('خريطة اسم السؤال إلى نص السؤال (نص عادي أو مصفوفة مقاطع math/chem/text)'),
   }),
   audit: { action: 'QUIZ_GRADE', targetType: 'attempt' },
   run: async (args, ctx) => {
     const quizService = require('../../quizService');
+
+    // Process essayFeedback (convert rich blocks to serialized strings, validate KaTeX)
+    if (args.essayFeedback) {
+      for (const [qName, fb] of Object.entries(args.essayFeedback)) {
+        const processed = processRichInput(fb, `essayFeedback for ${qName}`);
+        if (!processed.ok) {
+          return { ok: false, reason: 'INVALID_ESSAY_FEEDBACK', details: [processed.error], code: processed.code };
+        }
+        args.essayFeedback[qName] = processed.value;
+      }
+    }
+
+    // Process referenceAnswers if provided
+    if (args.referenceAnswers) {
+      for (const [qName, ref] of Object.entries(args.referenceAnswers)) {
+        const processed = processRichInput(ref, `referenceAnswer for ${qName}`);
+        if (!processed.ok) {
+          return { ok: false, reason: 'INVALID_REFERENCE_ANSWER', details: [processed.error], code: processed.code };
+        }
+        args.referenceAnswers[qName] = processed.value;
+      }
+    }
+
+    // Process questionText if provided
+    if (args.questionText) {
+      for (const [qName, qt] of Object.entries(args.questionText)) {
+        const processed = processRichInput(qt, `questionText for ${qName}`);
+        if (!processed.ok) {
+          return { ok: false, reason: 'INVALID_QUESTION_TEXT', details: [processed.error], code: processed.code };
+        }
+        args.questionText[qName] = processed.value;
+      }
+    }
+
     try {
       // Reuses the service instead of re-implementing the mutation: it
       // serializes against concurrent AI verdict applications on the same
@@ -450,7 +520,7 @@ const gradeEssay = actionTool({
         args.essayFeedback || {}
       );
 
-      return {
+      const resPayload = {
         ok: true,
         targetId: args.attemptId,
         attempt: {
@@ -462,6 +532,9 @@ const gradeEssay = actionTool({
           essayGradedAtIso: updated.essayGradedAt ? updated.essayGradedAt.toISOString() : null,
         },
       };
+      if (args.referenceAnswers) resPayload.referenceAnswers = args.referenceAnswers;
+      if (args.questionText) resPayload.questionText = args.questionText;
+      return resPayload;
     } catch (error) {
       if (error && error.statusCode === 404) return { ok: false, reason: 'ATTEMPT_NOT_FOUND' };
       if (error && error.statusCode === 400) {
@@ -1152,10 +1225,31 @@ const upsertQuiz = actionTool({
   schema: z.object({
     videoSlug: slugArg('الفيديو'),
     title: z.string().min(2).max(200).describe('عنوان الاختبار'),
-    surveyJson: z.record(z.string(), z.unknown()).describe('تعريف أسئلة SurveyJS ككائن JSON'),
+    surveyJson: z.record(z.string(), z.unknown()).optional().describe('تعريف أسئلة SurveyJS ككائن JSON (تقبل نصوص الأسئلة كسلاسل نصية أو مقاطع rich)'),
     answerKey: z
       .record(z.string(), z.unknown())
-      .describe('مفتاح الإجابات: كائن JSON مفتاحه اسم السؤال وقيمته الإجابة الصحيحة'),
+      .optional()
+      .describe('مفتاح الإجابات: كائن JSON مفتاحه اسم السؤال وقيمته الإجابة الصحيحة أو النموذجية (تقبل الإجابات المرجعية كسلاسل نصية أو مقاطع rich)'),
+    questions: z
+      .array(
+        z.object({
+          name: z.string().optional().describe('اسم السؤال مثل q1'),
+          type: z.enum(['comment', 'radiogroup']).default('comment').describe('نوع السؤال: comment للمقالي أو radiogroup للاختياري'),
+          title: richTextOrBlocksSchema.describe('نص السؤال كـ string أو مصفوفة blocks'),
+          points: z.number().min(1).default(10).describe('درجة السؤال'),
+          modelAnswer: richTextOrBlocksSchema.optional().describe('الإجابة النموذجية المرجعية'),
+          referenceAnswer: richTextOrBlocksSchema.optional().describe('الإجابة المرجعية بديل modelAnswer'),
+          answerFormat: z.enum(['PLAIN', 'RICH']).optional().describe('تنسيق الإجابة المسموح به'),
+          options: z.array(z.string()).optional().describe('خيارات السؤال الاختياري'),
+          correctOption: z.string().optional().describe('الخيار الصحيح للاختياري'),
+        })
+      )
+      .optional()
+      .describe('قائمة مبسطة لتعريف الأسئلة كبديل مباشر لـ surveyJson'),
+    referenceAnswers: z
+      .record(z.string(), richTextOrBlocksSchema)
+      .optional()
+      .describe('خريطة إجابات مرجعية إضافية { [qName]: string | blocks }'),
     timeLimitSec: z.number().int().positive().optional().describe('الحد الزمني بالثواني (اختياري — بدونه لا حد زمني)'),
     passingScore: z.number().int().min(0).max(100).optional().describe('درجة النجاح من ٠ إلى ١٠٠ (الافتراضي ٥٠)'),
     maxAttempts: z.number().int().min(1).max(10).optional().describe('عدد المحاولات (١ إلى ١٠، الافتراضي ٣)'),
@@ -1168,17 +1262,149 @@ const upsertQuiz = actionTool({
     const prisma = ctx.prisma;
     const quizService = require('../../quizService');
 
+    let surveyJson = args.surveyJson;
+    let answerKey = args.answerKey ? { ...args.answerKey } : {};
+
+    // Build surveyJson & answerKey from questions array if provided
+    if (Array.isArray(args.questions) && args.questions.length > 0 && (!surveyJson || Object.keys(surveyJson).length === 0)) {
+      const elements = [];
+      for (let idx = 0; idx < args.questions.length; idx++) {
+        const q = args.questions[idx];
+        const qName = q.name || `q${idx + 1}`;
+        const qType = q.type || 'comment';
+        const titleRes = processRichInput(q.title, `Question "${qName}" title`);
+        if (!titleRes.ok) {
+          return { ok: false, reason: 'INVALID_SURVEY_JSON', details: [titleRes.error], code: titleRes.code };
+        }
+        const el = {
+          type: qType,
+          name: qName,
+          title: titleRes.value,
+        };
+        if (q.answerFormat) el.answerFormat = q.answerFormat;
+        if (qType === 'radiogroup' && Array.isArray(q.options)) {
+          el.choices = q.options.map((opt) => ({ value: opt, text: opt }));
+        }
+        elements.push(el);
+
+        const refAns = q.referenceAnswer !== undefined ? q.referenceAnswer : q.modelAnswer;
+        if (qType === 'comment') {
+          const modelRes = processRichInput(refAns, `Question "${qName}" modelAnswer`);
+          if (!modelRes.ok) {
+            return { ok: false, reason: 'INVALID_ANSWER_KEY', details: [modelRes.error], code: modelRes.code };
+          }
+          answerKey[qName] = {
+            type: 'comment',
+            points: q.points || 10,
+            modelAnswer: modelRes.value || '',
+            ...(q.answerFormat ? { answerFormat: q.answerFormat } : {}),
+          };
+        } else if (qType === 'radiogroup') {
+          answerKey[qName] = {
+            type: 'radiogroup',
+            points: q.points || 10,
+            correctValue: q.correctOption || (Array.isArray(q.options) ? q.options[0] : ''),
+          };
+        }
+      }
+      surveyJson = { pages: [{ name: 'page1', elements }] };
+    }
+
+    if (!surveyJson) surveyJson = {};
+
+    // Process rich titles in surveyJson
+    if (surveyJson && Array.isArray(surveyJson.pages)) {
+      for (const page of surveyJson.pages) {
+        if (!Array.isArray(page.elements)) continue;
+        for (const el of page.elements) {
+          if (Array.isArray(el.title)) {
+            const processed = processRichInput(el.title, `Question "${el.name}" title`);
+            if (!processed.ok) {
+              return { ok: false, reason: 'INVALID_SURVEY_JSON', details: [processed.error], code: processed.code };
+            }
+            el.title = processed.value;
+          } else if (typeof el.title === 'string' && looksRich(el.title)) {
+            const val = validateRich(el.title);
+            if (!val.ok) {
+              return { ok: false, reason: 'INVALID_SURVEY_JSON', details: [`Question "${el.name}" title has invalid rich content: ${val.code}`], code: val.code };
+            }
+          }
+          if (el.questionText !== undefined) {
+            const processed = processRichInput(el.questionText, `Question "${el.name}" questionText`);
+            if (!processed.ok) {
+              return { ok: false, reason: 'INVALID_SURVEY_JSON', details: [processed.error], code: processed.code };
+            }
+            el.title = processed.value;
+            delete el.questionText;
+          }
+        }
+      }
+    }
+
+    // Process referenceAnswers from args.referenceAnswers if passed
+    if (args.referenceAnswers && typeof args.referenceAnswers === 'object') {
+      for (const [qName, ref] of Object.entries(args.referenceAnswers)) {
+        const processed = processRichInput(ref, `Question "${qName}" referenceAnswer`);
+        if (!processed.ok) {
+          return { ok: false, reason: 'INVALID_ANSWER_KEY', details: [processed.error], code: processed.code };
+        }
+        if (answerKey[qName] && typeof answerKey[qName] === 'object') {
+          answerKey[qName].modelAnswer = processed.value;
+        } else {
+          answerKey[qName] = { type: 'comment', points: 10, modelAnswer: processed.value };
+        }
+      }
+    }
+
+    // Process answerKey entries
+    if (answerKey && typeof answerKey === 'object') {
+      for (const [qName, entry] of Object.entries(answerKey)) {
+        if (Array.isArray(entry)) {
+          const processed = processRichInput(entry, `Question "${qName}" reference answer`);
+          if (!processed.ok) {
+            return { ok: false, reason: 'INVALID_ANSWER_KEY', details: [processed.error], code: processed.code };
+          }
+          answerKey[qName] = {
+            type: 'comment',
+            points: 10,
+            modelAnswer: processed.value,
+          };
+        } else if (entry && typeof entry === 'object') {
+          if (Array.isArray(entry.modelAnswer)) {
+            const processed = processRichInput(entry.modelAnswer, `Question "${qName}" modelAnswer`);
+            if (!processed.ok) {
+              return { ok: false, reason: 'INVALID_ANSWER_KEY', details: [processed.error], code: processed.code };
+            }
+            entry.modelAnswer = processed.value;
+          } else if (typeof entry.modelAnswer === 'string' && looksRich(entry.modelAnswer)) {
+            const val = validateRich(entry.modelAnswer);
+            if (!val.ok) {
+              return { ok: false, reason: 'INVALID_ANSWER_KEY', details: [`Question "${qName}" modelAnswer invalid: ${val.code}`], code: val.code };
+            }
+          }
+          if (entry.referenceAnswer !== undefined) {
+            const processed = processRichInput(entry.referenceAnswer, `Question "${qName}" referenceAnswer`);
+            if (!processed.ok) {
+              return { ok: false, reason: 'INVALID_ANSWER_KEY', details: [processed.error], code: processed.code };
+            }
+            entry.modelAnswer = processed.value;
+            delete entry.referenceAnswer;
+          }
+        }
+      }
+    }
+
     const video = await prisma.bunnyVideo.findUnique({
       where: { slug: args.videoSlug },
       select: { id: true, title: true },
     });
     if (!video) return { ok: false, reason: 'VIDEO_NOT_FOUND' };
 
-    const surveyValidation = quizService.validateSurveyJson(args.surveyJson);
+    const surveyValidation = quizService.validateSurveyJson(surveyJson);
     if (!surveyValidation.ok) {
       return { ok: false, reason: 'INVALID_SURVEY_JSON', details: surveyValidation.errors };
     }
-    const keyValidation = quizService.buildAnswerKey(args.surveyJson, args.answerKey);
+    const keyValidation = quizService.buildAnswerKey(surveyJson, answerKey);
     if (!keyValidation.ok) {
       return { ok: false, reason: 'INVALID_ANSWER_KEY', details: keyValidation.errors };
     }
@@ -1197,7 +1423,7 @@ const upsertQuiz = actionTool({
         timeLimitSec: args.timeLimitSec ?? null,
         passingScore: args.passingScore ?? 50,
         maxAttempts: args.maxAttempts ?? 3,
-        surveyJson: args.surveyJson,
+        surveyJson: surveyJson,
         answerKey: keyValidation.answerKey,
       },
       update: {
@@ -1205,7 +1431,7 @@ const upsertQuiz = actionTool({
         timeLimitSec: args.timeLimitSec ?? null,
         passingScore: args.passingScore ?? 50,
         maxAttempts: args.maxAttempts ?? 3,
-        surveyJson: args.surveyJson,
+        surveyJson: surveyJson,
         answerKey: keyValidation.answerKey,
       },
       select: { id: true, slug: true, title: true, passingScore: true, maxAttempts: true, timeLimitSec: true },
@@ -1218,7 +1444,7 @@ const upsertQuiz = actionTool({
       const { extractBucketObjectNames, getSupabaseAdmin, getSupabaseBucket } =
         require('../../../integrations/supabase/supabaseClient');
       const oldNames = existing ? extractBucketObjectNames(existing.surveyJson) : [];
-      const newNames = new Set(extractBucketObjectNames(args.surveyJson));
+      const newNames = new Set(extractBucketObjectNames(surveyJson));
       const onlyOld = oldNames.filter((name) => !newNames.has(name));
       if (onlyOld.length > 0) {
         const { error } = await getSupabaseAdmin().storage.from(getSupabaseBucket()).remove(onlyOld);

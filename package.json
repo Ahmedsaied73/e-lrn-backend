@@ -62,5 +62,8 @@
     "globals": "^15.15.0",
     "nodemon": "^3.1.9",
     "prettier": "^3.9.7"
+  },
+  "allowScripts": {
+    "bcrypt@5.1.1": true
   }
 }
