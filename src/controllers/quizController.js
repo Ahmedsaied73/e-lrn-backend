@@ -344,6 +344,8 @@ async function getQuizResult(req, res) {
     // Q-5: review renders the frozen start-time key (the one the attempt was
     // graded against), with live-key fallback for pre-snapshot rows.
     const answerKey = quizService.resolveAttemptKey(attempt);
+    const surveyJson = quizService.resolveAttemptSurvey(attempt);
+    const surveyElements = Object.fromEntries((surveyJson?.elements || []).map((el) => [el.name, el]));
     const responses = attempt.responses || {};
     const feedback = attempt.essayFeedback || {};
 
@@ -359,8 +361,10 @@ async function getQuizResult(req, res) {
       const studentValue = responses[qName];
       if (keyEntry.type === 'radiogroup') {
         const isCorrect = studentValue !== undefined && String(studentValue) === String(keyEntry.correctValue);
+        const qTitle = surveyElements[qName]?.title || qName;
         questionsBreakdown.push({
           name: qName,
+          title: qTitle,
           type: 'radiogroup',
           studentAnswer: studentValue ?? null,
           correctAnswer: showAnswers ? keyEntry.correctValue : null,
@@ -370,8 +374,10 @@ async function getQuizResult(req, res) {
         });
       } else if (keyEntry.type === 'comment') {
         const essayFb = feedback[qName] || null;
+        const qTitle = surveyElements[qName]?.title || qName;
         questionsBreakdown.push({
           name: qName,
+          title: qTitle,
           type: 'comment',
           studentAnswer: studentValue ?? null,
           ...(userRole === 'ADMIN' ? { modelAnswer: keyEntry.modelAnswer ?? null } : {}),
