@@ -3,6 +3,14 @@ const katex = require('katex');
 require('katex/contrib/mhchem');
 const { RICH_LIMITS } = require('./types');
 const { looksRich, sanitizeBlocks } = require('./parse');
+const { normalizeMathLatex } = require('./normalize');
+
+const KATEX_MACROS = {
+  '\\displaylines': '\\begin{gathered}#1\\end{gathered}',
+  '\\differentialD': '\\mathrm{d}',
+  '\\exponentialE': '\\mathrm{e}',
+  '\\imaginaryI': '\\mathrm{i}',
+};
 
 const FORBIDDEN =
   /\\(href|url|includegraphics|input|include|write|read|openin|openout|def|edef|gdef|xdef|let|newcommand|renewcommand|providecommand|catcode|csname|htmlClass|htmlId|htmlStyle|htmlData|special)(?![a-zA-Z])/;
@@ -48,10 +56,16 @@ function validateRich(raw) {
     if (b.v.length > max) return { ok: false, code: 'RICH_TOO_LARGE', blockIndex: i };
     if (b.t === 'text') continue;
     if (b.t === 'chem' && !balancedBraces(b.v)) return { ok: false, code: 'RICH_BAD_MATH', blockIndex: i };
-    const tex = b.t === 'chem' ? `\\ce{${b.v}}` : b.v;
+    const tex = b.t === 'chem' ? `\\ce{${b.v}}` : normalizeMathLatex(b.v);
     if (FORBIDDEN.test(tex)) return { ok: false, code: 'RICH_FORBIDDEN_COMMAND', blockIndex: i };
     try {
-      katex.renderToString(tex, { throwOnError: true, trust: false, strict: 'ignore', maxExpand: 1000 });
+      katex.renderToString(tex, {
+        throwOnError: true,
+        trust: false,
+        strict: 'ignore',
+        maxExpand: 1000,
+        macros: KATEX_MACROS,
+      });
     } catch {
       return { ok: false, code: 'RICH_BAD_MATH', blockIndex: i };
     }
@@ -63,4 +77,6 @@ module.exports = {
   validateRich,
   balancedBraces,
   FORBIDDEN,
+  KATEX_MACROS,
 };
+

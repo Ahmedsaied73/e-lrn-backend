@@ -193,3 +193,78 @@ test('subjectProfile: resolveEffectiveFormat overrides and fallbacks', () => {
   assert.equal(resolveEffectiveFormat(null, 'ARABIC'), 'PLAIN');
   assert.equal(resolveEffectiveFormat(undefined, 'ARABIC'), 'PLAIN');
 });
+
+test('richContent: student calculus inputs (derivatives, multiline, displaylines, prime)', () => {
+  // 1. Multiline math block as produced by MathLive on Enter (Question 12 scenario)
+  const multilineInput = JSON.stringify({
+    v: 1,
+    blocks: [
+      {
+        t: 'math',
+        v: '\\displaylines{f(x)\\\' = 3x^2 - 6x - 9 = 0 \\\\ x = 3 \\\\ x = -1}',
+      },
+    ],
+  });
+  const val1 = validateRich(multilineInput);
+  assert.equal(val1.ok, true, `Multiline input with displaylines must be accepted: ${JSON.stringify(val1)}`);
+
+  // 2. Prime notations: f'(x), f''(x), y', f(x)' and escaped/composite primes
+  const primeCases = [
+    "f'(x) = 3x^2 - 6x - 9 = 0",
+    "f''(x) = 6x - 6",
+    "f'''(x) = 6",
+    "y' = 2x + 1",
+    "y'' = 2",
+    "f(x)' = 0",
+    "f(x)'' = 0",
+    "f^{\\prime}(x)",
+    "f^{\\prime\\prime}(x)",
+    "f^{\\prime\\prime\\prime}(x)",
+    "f\\'(x) = 0",
+    "f\\'\\'(x) = 6x - 6",
+    "f\\'\\'\\'(x) = 6",
+    "f(x)\\' = 0",
+    "f(x)\\'\\' = 0",
+    "y\\'' = 2",
+    "f^{\\prime}^{\\prime}(x)",
+    "f^{\\prime}^{\\prime}^{\\prime}(x)",
+    "f'^{\\prime}(x)",
+    "f''^{\\prime}(x)",
+    "f^\\prime ^\\prime (x)",
+    "f^\\prime^\\prime^\\prime (x)",
+    "د'(س)",
+    "د''(س)",
+    "د^{\\prime}(س)",
+  ];
+  for (const p of primeCases) {
+    const env = JSON.stringify({ v: 1, blocks: [{ t: 'math', v: p }] });
+    const res = validateRich(env);
+    assert.equal(res.ok, true, `Prime notation "${p}" must be valid: ${JSON.stringify(res)}`);
+  }
+
+  // 3. MathLive non-standard macros: \differentialD, \exponentialE, \imaginaryI
+  const macroCases = [
+    '\\int x^2 \\differentialD x',
+    '\\exponentialE^{2x} + 1 = 0',
+    'z = 3 + 4\\imaginaryI',
+  ];
+  for (const m of macroCases) {
+    const env = JSON.stringify({ v: 1, blocks: [{ t: 'math', v: m }] });
+    const res = validateRich(env);
+    assert.equal(res.ok, true, `Macro expression "${m}" must be valid: ${JSON.stringify(res)}`);
+  }
+
+  // 4. MathLive bug with extra closing brace in shift-prime
+  const buggyBracketCases = [
+    'x^{\\prime}}',
+    'x^{\\prime\\prime}}',
+    'f(x)^{\\prime}}',
+  ];
+  for (const b of buggyBracketCases) {
+    const env = JSON.stringify({ v: 1, blocks: [{ t: 'math', v: b }] });
+    const res = validateRich(env);
+    assert.equal(res.ok, true, `Buggy bracket expression "${b}" must be auto-corrected: ${JSON.stringify(res)}`);
+  }
+});
+
+

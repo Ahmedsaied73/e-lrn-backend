@@ -63,6 +63,25 @@
       ]
     },
     {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"f'(x) = 3x^2 - 6x - 9 = 0\"}]}",
+      "blocks": [
+        { "t": "math", "v": "f'(x) = 3x^2 - 6x - 9 = 0" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\displaylines{f(x)' = 3x^2 - 6x - 9 = 0 \\\\\\\\ x = 3 \\\\\\\\ x = -1}\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\displaylines{f(x)' = 3x^2 - 6x - 9 = 0 \\\\ x = 3 \\\\ x = -1}" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"y' = 2x\"}]}",
+      "blocks": [
+        { "t": "math", "v": "y' = 2x" }
+      ]
+    },
+
+    {
       "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\omega=2\\\\pi f\"}]}",
       "blocks": [
         { "t": "math", "v": "\\omega=2\\pi f" }
