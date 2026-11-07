@@ -46,3 +46,22 @@
 - Housekeeping: one locked temp file `anon-probe.txt` could not be deleted (held by another process) — untracked, safe to remove after that process exits.
 - PAYMOB WIP (not ours, untouched): `prisma/schema.prisma`, `.env.example`, `src/config/env.js`, `app.js` working diff, payment/enrollment/notification controllers, `src/controllers/paymobWebhookController.js`, `src/integrations/paymob/`, `src/services/paymentService.js`, `tests/paymob.test.js`, `prisma/migrations/20260919120000_paymob_payments/` (migration deliberately left UNAPPLIED), `test-out.txt`.
 - Load-test cohort cleanup (`%loadtest.local` users) on staging — awaits user sign-off (tasks/db-audit-todo.md last checkbox).
+
+
+---
+
+## [RICH_MATH_CHEMISTRY_SYSTEM]
+- **Symmetrical contract & validation (`src/lib/richContent/`)**:
+  - `types.js`, `parse.js`, `serialize.js`, `normalize.js`, `grader.js`, `validate.js`, `subjectProfile.js`.
+  - Enforces envelope structure (`{"v":1,"blocks":[...]}`), limits (max 60 blocks, max 20,000 chars), forbidden LaTeX commands, and KaTeX parsing checks.
+  - Zero database migrations: all questions and responses use existing `JSONB` columns (`Quiz.surveyJson`, `QuizAttempt.responses`, `answerKey`).
+- **AI Essay Grader integration (`src/services/aiGrader.js`)**:
+  - `toGraderText()` extracts text, math, and chemistry into readable prompts.
+  - Injects `RICH_GRADING_RULES` prompt block when rich equations or `$$` are present.
+- **Admin Chat Agent Rich Tools (`src/services/agent/tools/actions.js`)**:
+  - `upsert_quiz` and `grade_essay` accept structured block arrays `[{t, v}]`, validate LaTeX, and format serialized envelopes.
+- **Handwriting Recognition Infrastructure (`src/services/handwriting/`, `src/controllers/handwritingController.js`)**:
+  - Validates stroke coordinate arrays (`validateStrokes`), enforces rate limits and daily budget.
+  - Flagged OFF by default (`HANDWRITING_ENABLED=false`) returning 404/disabled without consuming external paid provider quotas.
+- **Security Invariant AC-6 (`src/controllers/quizController.js:getQuizResult`)**:
+  - `modelAnswer` is strictly restricted to `ADMIN` and is never returned to students.
