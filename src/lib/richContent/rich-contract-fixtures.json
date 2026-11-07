@@ -1,0 +1,310 @@
+{
+  "plain": [
+    "",
+    "This is a simple English sentence for an essay question.",
+    "هذا نص تجريبي باللغة العربية مع أرقام هندية ١٢٣٤٥ لشرح الحل.",
+    "Text with $100 and backslash \\ escaped characters.",
+    "{\"not_an_envelope\": true, \"text\": \"hello\"}"
+  ],
+  "rich": [
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"text\",\"v\":\"Here is the formula:\"},{\"t\":\"math\",\"v\":\"\\\\frac{a+b}{c}\"}]}",
+      "blocks": [
+        { "t": "text", "v": "Here is the formula:" },
+        { "t": "math", "v": "\\frac{a+b}{c}" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\frac{1}{2}\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\frac{1}{2}" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"x^{2}+y^{2}=z^{2}\"}]}",
+      "blocks": [
+        { "t": "math", "v": "x^{2}+y^{2}=z^{2}" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\sqrt{b^{2}-4ac}\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\sqrt{b^{2}-4ac}" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\sqrt[3]{x}\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\sqrt[3]{x}" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\int_{0}^{1}x^{2}\\\\,dx\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\int_{0}^{1}x^{2}\\,dx" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\sum_{n=1}^{\\\\infty}\\\\frac{1}{n^{2}}\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\sum_{n=1}^{\\infty}\\frac{1}{n^{2}}" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\lim_{x\\\\to 0}\\\\frac{\\\\sin x}{x}=1\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\lim_{x\\to 0}\\frac{\\sin x}{x}=1" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\vec{F}=m\\\\vec{a}\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\vec{F}=m\\vec{a}" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\omega=2\\\\pi f\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\omega=2\\pi f" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\Delta x=v_{0}t+\\\\frac{1}{2}at^{2}\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\Delta x=v_{0}t+\\frac{1}{2}at^{2}" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\theta=30^{\\\\circ}\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\theta=30^{\\circ}" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\alpha+\\\\beta+\\\\gamma=180^{\\\\circ}\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\alpha+\\beta+\\gamma=180^{\\circ}" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\begin{pmatrix}1&2\\\\\\\\3&4\\\\end{pmatrix}\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\begin{pmatrix}1&2\\\\3&4\\end{pmatrix}" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\left(\\\\frac{a}{b}\\\\right)^{2}\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\left(\\frac{a}{b}\\right)^{2}" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\frac{d}{dx}\\\\left(x^{n}\\\\right)=nx^{n-1}\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\frac{d}{dx}\\left(x^{n}\\right)=nx^{n-1}" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\log_{2}8=3\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\log_{2}8=3" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\ln e=1\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\ln e=1" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\overline{AB}\\\\parallel\\\\overline{CD}\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\overline{AB}\\parallel\\overline{CD}" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\mathrm{m}/\\\\mathrm{s}^{2}\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\mathrm{m}/\\mathrm{s}^{2}" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\mu_{0}=4\\\\pi\\\\times10^{-7}\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\mu_{0}=4\\pi\\times10^{-7}" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"E=mc^{2}\"}]}",
+      "blocks": [
+        { "t": "math", "v": "E=mc^{2}" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\binom{n}{k}\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\binom{n}{k}" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"x\\\\leq 5,\\\\ x\\\\neq 3\"}]}",
+      "blocks": [
+        { "t": "math", "v": "x\\leq 5,\\ x\\neq 3" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\pm\\\\sqrt{2}\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\pm\\sqrt{2}" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\rho=\\\\frac{m}{V}\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\rho=\\frac{m}{V}" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\sin^{2}\\\\theta+\\\\cos^{2}\\\\theta=1\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\sin^{2}\\theta+\\cos^{2}\\theta=1" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\frac{\\\\partial f}{\\\\partial x}\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\frac{\\partial f}{\\partial x}" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\mathrm{d}x\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\mathrm{d}x" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\mathrm{e}^{i\\\\pi}+1=0\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\mathrm{e}^{i\\pi}+1=0" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\frac{\\\\frac{1}{2}}{3}\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\frac{\\frac{1}{2}}{3}" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"x_{1,2}=\\\\frac{-b\\\\pm\\\\sqrt{b^{2}-4ac}}{2a}\"}]}",
+      "blocks": [
+        { "t": "math", "v": "x_{1,2}=\\frac{-b\\pm\\sqrt{b^{2}-4ac}}{2a}" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"س^{2}+ص^{2}=٢٥\"}]}",
+      "blocks": [
+        { "t": "math", "v": "س^{2}+ص^{2}=٢٥" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\text{ثابت}=5\"}]}",
+      "blocks": [
+        { "t": "math", "v": "\\text{ثابت}=5" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"chem\",\"v\":\"2H2 + O2 -> 2H2O\"}]}",
+      "blocks": [
+        { "t": "chem", "v": "2H2 + O2 -> 2H2O" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"chem\",\"v\":\"N2 + 3H2 <=> 2NH3\"}]}",
+      "blocks": [
+        { "t": "chem", "v": "N2 + 3H2 <=> 2NH3" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"chem\",\"v\":\"CaCO3 ->[\\\\Delta] CaO + CO2 ^\"}]}",
+      "blocks": [
+        { "t": "chem", "v": "CaCO3 ->[\\Delta] CaO + CO2 ^" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"chem\",\"v\":\"Fe^{3+} + 3OH^- -> Fe(OH)3 v\"}]}",
+      "blocks": [
+        { "t": "chem", "v": "Fe^{3+} + 3OH^- -> Fe(OH)3 v" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"chem\",\"v\":\"H2SO4 + 2NaOH -> Na2SO4 + 2H2O\"}]}",
+      "blocks": [
+        { "t": "chem", "v": "H2SO4 + 2NaOH -> Na2SO4 + 2H2O" }
+      ]
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"chem\",\"v\":\"Zn + Cu^{2+} -> Zn^{2+} + Cu\"}]}",
+      "blocks": [
+        { "t": "chem", "v": "Zn + Cu^{2+} -> Zn^{2+} + Cu" }
+      ]
+    }
+  ],
+  "invalid": [
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\frac{1}{\"}]}",
+      "code": "RICH_BAD_MATH"
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\href{http://example.com}{x}\"}]}",
+      "code": "RICH_FORBIDDEN_COMMAND"
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\input{/etc/passwd}\"}]}",
+      "code": "RICH_FORBIDDEN_COMMAND"
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\def\\\\a{\\\\a\\\\a}\\\\a\"}]}",
+      "code": "RICH_FORBIDDEN_COMMAND"
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\newcommand{\\\\x}{y}\\\\x\"}]}",
+      "code": "RICH_FORBIDDEN_COMMAND"
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\includegraphics{x.png}\"}]}",
+      "code": "RICH_FORBIDDEN_COMMAND"
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\write18{ls}\"}]}",
+      "code": "RICH_FORBIDDEN_COMMAND"
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"\\\\unknowncommand{1}\"}]}",
+      "code": "RICH_BAD_MATH"
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"}{\"}]}",
+      "code": "RICH_BAD_MATH"
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"chem\",\"v\":\"H2O} \\\\href{x}{y\"}]}",
+      "code": "RICH_BAD_MATH"
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[",
+      "code": "RICH_BAD_FORMAT"
+    },
+    {
+      "raw": "{\"v\":2,\"blocks\":[]}",
+      "code": "RICH_BAD_FORMAT"
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[{\"t\":\"unknown\",\"v\":\"abc\"}]}",
+      "code": "RICH_BAD_FORMAT"
+    },
+    {
+      "raw": "{\"v\":1,\"blocks\":[],\"extra\":true}",
+      "code": "RICH_BAD_FORMAT"
+    }
+  ]
+}

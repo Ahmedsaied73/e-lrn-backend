@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 
 /**
  * quizService.js
@@ -12,6 +12,8 @@ const prisma = require('../config/db');
 const config = require('../config/env');
 const { ALLOWED_QUESTION_TYPES, MAX_SURVEY_JSON_BYTES, GRACE_SEC, DEFAULT_MAX_ATTEMPTS, STALE_ATTEMPT_MS, STATUS } = require('../config/quizConfig');
 const bunny = require('../integrations/bunny/bunnyStreamClient');
+const { validateRich, looksRich } = require('../lib/richContent');
+const { resolveEffectiveFormat } = require('../lib/subjectProfile');
 
 // ─── Validation ───────────────────────────────────────────────────────────────
 
@@ -48,6 +50,17 @@ function validateSurveyJson(surveyJson) {
       // Type whitelist
       if (!ALLOWED_QUESTION_TYPES.includes(el.type)) {
         errors.push(`Question type "${el.type}" is not allowed. Allowed types: ${ALLOWED_QUESTION_TYPES.join(', ')}`);
+      }
+      if (el.type === 'comment') {
+        if (typeof el.title === 'string' && el.title.trim()) {
+          const val = validateRich(el.title);
+          if (!val.ok) {
+            errors.push(`Question "${el.name}" title has invalid rich content: ${val.code}`);
+          }
+        }
+        if (el.answerFormat !== undefined && el.answerFormat !== null && el.answerFormat !== 'PLAIN' && el.answerFormat !== 'RICH') {
+          errors.push(`Question "${el.name}": answerFormat must be "PLAIN", "RICH", or null`);
+        }
       }
       // Unique names
       if (!el.name) {
@@ -111,6 +124,16 @@ function buildAnswerKey(surveyJson, answerKeyInput) {
     } else if (entry.type === 'comment') {
       if (!entry.modelAnswer) {
         errors.push(`Essay question "${name}": modelAnswer is required`);
+      } else if (typeof entry.modelAnswer !== 'string') {
+        errors.push(`Essay question "${name}": modelAnswer must be a string`);
+      } else {
+        const val = validateRich(entry.modelAnswer);
+        if (!val.ok) {
+          errors.push(`Essay question "${name}" modelAnswer invalid: ${val.code}`);
+        }
+      }
+      if (entry.answerFormat !== undefined && entry.answerFormat !== null && entry.answerFormat !== 'PLAIN' && entry.answerFormat !== 'RICH') {
+        errors.push(`Essay question "${name}": answerFormat must be "PLAIN", "RICH", or null`);
       }
       if (entry.rubric !== undefined && (typeof entry.rubric !== 'string' || entry.rubric.length > 5000)) {
         errors.push(`Essay question "${name}": rubric must be a string up to 5000 chars`);
@@ -126,6 +149,9 @@ function buildAnswerKey(surveyJson, answerKeyInput) {
       correctValue: entry.correctValue ?? null,
       modelAnswer: entry.modelAnswer ?? null,
       points: entry.points,
+      ...(entry.type === 'comment' && (entry.answerFormat === 'PLAIN' || entry.answerFormat === 'RICH')
+        ? { answerFormat: entry.answerFormat }
+        : {}),
       ...(entry.type === 'comment' && typeof entry.rubric === 'string' && entry.rubric.trim()
         ? { rubric: entry.rubric.trim() }
         : {}),
@@ -166,6 +192,33 @@ function countQuestions(surveyJson) {
  * @returns {object} Student-safe quiz object
  */
 function sanitizeForStudent(quiz) {
+  let surveyJson = quiz.surveyJson;
+  if (surveyJson && Array.isArray(surveyJson.pages)) {
+    surveyJson = {
+      ...surveyJson,
+      pages: surveyJson.pages.map((page) => ({
+        ...page,
+        elements: Array.isArray(page.elements)
+          ? page.elements.map((el) => {
+              if (el.type === 'comment') {
+                const storedFormat =
+                  el.answerFormat ||
+                  (quiz.answerKey && quiz.answerKey[el.name] && quiz.answerKey[el.name].answerFormat) ||
+                  null;
+                const effectiveFormat = resolveEffectiveFormat(storedFormat);
+                return {
+                  ...el,
+                  answerFormat: effectiveFormat,
+                  effectiveFormat,
+                };
+              }
+              return el;
+            })
+          : page.elements,
+      })),
+    };
+  }
+
   return {
     slug: quiz.slug,
     videoSlug: quiz.bunnyVideo && quiz.bunnyVideo.slug ? quiz.bunnyVideo.slug : undefined,
@@ -173,7 +226,7 @@ function sanitizeForStudent(quiz) {
     timeLimitSec: quiz.timeLimitSec,
     passingScore: quiz.passingScore,
     maxAttempts: quiz.maxAttempts,
-    surveyJson: quiz.surveyJson,
+    surveyJson,
     // answerKey intentionally excluded
   };
 }
@@ -749,6 +802,62 @@ function enqueueAiGradingSafe(attemptId) {
 }
 
 /**
+ * Validates student responses for essay questions against format restrictions and KaTeX syntax.
+ * Rejects with RICH_NOT_ALLOWED if a rich payload is submitted to a PLAIN essay question.
+ * Rejects with RICH_TOO_LARGE, RICH_BAD_FORMAT, RICH_FORBIDDEN_COMMAND, or RICH_BAD_MATH
+ * if a rich payload is malformed or invalid.
+ *
+ * @param {object} answerKey
+ * @param {object} responses
+ * @param {object} [surveyJson]
+ */
+function validateEssayResponses(answerKey, responses, surveyJson) {
+  if (!responses || typeof responses !== 'object') return;
+
+  const elementsMap = {};
+  if (surveyJson && Array.isArray(surveyJson.pages)) {
+    for (const page of surveyJson.pages) {
+      if (Array.isArray(page.elements)) {
+        for (const el of page.elements) {
+          if (el.name) elementsMap[el.name] = el;
+        }
+      }
+    }
+  }
+
+  for (const [qName, val] of Object.entries(responses)) {
+    const keyEntry = answerKey && answerKey[qName];
+    const isEssay =
+      (keyEntry && keyEntry.type === 'comment') ||
+      (elementsMap[qName] && elementsMap[qName].type === 'comment');
+    if (!isEssay) continue;
+
+    const storedFormat =
+      (keyEntry && keyEntry.answerFormat) ||
+      (elementsMap[qName] && elementsMap[qName].answerFormat) ||
+      null;
+    const effectiveFormat = resolveEffectiveFormat(storedFormat);
+
+    if (typeof val === 'string' && val.trim() !== '') {
+      if (effectiveFormat === 'PLAIN' && looksRich(val)) {
+        throw Object.assign(
+          new Error('Rich math/chemistry input is not allowed for plain essay questions.'),
+          { statusCode: 400, code: 'RICH_NOT_ALLOWED' }
+        );
+      }
+
+      const check = validateRich(val);
+      if (!check.ok) {
+        throw Object.assign(
+          new Error(`Invalid rich content in response for question "${qName}": ${check.code}`),
+          { statusCode: 400, code: check.code }
+        );
+      }
+    }
+  }
+}
+
+/**
  * Submit quiz answers for an attempt.
  * Enforces server-side timer, auto-grades MCQs, computes scorePercent.
  * Status → GRADED (MCQ only) or GRADING (has essays).
@@ -791,6 +900,9 @@ async function submitAttempt(userId, attemptId, responses, autoSubmitted = false
 
   // Q-5: grade against the frozen start-time key, never the live quiz row.
   const answerKey = resolveAttemptKey(attempt);
+  const surveyJson = resolveAttemptSurvey(attempt);
+  validateEssayResponses(answerKey, responses, surveyJson);
+
   const { mcqEarned, perQuestion } = gradeMcq(answerKey, responses);
   const { totalPoints, totalEssayPoints } = computeTotalPoints(answerKey);
 
@@ -869,7 +981,7 @@ async function saveAttempt(userId, attemptId, responses) {
 
   const attempt = await prisma.quizAttempt.findUnique({
     where: { id: attemptId },
-    select: { id: true, userId: true, status: true },
+    include: { quiz: true },
   });
 
   if (!attempt) throw Object.assign(new Error('Attempt not found'), { statusCode: 404 });
@@ -877,6 +989,10 @@ async function saveAttempt(userId, attemptId, responses) {
   if (attempt.status !== STATUS.IN_PROGRESS) {
     throw Object.assign(new Error(`Attempt is already ${attempt.status}`), { statusCode: 409 });
   }
+
+  const answerKey = resolveAttemptKey(attempt);
+  const surveyJson = resolveAttemptSurvey(attempt);
+  validateEssayResponses(answerKey, responses, surveyJson);
 
   const updated = await prisma.quizAttempt.update({
     where: { id: attemptId },

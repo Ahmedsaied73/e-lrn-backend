@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 
 /**
  * quizController.js
@@ -256,7 +256,11 @@ async function saveQuizAttempt(req, res) {
   } catch (error) {
     console.error('[QuizController] saveQuizAttempt error:', error);
     const statusCode = error.statusCode || 500;
-    return res.status(statusCode).json({ success: false, error: error.message || 'Unable to save attempt' });
+    return res.status(statusCode).json({
+      success: false,
+      error: error.message || 'Unable to save attempt',
+      ...(error.code ? { code: error.code } : {}),
+    });
   }
 }
 
@@ -295,7 +299,11 @@ async function submitQuiz(req, res) {
   } catch (error) {
     console.error('[QuizController] submitQuiz error:', error);
     const statusCode = error.statusCode || 500;
-    return res.status(statusCode).json({ success: false, error: error.message });
+    return res.status(statusCode).json({
+      success: false,
+      error: error.message,
+      ...(error.code ? { code: error.code } : {}),
+    });
   }
 }
 
@@ -339,11 +347,10 @@ async function getQuizResult(req, res) {
     const responses = attempt.responses || {};
     const feedback = attempt.essayFeedback || {};
 
-    // Hide-until-pass (Q-1/Q-2/Q-3): correct answers and model answers are
+    // Hide-until-pass (Q-1/Q-2/Q-3): correct answers for MCQs are
     // withheld from non-admins until the attempt is GRADED *and passed*.
-    // EXPIRED, GRADING, and failed attempts reveal scores only — never the
-    // answers (harvest-then-ace / model-leak / memorization-retake).
-    // Admins always see full data (grading duty).
+    // Invariant AC-6: Model answers for essays are NEVER returned to students.
+    // Only admins see model answers for grading duties.
     const passed = (attempt.scorePercent || 0) >= (attempt.quiz.passingScore || 0);
     const showAnswers = userRole === 'ADMIN' || (attempt.status === STATUS.GRADED && passed);
 
@@ -367,7 +374,7 @@ async function getQuizResult(req, res) {
           name: qName,
           type: 'comment',
           studentAnswer: studentValue ?? null,
-          modelAnswer: showAnswers ? keyEntry.modelAnswer : null,
+          ...(userRole === 'ADMIN' ? { modelAnswer: keyEntry.modelAnswer ?? null } : {}),
           earnedPoints: essayFb ? essayFb.awarded : (attempt.status === STATUS.GRADED ? 0 : null),
           maxPoints: keyEntry.points,
           feedback: essayFb ? essayFb.feedback : null,
