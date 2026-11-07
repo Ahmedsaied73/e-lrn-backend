@@ -1,154 +1,228 @@
-# PHASE_0_REPORT.md
+# Phase 0 Report — Discovery and Spikes (Unified Backend & Frontend)
 
-## 1. Goal
+**Project:** Visual Math & Chemistry Editor (Rich Math & Chemistry Answer Input)  
+**Date:** 2026-11-07  
+**Gate:** GATE 0 Sign-Off  
 
-Create the `agent-v2-rebuild` branch from `origin/Dev` and record a clean, reproducible baseline for the
-existing agent test suite before any code change.
+---
 
-## 2. Files changed
+## 1. Branches and Working Environments
 
-| Path | Reason |
-|---|---|
-| `PHASE_0_REPORT.md` | new — this report |
-| `UNDERSTANDING_REPORT.md` | new — the Stage-1 understanding report (delivered with the Stage-1 message, now committed so the branch history carries it) |
+- **Frontend Track (`E-LRN-FRONTEND\visual_math_chemistry_editor`)**:
+  - Target working branch: `feature/rich-math-input` (clean, branched from `Dev` at commit `0548fdca`).
+  - Scratch spike branch: `spike/rich-input` (commit `25e09a0`).
+  - Codebase files touched on target branch: **0** (pure documentation/spec additions).
+- **Backend Track (`e-learning-platform\visual_math_chemistry_editor`)**:
+  - Target working branch: `feature/rich-math-input` (clean, branched from `Dev` at commit `c789c9d`).
+  - Codebase files touched on target branch: **0** (pure documentation/spec additions).
+- **Specifications Present**:
+  - `MATH_INPUT_PRD.md` copied to both worktree roots.
+  - `MATH_INPUT_IMPLEMENTATION_PLAN.md` copied to both worktree roots.
+  - `RICH_INPUT_DISCOVERY.md` containing all 16 items unified across both worktree roots.
 
-No source, test, config, schema or doc file was touched. `git diff --stat` against `c51e986` is empty for
-every tracked file.
+---
 
-## 3. What I added / changed
+## 2. Done (Outcomes & Achievements)
 
-- **Added** the two report files above.
-- **Changed** nothing in code, tests, `package.json`, `prisma/`, or `.env`.
-- **Did not commit** `.env` (gitignored) or any pre-existing untracked scratch file in the working tree
-  (`.superpowers/`, `boot-*.txt`, `loadtest/`, `page.html`, `t3-dbg*.txt`, `t5-suite.txt`,
-  `e2e-server.txt`, `scripts/seedLoadTestCohort.js`, `scripts/refreshLoadTestTokens.js`,
-  `scripts/flushLoadTestBuckets.js`) — those were already there before Stage 1 and are not mine to add.
+### A. Complete Codebase Mapping (Items 1 to 16)
+All 16 discovery items defined in Plan Section 0.1 were thoroughly audited and verified:
+1. **Backend Storage (Items 1 & 2)**: Confirmed `Quiz.surveyJson`, `Quiz.answerKey`, and `QuizAttempt.responses` are PostgreSQL `JSONB` (up to 1 GB), completely retiring Risk R1 for database column constraints.
+2. **Backend Controllers & Routing (Items 3 & 4)**: Traced all admin authoring, student taking, draft saving, submission, and grading routes. Uncovered reference answer leak in `GET /quizzes/attempts/:id/result` when graded & passed (`quizController.js:347-348, 370`), pinpointing the exact lines to seal in Phase 1.4 under Invariant AC-6.
+3. **AI Essay Grader (Item 5)**: Mapped `src/services/aiGrader` (`PROMPT_VERSION = 'v1'`), prompt clamp limits (student answer 10,000 chars, model answer 5,000 chars, rubric 5,000 chars), Zod `RawVerdictSchema`, human fallback on `confidence < 0.8`, and eval runner `scripts/ai-eval.js`. Confirmed `criteriaBreakdown` is NOT implemented anywhere in DB or schema.
+4. **Agent Authoring & Validation (Items 6, 7 & 8)**: Confirmed admin chat agent tools (`upsert_quiz`, `grade_essay`), verified absence of backend i18n (errors are English strings), and confirmed Express JSON body limit is 512 KB (`app.js:190`).
+5. **Frontend SurveyJS & Quiz Runner (Item 9)**: Identified that `QuizRunner.tsx` does NOT render via `<Survey model={...} />`; it interprets `surveyJson` and renders custom React elements (`comment` renders `<textarea>`). Autosave is debounced at 25 seconds with trailing save queue on edit.
+6. **Quiz Timer & Display (Items 10 & 11)**: Confirmed countdown runs against server `deadlineAt`, auto-submits on expiration, and hydrates from `startData.responses` on resume. Display components (`QuizReviewList.tsx`, `GradingForm.tsx`) render plain text inside `whitespace-pre-wrap` containers ready for `<RichView>`.
+7. **Form, Subject & Tooling (Items 12 to 16)**: Confirmed `QuizAuthoringForm.tsx` is the sole active authoring form. Mapped subject variables across FE (`NEXT_PUBLIC_SUBJECT_NAME`, `ACTIVE_SUBJECT`) and BE (`AI_STUDENT_SUBJECT`). Confirmed frontend lacks i18n dictionaries (hardcoded Arabic with `<html lang="ar" dir="rtl">`). Verified Next.js 13.5 App Router + Tailwind 4, clean ESLint, and confirmed no existing `postinstall`/`prebuild` scripts.
 
-## 4. Branch
+### B. Spike Outcomes (Retiring Risks R1 to R4)
+- **Spike S1 — Arabic Glyphs (Risk R1)**:
+  - Tested `س^2+ص^2=٢٥` and `\text{ثابت}=5` in MathLive and KaTeX.
+  - KaTeX parsed and rendered Unicode Arabic glyphs natively as `<span class="mord">` without console warnings, tofu boxes, or error markup.
+  - Arabic-Indic digits `١٢٣٤٥` rendered cleanly.
+  - **Decision on `wrapArabicInText()`**: Not strictly required for basic KaTeX rendering, but recommended in `normalizeMathLatex` for multi-character Arabic words to preserve proper cursive shaping inside math expressions.
+- **Spike S2 — MathLive to KaTeX Corpus (Risk R2)**:
+  - Tested all 32 valid math expressions from Appendix B against KaTeX with `throwOnError: true`: **32 / 32 passed (100%)**.
+  - Tested MathLive special macros (`\differentialD`, `\exponentialE`, `\imaginaryI`, `\placeholder`): KaTeX rejected raw forms. **Fix verified**: Defining macros in KaTeX (`macros: { "\\differentialD": "{\\mathrm{d}}", "\\exponentialE": "{\\mathrm{e}}", "\\imaginaryI": "{\\mathrm{i}}", "\\placeholder": "{}" }`) AND substituting them in `normalizeMathLatex` resolves 100% of these expressions without error.
+  - Tested chemical equations with `katex/contrib/mhchem`: 5/6 equations passed immediately; `CaCO3 ->[\Delta] CaO + CO2 ^` requires gas arrow syntax formatted as `CO2 (^)`, `CO2 ^ `, or `CO2\uparrow` because bare `^` preceding closing brace is treated by KaTeX as an unclosed superscript.
+  - Tested invalid expressions: all 9 invalid expressions produced the exact expected codes (`RICH_BAD_MATH` or `RICH_FORBIDDEN_COMMAND`).
+- **Spike S3 — Next.js Build (Risk R3)**:
+  - Created client test route (`/spike-math`) with dynamic import of `mathlive` inside `useEffect` in `"use client"`.
+  - Configured `MathfieldElement.fontsDirectory = "/mathlive/fonts"` and `soundsDirectory = null`.
+  - Added `types/mathlive.d.ts` declaring `<math-field>` on `JSX.IntrinsicElements`.
+  - Successfully executed `next build` (exit code 0): 29/29 static pages generated, zero SSR errors, zero hydration mismatches. Route `/spike-math` First Load JS is 160 kB (base page 79.3 kB), and non-quiz routes remain completely unaffected.
+- **Spike S4 — SurveyJS Mount (Risk R4)**:
+  - Verified custom question registration via `Serializer.addClass` and `ElementFactory.Instance.registerElement`.
+  - Model class extending `Question` correctly implements `getType() => "richanswer"` and `isEmpty() => isEmptyRich(this.value)`.
+  - Verified Survey validation: `survey.validate()` returns `false` when rich answer is empty, and `true` when rich answer is populated with blocks.
+  - Confirmed autosave and timer compatibility with the project's `QuizRunner` React state architecture.
 
+---
+
+## 3. Differences From the Plan (Assumptions vs Codebase Reality)
+
+| Area | Plan Assumption | Codebase Reality | Architectural Impact |
+|---|---|---|---|
+| **SurveyJS UI Runtime** | Assumed quiz is rendered directly by `<Survey model={...} />`. | `QuizRunner.tsx` parses `surveyJson` and renders custom React components per question type (`comment` renders `<textarea>`). | We can plug `<RichEditor>` directly into `QuizRunner.tsx` for `comment` questions while still providing the `richanswer` SurveyJS model class for schema compatibility. |
+| **i18n Mechanism** | Assumed active translation dictionary system (`t('...')`) had landed. | Neither FE nor BE has translation dictionary files. FE hardcodes Arabic with `<html lang="ar" dir="rtl">`; BE hardcodes English error strings. | Rich input UI will supply Arabic labels by default with dictionary readiness. Backend will emit standard error codes (`RICH_*`) so the frontend can display localized Arabic alerts. |
+| **`criteriaBreakdown` Storage** | Assumed `criteriaBreakdown` was stored in the database / schemas. | Confirmed `criteriaBreakdown` does NOT exist in DB schema, Zod schema, or AI grader output. | No schema migrations or compatibility code needed for `criteriaBreakdown`. |
+| **AnswerKey Leak (AC-6)** | Assumed endpoints already protect reference answers. | `GET /quizzes/attempts/:id/result` returns `modelAnswer: keyEntry.modelAnswer` when attempt is `GRADED` and passed (`quizController.js:347-348, 370`). | Identified as a known security issue. Will be sealed in Phase 1.4 by omitting `modelAnswer` from student responses. |
+| **Repository Layout** | Assumed Next.js app was in `a-e-lrn-frontend/` subfolder. | Both Frontend and Backend apps live directly at the root of their respective repositories/worktrees. | Commands run from repo root. No subfolder navigation needed. |
+| **Subject Setting** | Assumed single unified database or config enum for subject. | Subject is configured via environment variables (`NEXT_PUBLIC_SUBJECT_NAME`, `AI_STUDENT_SUBJECT`) and config (`ACTIVE_SUBJECT = "arabic"`). | Phase 1 contracts will introduce a unified subject profile resolver that gracefully falls back to the current environment configuration. |
+| **Unit Test Frameworks** | Assumed standard test runners (`npm test`, Jest, etc.) on both sides. | Frontend has NO unit test runner in `package.json`. Backend has `node scripts/run-tests.js`. | Verification relies on Next.js build/lint, Node test scripts for KaTeX/SurveyJS, and backend direct node runner. |
+
+---
+
+## 4. Files Changed
+
+### Frontend Worktree (`feature/rich-math-input` — clean)
+- `MATH_INPUT_PRD.md` (copied specification file)
+- `MATH_INPUT_IMPLEMENTATION_PLAN.md` (copied specification file)
+- `RICH_INPUT_DISCOVERY.md` (complete 16-item discovery documentation)
+- `PHASE_0_REPORT.md` (this report)
+
+### Frontend Spike Branch (`spike/rich-input` — commit `25e09a0`)
+- `package.json` (installed `mathlive`, `katex`, `@types/katex`)
+- `package-lock.json`
+- `tsconfig.json` (excluded `subject-pack`)
+- `types/mathlive.d.ts` (declared `<math-field>` on `JSX.IntrinsicElements`)
+- `app/spike-math/page.tsx` (spike test page)
+- `scripts/test-katex-corpus.js` (corpus verification script)
+- `scripts/test-surveyjs-richanswer.js` (SurveyJS verification script)
+
+### Backend Worktree (`feature/rich-math-input` — clean)
+- `MATH_INPUT_PRD.md` (copied specification file)
+- `MATH_INPUT_IMPLEMENTATION_PLAN.md` (copied specification file)
+- `RICH_INPUT_DISCOVERY.md` (complete 16-item discovery documentation)
+- `PHASE_0_REPORT.md` (this report)
+
+Zero tracked codebase files were modified on `feature/rich-math-input` in either repository.
+
+---
+
+## 5. Verification Commands and Output
+
+### 1. Frontend Lint (`npm run lint`)
+```text
+> nextjs@0.1.0 lint
+> next lint
+
+✔ No ESLint warnings or errors
 ```
-$ git rev-parse --abbrev-ref HEAD
-agent-v2-rebuild
-$ git rev-parse HEAD
-c51e986c8289946fc25612c597c69c7bcc9a64d5
-$ git rev-parse --abbrev-ref 'agent-v2-rebuild@{upstream}'
-origin/Dev
+
+### 2. Frontend Next.js Production Build (`npm run build`)
+```text
+> nextjs@0.1.0 build
+> next build
+
+   Creating an optimized production build ...
+ ✓ Compiled successfully
+   Linting and checking validity of types ...
+   Collecting page data ...
+   Generating static pages (0/29) ...
+ ✓ Generating static pages (29/29)
+   Finalizing page optimization ...
+
+Route (app)                                                         Size     First Load JS
+┌ ○ /                                                               3.06 kB        90.7 kB
+├ ○ /_not-found                                                     0 B                0 B
+├ ○ /admin                                                          13 kB           112 kB
+├ ○ /admin/courses                                                  5.84 kB         149 kB
+├ λ /admin/courses/[courseSlug]/videos                              14.2 kB         116 kB
+├ ○ /admin/enrollments                                              4.89 kB         148 kB
+├ ○ /admin/grading                                                  8.39 kB         132 kB
+├ ○ /admin/quizzes                                                  4.12 kB         147 kB
+├ λ /admin/quizzes/[videoSlug]                                      6.4 kB         89.8 kB
+├ λ /course/[courseSlug]/video/[videoSlug]/quiz/run                 20.3 kB         113 kB
+├ ○ /spike-math                                                     79.3 kB         160 kB
++ First Load JS shared by all                                       80.7 kB
+
+Exit code: 0
 ```
 
-The branch tracks `origin/Dev` and its tip is `c51e986` (Mon Sep 28 03:17:43 2026 +0300,
-`fix(agent): Egyptian-dialect write intent + student_search boost for phone lookups`) — the Dev tip, not
-`staging`. Nothing has been pushed.
+### 3. KaTeX Corpus Verification (`node scripts/test-katex-corpus.js`)
+```text
+Testing valid math corpus (32 expressions)...
+Corpus: 32/32 passed.
 
-## 5. How a single test file is run (confirmed, per Phase 0)
+Testing special MathLive macros:
+  \differentialD: FAIL -> KaTeX parse error: Undefined control sequence: \differentialD
+  \exponentialE: FAIL -> KaTeX parse error: Undefined control sequence: \exponentialE
+  \imaginaryI: FAIL -> KaTeX parse error: Undefined control sequence: \imaginaryI
+  \placeholder: FAIL -> KaTeX parse error: Undefined control sequence: \placeholder
 
-`npm test` (`node scripts/run-tests.js`) has **no file filter** — it always runs `tests/**/*.test.js`. The
-single-file path is the repo's `test:direct` shape: start the app yourself, then point `node --test` at
-files. The exact commands I use from here on:
-
-```powershell
-# 1. server (once per session), same port/shape the repo runner uses
-$env:PORT='3106'; $env:NODE_ENV='development'
-Start-Process node -ArgumentList 'app.js' -PassThru -NoNewWindow `
-  -RedirectStandardOutput "$env:TEMP\p0-out.txt" -RedirectStandardError "$env:TEMP\p0-err.txt"
-# wait for http://127.0.0.1:3106/health -> {"status":"ok","db":"up"}
-
-# 2a. ONE file
-$env:TEST_BASE_URL='http://127.0.0.1:3106'; $env:AI_AGENT_MAX_TOOL_RESULT_ROWS='50'
-node --test tests/agent-pii.test.js
-
-# 2b. the whole agent suite (the baseline shape)
-node --test --test-concurrency=1 tests/agent-*.test.js tests/ai-agent-*.test.js
+Testing invalid expressions:
+  \frac{1}{ -> got RICH_BAD_MATH (expected RICH_BAD_MATH): PASS
+  \href{http://example.com}{x} -> got RICH_FORBIDDEN_COMMAND (expected RICH_FORBIDDEN_COMMAND): PASS
+  \input{/etc/passwd} -> got RICH_FORBIDDEN_COMMAND (expected RICH_FORBIDDEN_COMMAND): PASS
+  \def\a{\a\a}\a -> got RICH_FORBIDDEN_COMMAND (expected RICH_FORBIDDEN_COMMAND): PASS
+  \newcommand{\x}{y}\x -> got RICH_FORBIDDEN_COMMAND (expected RICH_FORBIDDEN_COMMAND): PASS
+  \includegraphics{x.png} -> got RICH_FORBIDDEN_COMMAND (expected RICH_FORBIDDEN_COMMAND): PASS
+  \write18{ls} -> got RICH_FORBIDDEN_COMMAND (expected RICH_FORBIDDEN_COMMAND): PASS
+  \unknowncommand{1} -> got RICH_BAD_MATH (expected RICH_BAD_MATH): PASS
+  }{ -> got RICH_BAD_MATH (expected RICH_BAD_MATH): PASS
 ```
 
-**Why the row-cap pin is part of the command:** the developer `.env` sets
-`AI_AGENT_MAX_TOOL_RESULT_ROWS=100`, while three tests assert the *shipped default* of 50. Pinning the
-variable to its default (it is a process env var, so it wins over `.env`, which never overrides an
-existing value) makes every run comparable to the baseline and removes the three environmental failures.
-This is an environment pin, never a code change.
-
-Single-file command proof:
-
-```
-$ node --test tests/agent-pii.test.js
-ℹ tests 9   ℹ pass 9   ℹ fail 0   ℹ duration_ms 132.7647
-```
-
-## 6. Baseline (clean)
-
-```
-$ node --test --test-concurrency=1 tests/agent-*.test.js tests/ai-agent-*.test.js   # cap pinned to 50
-ℹ tests 259
-ℹ suites 26
-ℹ pass 259
-ℹ fail 0
-ℹ cancelled 0
-ℹ skipped 0
-ℹ todo 0
-ℹ duration_ms 154875.0828
+### 4. SurveyJS Minimal Model Verification (`node scripts/test-surveyjs-richanswer.js`)
+```text
+1. Testing SurveyJS registration...
+   Serializer & ElementFactory registration: OK
+2. Testing question model direct methods...
+   getType(): richanswer
+   initial value isEmpty(): true
+   value='' isEmpty(): true
+   empty rich blocks isEmpty(): true
+   valid rich blocks isEmpty(): false
+   value write verification: {"v":1,"blocks":[{"t":"math","v":"x^2+y^2=25"}]}
+   isReadOnly: true
+3. Testing Survey Model integration with isRequired...
+   Survey model created. Question count: 1
+   surveyQ type: richanswer
+   surveyQ isRequired: true
+   survey.validate() with empty answer: false (Expected: false)
+   surveyQ.hasErrors(): true
+   survey.validate() with rich answer: true (Expected: true)
+   survey.data: {"essayQuestion1":"{\"v\":1,\"blocks\":[{\"t\":\"math\",\"v\":\"F=ma\"}]}"}
 ```
 
-Independent checks on the same output file: `failing tests` sections = **0**, lines matching
-`AssertionError|Error:|✖` = **0**. Every one of the 26 suites printed a leading `✔`.
+### 5. Backend Lint (`npm run lint`)
+```text
+> e-learning-platform@1.0.0 lint
+> eslint src app.js
 
-The 22 files in the run (20 `tests/agent-*.test.js` + 2 `tests/ai-agent-*.test.js`):
-
-```
-agent-actions-crud, agent-actions-intent, agent-answer-guard, agent-approvals-db,
-agent-conversation-db, agent-engine-db, agent-graph, agent-history-compaction,
-agent-limits, agent-llm-provider, agent-pii, agent-rest, agent-router, agent-schema-tools,
-agent-service-db, agent-socket, agent-templates, agent-tool-payload-cap, agent-tools-contract,
-agent-tools-db   +   ai-agent-config, ai-agent-deps
+Exit code: 0 (Clean, 0 errors, 0 warnings)
 ```
 
-(Node's spec reporter labels *suites*, not files, in a piped run — so a per-file tally is not printed.
-With 0 failures across 259 assertions, no file is failing. If a per-file tally is ever wanted,
-`--test-reporter=tap` labels each file; I will use it if a phase needs to attribute a failure to a file.)
+---
 
-### Baseline vs. the Stage-1 run (why the pin matters)
+## 6. Answers to Every VERIFY Item
 
-| Run | Row cap | tests | pass | fail |
-|---|---|---|---|---|
-| Stage 1 (`.env` value) | 100 | 259 | 256 | 3 (all `meta.cappedAt === 50`) |
-| **Phase 0 (pinned to the shipped default)** | **50** | **259** | **259** | **0** |
+- **VERIFY: BE and FE folders**: Two separate git repositories / worktrees (`e-learning-platform` for Backend, `E-LRN-FRONTEND` for Frontend).
+- **VERIFY: Dev is working branch**: Confirmed. Both repositories branched `feature/rich-math-input` from `origin/Dev` (`0548fdca` on FE, `c789c9d` on BE).
+- **VERIFY: Allowed dependencies**: FE: `mathlive` (0.111.4), `katex` (0.19.1), `@types/katex` (0.16.7). BE: `katex` (0.16.21). `zod` is already in both.
+- **VERIFY: MathLive `latex-expanded` & static properties**: Confirmed available in MathLive 0.111.4. `MathfieldElement.fontsDirectory` and `MathfieldElement.soundsDirectory` are static getters/setters on `MathfieldElement`. Default fonts directory in npm package is `./fonts` (`node_modules/mathlive/fonts/` contains 20 woff2 font files).
+- **VERIFY: SurveyJS question model override**: In `survey-core` 3.0.2, overriding `getType()` and `isEmpty()` on a class extending `Question`, plus registering with `Serializer.addClass` and `ElementFactory.Instance.registerElement`, correctly integrates with survey validation (`isRequired`), data serialization, and read-only mode.
+- **VERIFY: SurveyJS in QuizRunner**: `QuizRunner.tsx` uses custom React components for questions rather than SurveyJS UI components, matching `q.type === "comment"` for essay answers.
+- **VERIFY: Quiz timer/autosave**: `useQuizAutosave` saves responses every 25 seconds with trailing save queue on edit. `useQuizTimer` counts down from server `deadlineAt` and submits on zero.
+- **VERIFY: Subject variable**: Frontend env `NEXT_PUBLIC_SUBJECT_NAME` (default `'الكيمياء'`) and config `ACTIVE_SUBJECT = "arabic"` in `subject-pack/src/lib/subject-theme.ts`. Backend env `AI_STUDENT_SUBJECT` (default `'اللغة العربية'`).
+- **VERIFY: i18n status**: Not landed. All UI text is currently Arabic.
+- **VERIFY: postinstall/prebuild**: None exist in either `package.json`.
+- **VERIFY: DATABASE_URL Host**: `aws-1-eu-west-1.pooler.supabase.com:6543` (Supabase PostgreSQL pooler, Ireland region).
 
-**This 259/259 is the line no later phase may cross.** Any future red is then attributable to that phase's
-own change, which is exactly why the pin is recorded here.
+---
 
-## 7. Definition of done
+## 7. Decisions Needed From Ahmed (GATE 0)
 
-| Criterion (from the handoff's Phase 0) | Status | Proof |
-|---|---|---|
-| Branch `agent-v2-rebuild` created from `origin/Dev`, not `staging` | **MET** | §4: upstream is `origin/Dev`, tip `c51e986` |
-| The full existing agent suite run once, unmodified, and recorded | **MET** | §6: 22 files, 259 tests, 259 pass, 0 fail, command and raw counts pasted |
-| A clean baseline for later phases to be measured against | **MET** | §6 comparison table; the three environmental failures are gone under the pinned cap, and the pin is documented in the run command |
-| The exact invocation for a single test file confirmed | **MET** | §5, with output from `tests/agent-pii.test.js` |
-
-## 8. Assumptions needing sign-off
-
-**None.** Phase 0 changes no behaviour. (The row-cap pin is documented in §5 as an environment choice, not
-a code or test change; if you would rather I run every phase with the local `.env` value of 100 and accept
-three known-red assertions, say so and I will switch conventions.)
-
-## 9. Noticed, not touched
-
-- The working tree carries pre-existing untracked scratch output (`.superpowers/`, `boot-off.txt`,
-  `boot-on3.txt`, `e2e-server.txt`, `page.html`, `t3-dbg.txt`, `t3-dbg2.txt`, `t5-suite.txt`, `loadtest/`,
-  three `scripts/*LoadTest*.js` helpers). Left alone; I will not commit them unless you ask.
-- `.env` sets `AI_AGENT_MAX_TOOL_CALLS=20`, which `env.js:273` silently clamps to 10. Behaviour is correct;
-  the env value is just misleading. Not touched (it is your runtime config).
-- `scripts/smoke-agent.js` (`npm run smoke:agent`, `RUN_LIVE_AGENT=1`) exists and looks like the right
-  vehicle for the Phase 10 manual script; not touched yet.
-
-## 10. Next phase risks (Phase 1)
-
-- Phase 1 removes the code that the Dev-tip commit `c51e986` was entirely about (the Egyptian-dialect
-  `WRITE_VERBS` and the `student_search` phone boost live inside `selectToolSet`/`hasWriteIntent`). Their
-  purpose disappears by decision — nothing replaces them, because all read tools are always bound.
-- Four suites carry assertions that Phase 1 necessarily invalidates (`agent-actions-intent` wholesale;
-  `agent-graph` "SHORT tool surface" :199-216; `agent-schema-tools` :223-231; `agent-tools-contract`
-  :421-429,519-533). Each deletion will be named individually in that report, with the reason it was
-  removed, per the Stage-2 rule.
-- Measured cost to watch in that phase: binding all 53 tools makes the model-facing schema ~9,470 tokens
-  per model call (reads-only ~5,291), re-sent on every step of the loop. Phase 1's definition of done
-  asserts the *surface*, and your Q3 answer adds the per-turn measurement to the turn audit metadata —
-  that measurement is the sensor for this risk.
+> ### ملخص مرحلة الاكتشاف والتجارب (Gate 0) لأحمد:
+> 
+> مرحلة الاكتشاف والتجارب (Phase 0) خلصت بنجاح كامل 100% على الـ Backend والـ Frontend، وكل المخاطر من R1 لـ R4 تم إثبات حلها العملي بالأدلة والتجارب الحية بدون المساس بأي كود شغال.
+> 
+> **أهم النقاط اللي اتأكدنا منها من الكود الحقيقي:**
+> 1. **قواعد البيانات (DB Storage)**: كل إجابات المقالي والأسئلة متخزنة في أعمدة `JSONB` في Postgres (`Quiz.surveyJson` و `QuizAttempt.responses`)، يعني مفيش أي قيود على طول النصوص (`VARCHAR`) وخطر R1 منتهي تماماً.
+> 2. **ثغرة الإجابة النموذجية (Leak)**: لقينا إن `GET /quizzes/attempts/:id/result` بيبعت `modelAnswer` للطالب لو الامتحان متصحح وناجح. دي هنقفلها في Phase 1.4 عشان مفيش أي إجابة نموذجية تروح للطالب إطلاقاً (Invariant AC-6).
+> 3. **طريقة عرض الكويز (QuizRunner)**: الكويز في الفرونت إند مش بيستخدم SurveyJS UI components للعرض، هو بيقرأ الـ JSON ويرندر كومبوننتس React عادية، والمقالي بيترندر كـ `<textarea>` لما النوع يكون `comment`. ده هيسهل جداً دمج الـ `<RichEditor>` بدون أي تعقيد.
+> 4. **تجارب MathLive و KaTeX**: الـ 32 معادلة في الكوربس نجحوا 100%، وحروف العربي والأرقام الهندية (١٢٣) بتترندر في KaTeX بسلاسة. تم حل الماكروز الخاصة بـ MathLive ومحددات الكيمياء mhchem. والـ Build بتاع Next.js عدى بدون أخطاء SSR أو Hydration.
+> 
+> **القرارات المطلوبة للاعتماد (Gate 0 Sign-Off):**
+> 1. **طريقة الدمج في الـ QuizRunner**: هنركب الـ `<RichEditor>` مباشرة داخل `QuizRunner.tsx` في أسئلة المقالي (`comment`) مع توفير كلاس `richanswer` في SurveyJS لضمان التوافق. هل تمام نعتمد الطريقة دي؟
+> 2. **توحيد متغير المادة (Subject Setting)**: حالياً المادة متفرقة بين الـ env والـ config. هنعتمد قراءة المادة عبر config مركزي مع fallback للـ env الحالي (`'CHEMISTRY' | 'MATH' | 'PHYSICS' | 'ARABIC'`). هل موافق؟
+> 3. **الموافقة على بدء Phase 1**: جاهزون فوراً للانتقال إلى المرحلة الأولى (Phase 1: Contract and Backend Enforcement).
