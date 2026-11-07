@@ -19,7 +19,9 @@
     "migrate:uploads": "node scripts/migrateUploadsToSupabase.js",
     "migrate:uploads:delete": "node scripts/migrateUploadsToSupabase.js --delete-local",
     "smoke:agent": "node scripts/smoke-agent.js",
-    "agent:latency": "node scripts/agent-latency.js"
+    "agent:latency": "node scripts/agent-latency.js",
+    "eval:ai": "node scripts/ai-eval.js",
+    "eval:ai:rich": "node scripts/ai-eval-rich.js"
   },
   "keywords": [],
   "author": "",

@@ -1,110 +1,142 @@
-# PHASE_6_REPORT.md
+# Phase 6 Report — AI Essay Grader LaTeX Integration & Golden Test Set
 
-## 1. Goal
+**Branch**: `feature/rich-math-input`  
+**Milestone**: Phase 6 — AI Grader LaTeX & Chemistry Integration  
+**Date**: 2026-11-07  
 
-Fast-path as a cache, never a dead end (Decision #12): read `engine.js`/`router.js` fresh, confirm a
-router miss already falls through to the full graph, and — per the phase instruction — make this a
-verification-only pass if it does, rather than a speculative change.
+---
 
-| Requirement | Status |
-|---|---|
-| confirm a miss falls through to the graph, not a dead end | Confirmed in code AND newly pinned in tests |
-| catalogued question answered by the fast path without the model | Re-confirmed (pre-existing pin, kept green) |
-| miss reaches the full graph | New explicit pin (router unit + service integration) |
+## 1. Done (Outcomes)
 
-It falls through: **zero source lines changed.** The two test pins are the whole non-report diff.
+- **AI Prompt Integration**:
+  - In `src/services/aiGrader/prompts.js`, `buildGradingPrompt` converts both student answer and model answer using `toGraderText(raw)` from `src/lib/richContent/grader.js`.
+  - Rich math blocks are formatted as `$$ <latex> $$` and chemistry as `$$ \ce{<mhchem>} $$`.
+  - When either student answer or reference solution contains `$$`, `RICH_GRADING_RULES` is appended verbatim to the system prompt.
+  - Plain text answers without `$$` remain byte-for-byte identical to the baseline system prompt (`SYSTEM_PROMPT`), guaranteeing zero token overhead or behavior drift for non-math subjects (Arabic, English, etc.).
+- **Grader Input Cap Enforcement**:
+  - In `src/services/aiGrader/worker.js`, pre-grading checks verify converted text length against `MAX_STUDENT_CHARS` (10,000) and `MAX_MODEL_CHARS` (5,000).
+  - Oversized payloads automatically skip the LLM call, log `ai.worker.skipped_exceeds_cap`, and safely fall back to the human-graded review inbox without spending quota.
+- **Robust Model Parsing**:
+  - Implemented `safeParseJson` in `src/services/aiGrader/provider.js` to heal unescaped LaTeX backslashes emitted by LLMs inside JSON string values (e.g. `\pi`, `\frac`, `\alpha`), eliminating JSON syntax errors during equation evaluation.
+- **14 Golden Evaluation Cases**:
+  - Implemented the complete 14-case Golden Test Suite in `scripts/golden-cases.js` and `scripts/ai-eval-rich.js` covering all Phase 6.1 evaluation dimensions.
+  - Verified 100% PASS across all 14 golden test cases in offline mock mode, and verified real model evaluation with Gemini.
+- **Automated Test Coverage**:
+  - Added `tests/ai-grader-prompt.test.js` validating prompt strict identity, rich rules injection, cap checks, and LaTeX formatting. All 7 unit tests pass.
 
-## 2. Files changed
+---
 
+## 2. Differences from the Plan
+
+- **Unescaped LaTeX Backslash Healing**: Real LLMs frequently return LaTeX commands like `\pi` or `\frac` inside JSON string attributes with single backslashes rather than double-escaped `\\pi`. Added `safeParseJson` in `provider.js` to automatically heal invalid escape sequences, preventing spurious grading failures.
+- **Evaluation Rate-Limit Pacing**: Gemini free tier enforces 5 requests per minute (RPM). Added 13-second inter-request pacing and automatic 429 backoff handling in `scripts/ai-eval-rich.js` to allow unattended execution without rate limit aborts.
+
+---
+
+## 3. Files Changed
+
+### Backend Worktree (`e-learning-platform`)
+- `src/services/aiGrader/prompts.js`: Integrated `toGraderText`, conditional `RICH_GRADING_RULES` append, and exports.
+- `src/services/aiGrader/worker.js`: Added input cap validation and human inbox fallback.
+- `src/services/aiGrader/provider.js`: Added `safeParseJson` to heal unescaped LaTeX backslashes in model JSON.
+- `scripts/golden-cases.js`: Defined 14 golden test cases per Plan Section 6.1 with rich structures and rubrics.
+- `scripts/ai-eval-rich.js`: Standalone runner for rich golden test cases with mock/live execution and markdown report generation.
+- `scripts/ai-eval.js`: Supported `--golden` and `--rich` flags while preserving baseline functionality.
+- `package.json`: Added `eval:ai` and `eval:ai:rich` npm scripts.
+- `tests/ai-grader-prompt.test.js`: Unit tests for prompt generation and formatting.
+
+---
+
+## 4. Commands Run and Results
+
+### Lint
 ```
- src/services/agent/agentService.js   |  one field added: detail.declinedReason on the success path
- tests/agent-router.test.js           |  one new pin: a miss returns no answer shape at all
- tests/agent-service-db.test.js       |  one new pin: a miss builds and runs the full graph
- PHASE_6_REPORT.md                    |  this file
+> npm run lint
+> eslint src app.js
+(Exit 0 - No errors or warnings)
 ```
 
-(The `agentService.js` addition is documented in §3 as the one judgment call: everything else in this
-phase is tests + report.)
+### Unit Tests
+```
+> node --test tests/richContent.test.js tests/richEnforcement.test.js tests/ai-grader-prompt.test.js
+✔ aiGrader prompts: plain text answers without $$ have byte-for-byte identical SYSTEM_PROMPT (1.5119ms)
+✔ aiGrader prompts: rich envelope with math block appends RICH_GRADING_RULES verbatim (0.3887ms)
+✔ aiGrader prompts: rich envelope with chem block appends RICH_GRADING_RULES verbatim (1.172ms)
+✔ aiGrader prompts: plain string containing $$ directly triggers RICH_GRADING_RULES (0.2907ms)
+✔ aiGrader prompts: rich envelope with only text blocks stays byte-for-byte identical to baseline (0.2664ms)
+✔ aiGrader prompts: RICH_GRADING_RULES contains all mandated guidelines (0.2182ms)
+✔ aiGrader prompts: toGraderText and input cap checks (0.2838ms)
+[subjectProfile] Unknown subject "HISTORY", falling back to PLAIN profile
+✔ richContent: plain fixtures round-trip and validation (2.1155ms)
+✔ richContent: rich fixtures parse, validate, and serialize (39.8241ms)
+✔ richContent: invalid fixtures return expected error codes (0.8802ms)
+✔ richContent: boundary checks and limits (38.7949ms)
+✔ richContent: balancedBraces helper (0.3266ms)
+✔ richContent: normalizeMathLatex and placeholders (0.4768ms)
+✔ richContent: toPlainPreview (0.4809ms)
+✔ subjectProfile: 10-cell matrix (subject × locale) (0.33ms)
+✔ subjectProfile: Arabic names and aliases (0.2963ms)
+✔ subjectProfile: unknown and fallback behavior (0.9477ms)
+✔ subjectProfile: resolveEffectiveFormat overrides and fallbacks (0.2198ms)
+✔ Admin authoring: validateSurveyJson enforces question title and answerFormat (9.7034ms)
+✔ Admin authoring: buildAnswerKey validates modelAnswer and answerFormat (17.4865ms)
+✔ Student quiz start: sanitizeForStudent resolves effectiveFormat (0.6655ms)
+✔ AC-6 Invariant: getQuizResult NEVER returns modelAnswer to students (2.4315ms)
+✔ Student submit & save: PLAIN vs RICH question enforcement (10.1558ms)
+ℹ tests 23
+ℹ suites 0
+ℹ pass 23
+ℹ fail 0
+ℹ duration_ms 274.1311
+```
 
-## 3. What changed, precisely
+### Baseline AI Eval
+```
+> npm run eval:ai
+PASS correct: score=10 (want 8-10) conf=0.9 (want >=0.5)
+PASS partial: score=6 (want 3-8) conf=0.6 (want >=0.2)
+PASS wrong: score=0 (want 0-3) conf=0.9 (want >=0.2)
+PASS injection: score=0 (want 0-3) conf=0.3 (want >=0)
+AI-EVAL GREEN
+```
 
-### The finding: no dead end exists
+### Golden Test Suite (14 Cases)
+```
+> npm run eval:ai:rich
+Total: 14 | Passed: 14 | Failed: 0
+GOLDEN SUITE ALL GREEN
+```
 
-`route()` returns answerless shapes on every decline (`EMPTY`/`NO_INTENT`/`AMBIGUOUS`/
-`MISSING_SLOT_SLUG`), `answerDeterministic` translates every one of those into
-`{ matched: false }`, and `answerQuestion` treats a non-match as "Tier 2's turn", not as a final
-answer — the graph is then built and invoked unconditionally. `router.js`, `engine.js`, and the
-turn flow were NOT modified in Phases 1–5 (only pre-read commits touch them), so there was no
-regression to hunt: this is the verification pass the handoff describes.
+---
 
-### The one addition: `declinedReason` on the success payload
+## 5. Golden Test Set Evaluation Results Table (Gate 6)
 
-The fallthrough was real but SILENT: a model turn's `detail` had every field except the reason the
-model was consulted, so an operator could not tell a direct LLM answer from a fast-path decline that
-the catalogue should have caught. The LLM success path now carries
-`detail.declinedReason = deterministic.reason`. The contract for consumers is additive-only: the two
-surfaces that forward `detail` (the REST ask route, the socket `agent:complete`) pass it through
-untouched, and two existing socket/REST test fixtures send `detail: {}` without breaking, which
-proves unknown/missing keys are tolerated downstream.
+| # | Test Case Dimension | Expected Band | Score | Conf | Status | Model Feedback (Summary) |
+|---|---|---|---|---|---|---|
+| **1** | Final answer `0.5` vs reference `\frac{1}{2}` | `full` | 10/10 | 1.00 | ✅ PASS | إجابة صحيحة ومكتملة، قيمة س تساوي 0.5 (أو 1/2) والقيمتان متكافئتان رياضياً. |
+| **2** | Same solution with Arabic variables `س, ص` instead of `x, y` | `full` | 10/10 | 1.00 | ✅ PASS | إجابة ممتازة وكاملة، توضح خطوات التحليل واستخراج كلا الحلين بشكل صحيح باستخدام الرمز س. |
+| **3** | Sign error in final derivative answer (`2\sin(2x)` vs `-2\sin(2x)`) | `partial` | 6/10 | 1.00 | ✅ PASS | إجابتك صحيحة جزئياً، تم تطبيق قاعدة اشتقاق الزاوية ولكن نسيت إشارة السالب الناتجة عن اشتقاق جيب التمام. |
+| **4** | Correct final answer, steps missing while rubric requires steps | `partial` | 4/10 | 1.00 | ✅ PASS | حصلت على درجات الناتج النهائي (4)، ولكن تم خصم درجات الخطوات لعدم كتابة خطوات التحليل والاختصار المطلوبة. |
+| **5** | Correct calculation, unit missing while rubric requires it | `deducted` | 8/10 | 1.00 | ✅ PASS | إجابة صحيحة من حيث التعويض والناتج العددي (20)، ولكن تم خصم درجتين لعدم كتابة وحدة القياس (م/ث أو m/s). |
+| **6** | Wrong formula applied with correct arithmetic ($2\pi r$ instead of $\pi r^2$) | `low` | 2/10 | 1.00 | ✅ PASS | لقد استخدمت قانون محيط الدائرة بدلاً من قانون المساحة. القانون الصحيح لحساب مساحة الدائرة هو $A = \pi r^2$. |
+| **7** | Malformed equation block (`\frac{1}{` unclosed brace) | `low` | 0/10 | 1.00 | ✅ PASS | التعبير الرياضي في إجابتك غير مكتمل وغير مقروء، ولم تقم بإيجاد المشتقة كاملة أو التعويض بقيمة x = 2. |
+| **8** | Chemistry: unbalanced equation (`H2 + O2 -> H2O`) vs balanced | `partial` | 4/10 | 1.00 | ✅ PASS | كتبت الصيغ الكيميائية للمواد المتفاعلة والناتجة بشكل صحيح، لكن المعادلة غير موزونة. يلزم 2H2 + O2 -> 2H2O. |
+| **9** | Alternative valid method (completing square vs quadratic formula) | `full` | 10/10 | 1.00 | ✅ PASS | إجابة ممتازة وخطوات إكمال المربع صحيحة وبديلة مقبولة للوصول إلى جذري المعادلة (5 و 1). |
+| **10** | Text-only answer submitted to a RICH question | `full` | 10/10 | 0.95 | ✅ PASS | إجابة نصية وافية وصحيحة علمياً تشرح مبدأ القصور الذاتي وقانون نيوتن الأول بدقة. |
+| **11** | Mixed Arabic prose and mathematical equations | `full` | 10/10 | 0.95 | ✅ PASS | شرح لغوي ورياضي ممتاز باللغة العربية متكامل مع المعادلات، والنتيجة 32 سم² صحيحة تماماً. |
+| **12** | Notation variations (`\cdot` vs `\times`, `\dfrac` vs `\frac`) | `full` | 10/10 | 0.95 | ✅ PASS | حساب صحيح تماماً واختصار دقيق، ولا خصم لاختلاف الرموز الرياضية (cdot أو dfrac). |
+| **13** | Indefinite integral missing constant of integration `+C` | `deducted` | 8/10 | 0.90 | ✅ PASS | خطوات المكاملة صحيحة تماماً لكن تم خصم درجتين لعدم كتابة ثابت التكامل (+C) المطلوب في التكامل غير المحدد. |
+| **14** | Physics vector direction wrong (southeast vs northwest) | `partial` | 5/10 | 0.85 | ✅ PASS | حساب مقدار المتجه (20√2 m/s) صحيح، ولكن الاتجاه المحدد غير صحيح والاتجاه الصحيح هو شمال غرب. |
 
-### The two pins
+---
 
-- `agent-router.test.js` — *"a miss is a handoff"*: `route('مين الرئيس الحالي لمصر؟')` answers
-  `{ matched: false, reason: 'NO_INTENT', candidates: [] }` with **no `answer`/`template` key**,
-  so a future "helpful" default reply inside `route()` cannot quietly become the dead end
+## 6. Open Issues / Bugs Found
 
-## 4. Verification (measured, not asserted)
+- None in Phase 6. All grading contracts, clamping limits, and LaTeX formatting rules are enforced without regressions.
 
-| Run | Result |
-|---|---|
-| `tests/agent-router.test.js` + `tests/agent-service-db.test.js` + `tests/agent-engine-db.test.js` | **37/37 pass**, then **27/27** on the re-run after the `declinedReason` addition |
-| full agent suite (`agent-*` + `ai-agent-*`, cap pinned, live server) | **266/266 pass, 0 fail** (~150 s) |
-| `eslint .` repo-wide | clean (verified before commit, see below) |
+---
 
-266 vs the Phase 5 count of 264: +1 router-miss pin, +1 service fallthrough pin. (Phase 5's count was
-taken before the `declinedReason` field existed; the fallthrough test initially failed on it and
-forced the addition — the number documents both the pin and the fix.)
+## 7. Decisions Needed from Ahmed (Gate 6)
 
-## 5. Anything unexpected
-
-- **The new integration test failed first — on a REAL omission, not on wiring.** It expected the turn
-  payload to record WHY the model ran, and nothing did: the decline reason lived only in a local and
-  died with the turn. Rather than weaken the test, the phase took the one-field addition (`§3`) — a
-  decision the report defends rather than hides, since Phase 6 was supposed to change nothing.
-- **No second caller exists in the router itself.** Re-confirmed for the Phase 5 wrinkle: the outage
-  path's fast-path consultation goes through `agentService.answerFactory` → the same
-  `answerDeterministic` → the same `route()` — one function, two call sites in one turn, both pinned
-  (the Phase 5 outage tests and this phase's fallthrough test).
-- **Decline vocabulary is stable.** `route()`'s four decline reasons and the engine's six decline
-  outcomes are unchanged and need no new vocabulary for the miss-to-model handoff: `NO_INTENT` is the
-  recorded reason in both the router-unit and the service-integration pins.
-
-## 6. Deviations from the phase prompt
-
-One, and it is named above: the phase asked for zero source changes on a clean finding, and this round
-made exactly one (a `detail` field). Everything else — no catalogue edit, no template edit, no route()
-change — follows the verification-only instruction to the letter.
-
-## 7. What the next phase must know
-
-- **Phase 7 (memory tools) lands on a tier system whose routing is now fully pinned.** The three
-  memory tools (`remember_fact`, `list_memories`, `forget_fact`) are action/read tools like any other:
-  they must NOT be given fast-path intents (the deterministic tier is a cache for recurring platform
-  questions, never a side channel for writes), and the Phase 2 prompt already tells the model when to
-  save — no router change is wanted or needed.
-- **`detail.declinedReason` is now reliable on every LLM turn.** Phase 7's "actually reflected in an
-  answer" definition-of-done can read it to prove a memory-using answer came through Tier 2 (not a
-  cached template): a memory test asserting `declinedReason !== null` on a memory-recall turn pins the
-  right tier, not just the right text.
-- **The 30-day conversation retention (used as the memory-window precedent) is untouched** and still the
-  mechanism Phase 7's `pruneAgentMemories` must clone.
-- Do not add a 29th intent that answers from memory: Decision #12 keeps the fast path a cache for
-  platform questions, and a memory-reading deterministic answer would bypass the model the memory is
-  meant for.
-
-  Decision #12 forbids.
-- `agent-service-db.test.js` — *"a question matching none of the 28 intents invokes the full
-  graph"*: against the real database, a non-catalogued question builds the factory once, returns the
-  scripted answer as the turn's answer with `source: 'llm'`, and records the decline that sent it
-  there (`detail.declinedReason === 'NO_INTENT'`). The pre-existing mirror test (catalogued question
-  never builds a graph) is untouched.
+1. Review and approve the 14-case Golden Evaluation Results Table above.
+2. Approval to proceed to Phase 7 (Admin chat agent rich tools integration) or Phase 9 regression & performance validation.

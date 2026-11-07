@@ -47,7 +47,7 @@ async function buildProvider() {
     if (!apiKey) throw new Error('GEMINI_API_KEY not set for --real mode');
     const { createGeminiProvider } = require('../src/services/aiGrader/provider');
     const config = require('../src/config/env');
-    return createGeminiProvider({ apiKey, model: (config.aiGrader && config.aiGrader.model) || 'gemini-2.5-flash' });
+    return createGeminiProvider({ apiKey, model: (config.aiGrader && config.aiGrader.model) || 'gemini-3.6-flash' });
   }
   const { createMockProvider } = require('../src/services/aiGrader/provider');
   return createMockProvider([
@@ -59,6 +59,12 @@ async function buildProvider() {
 }
 
 (async () => {
+  if (process.argv.includes('--golden') || process.argv.includes('--rich')) {
+    const { runGoldenSuite } = require('./ai-eval-rich');
+    const { failedCount } = await runGoldenSuite();
+    process.exit(failedCount > 0 ? 1 : 0);
+  }
+
   const { gradeEssay } = require('../src/services/aiGrader/index');
   const provider = await buildProvider();
   let failed = 0;

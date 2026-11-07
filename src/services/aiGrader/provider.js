@@ -32,7 +32,7 @@ function createGeminiProvider({ apiKey, model }) {
       const text = typeof res.content === 'string'
         ? res.content
         : JSON.stringify(res.content);
-      return JSON.parse(extractJson(text));
+      return safeParseJson(text);
     },
   };
 }
@@ -49,6 +49,22 @@ function extractJson(text) {
     throw new Error('Model output contains no JSON object');
   }
   return text.slice(start, end + 1);
+}
+
+function safeParseJson(text) {
+  const jsonStr = extractJson(text);
+  try {
+    return JSON.parse(jsonStr);
+  } catch (err) {
+    // When grading mathematics, models frequently emit unescaped LaTeX backslashes
+    // inside JSON string values (e.g. \pi, \frac, \alpha). Heal invalid escape sequences.
+    try {
+      const sanitized = jsonStr.replace(/\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})/g, () => '\\\\');
+      return JSON.parse(sanitized);
+    } catch {
+      throw err;
+    }
+  }
 }
 
 /**
@@ -81,4 +97,5 @@ module.exports = {
   createGeminiProvider,
   createMockProvider,
   extractJson,
+  safeParseJson,
 };

@@ -20,6 +20,8 @@ const prisma = require('../../config/db');
 const { gradeEssay, DEFAULT_MAX_ATTEMPTS } = require('./index');
 const { createGeminiProvider } = require('./provider');
 const { QUEUE_NAME } = require('./queue');
+const { toGraderText } = require('../../lib/richContent/grader');
+const { MAX_STUDENT_CHARS, MAX_MODEL_CHARS } = require('./prompts');
 
 function logInfo(event, ctx = {}) {
   console.log(`[INFO] ${event}`, JSON.stringify(ctx));
@@ -176,6 +178,27 @@ async function processGradingJob(job, providerFactory = defaultProviderFactory) 
   if (typeof answer !== 'string' || !answer.trim()) {
     logInfo('ai.worker.skipped_no_answer', { attemptId, questionName });
     return { skipped: 'no-answer' };
+  }
+
+  // Cap check: if converted text exceeds grader input cap, fall back to human-graded inbox
+  const convertedStudent = toGraderText(answer);
+  const convertedModel = toGraderText(entry.modelAnswer);
+  if (convertedStudent.length > MAX_STUDENT_CHARS || convertedModel.length > MAX_MODEL_CHARS) {
+    logInfo('ai.worker.skipped_exceeds_cap', {
+      attemptId,
+      questionName,
+      studentLength: convertedStudent.length,
+      maxStudentChars: MAX_STUDENT_CHARS,
+      modelLength: convertedModel.length,
+      maxModelChars: MAX_MODEL_CHARS,
+    });
+    await markJob(attemptId, questionName, {
+      status: 'DONE',
+      confidence: 0,
+      applied: false,
+      error: 'Converted text exceeds grader input cap; forwarded to human review',
+    });
+    return { skipped: 'exceeds-cap', forwardedToHuman: true };
   }
 
   await markJob(attemptId, questionName, { tries: { increment: 1 }, claimedAt: new Date() });
