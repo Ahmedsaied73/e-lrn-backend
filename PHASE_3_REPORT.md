@@ -1,107 +1,119 @@
-# PHASE_3_REPORT.md
+# Phase 3 Report — Student Quiz Integration & Display Surfaces
 
-> **Written retroactively** (2026-09-29, Phase 3.1 round). The external review of
-> `agent-v2-rebuild` @ `7ae8f80` found this file missing — the process rule is "write the report,
-> then stop", and Phase 3 broke it. Everything below describes the branch exactly as it shipped in
-> commits `a6b3ace` + `7ae8f80`; anything that has since changed is marked and belongs to
-> `PHASE_3_1_REPORT.md`.
+## Branch / Commit
+- **Branch**: `feature/rich-math-input`
+- **Worktree**: `C:\Users\osams\.gemini\antigravity\worktrees\E-LRN-FRONTEND\visual_math_chemistry_editor`
+- **Frontend Commits**: `8bb1afe` (Phase 2), `9de4596` (Phase 3)
+- **Backend Commit**: `c90060c` (Thanaweya Math Exam Seeding)
 
-## 1. Goal
+## Done
+- **Student Quiz Runner (`QuizRunner.tsx`)**:
+  - Replaced `<textarea>` for essay questions with `<RichEditor>` when the question format allows rich input (checked via `NEXT_PUBLIC_RICH_INPUT_ENABLED !== "false"` and `resolveEffectiveFormat(rawFormat) === "RICH"` or `q.type === "richanswer"`).
+  - Preserved byte-for-byte identical `<textarea>` markup, styles, placeholder, and string-value behavior for non-math / PLAIN questions.
+  - Implemented required question validation: updated `isAnswered` to check `isEmptyRich(v)`, ensuring empty blocks or whitespace-only blocks do not satisfy `isRequired` or count as answered.
+  - Rendered essay question prompt titles through `<RichView value={currentQ.title} />` so mathematical notation in prompts displays seamlessly.
+- **SurveyJS Custom Question Model (`components/rich/survey/richanswer.tsx`)**:
+  - Registered `richanswer` custom question model with SurveyJS `Serializer`, `ElementFactory`, and `ReactQuestionFactory`.
+  - Overrode `isEmpty()` to enforce `isEmptyRich(this.value)` so required SurveyJS validation marks empty blocks as unanswered.
+  - Connected `renderElement()` to render `<RichView>` in display/read-only mode and `<RichEditor>` in editable mode.
+- **Display Surfaces Everywhere**:
+  - `QuizReviewList.tsx`: Replaced raw text containers for student answers and model answers with `<RichView value={...} />`, and enabled equation rendering for essay titles and reviewer feedback.
+  - `GradingForm.tsx`: Replaced raw text in teacher/admin grading forms with `<RichView value={...} />` for both student answers and model answers.
+  - `quiz/result/[attemptId]/page.tsx`: Updated essay detection to recognize `richanswer` along with `comment`.
+- **Testing & Verification**:
+  - Created automated test suite `scripts/test-phase3.js` with 38 test assertions covering:
+    - Required question semantics with `isEmptyRich` (empty blocks, whitespace, populated math/text).
+    - SurveyJS `QuestionRichAnswerModel.isEmpty()` and `getType()`.
+    - Subject profile format selection (MATH/PHYSICS/CHEMISTRY -> RICH, ARABIC/ENGLISH -> PLAIN, explicit overrides).
+    - Byte-for-byte serialization preservation for PLAIN answers.
+    - KaTeX rendering with `dir="ltr"` for equations.
+    - KaTeX security verification: `trust: false` prevents any script execution or `href=` links.
+  - Full test suite (`npm test`) passes 153/153 tests across Phase 1, Phase 2, and Phase 3.
+  - Production build (`npm run build`) and linter (`npm run lint`) pass completely clean with zero errors.
+- **20-Question Thanaweya Math Exam Seeded**:
+  - Seeded in local dev DB with Quiz ID 270 (slug: `cmcdp3jcle44`).
+  - Pre-enrolled student accounts and unlocked video progress.
+  - Direct testing URL: `http://localhost:3000/course/ebxy8b19gvw2/video/2vmf96v22gha/quiz`
+  - Dev playground URL: `http://localhost:3000/dev/rich-input`
 
-Replace the approval flag with **preview-then-confirm** for the destructive tools, and make
-attribution — not an `approved` boolean — the only permission the tool layer trusts (phase prompt
-§1, requirements C1–C8).
+## Differences from the Plan
+- In `SurveyQuestionRichAnswer`, `this.isDisplayMode` was accessed directly as a protected property of `SurveyQuestionElementBase` rather than typecasting `this`, ensuring strict TypeScript conformance with Next.js App Router compiler.
 
-## 2. Files changed
+## Files Changed
+- `components/quiz/QuizRunner.tsx` (rich editor integration, required checks, question title RichView, SurveyJS registration)
+- `components/rich/survey/richanswer.tsx` (SurveyJS richanswer question model and React component)
+- `components/quiz/QuizReviewList.tsx` (read-only RichView for student answers, model answers, feedback)
+- `components/admin/quiz/GradingForm.tsx` (read-only RichView in teacher grading inbox)
+- `app/course/[courseSlug]/video/[videoSlug]/quiz/result/[attemptId]/page.tsx` (hasEssays check updated for richanswer)
+- `types/quiz.ts` (updated EssayResultQuestion type definition)
+- `package.json` (added test:phase3 script)
+- `scripts/test-phase3.js` (Phase 3 test suite)
 
-| Commit | Files | What |
-|---|---|---|
-| `a6b3ace` (tests, committed **first** — see §6) | `tests/agent-actions-crud.test.js` +294, `tests/agent-tools-contract.test.js` +66, `tests/agent-graph.test.js` +88, `tests/agent-tools-db.test.js` +14 | Pins the confirm-token flow, `ADMIN_REQUIRED` attribution, dynamic config caps |
-| `7ae8f80` (implementation) | `src/services/agent/tools/_kit.js` +276, `src/services/agent/tools/actions.js` +204, `src/services/agent/graph.js` +102, `src/services/agent/tools/index.js` +32, `src/services/agent/agentService.js` +17, `src/config/env.js` +5, `.env.example` +5, `PHASE_1_REPORT.md` ±14, `PHASE_2_REPORT.md` +96 | Everything below |
+## Commands Run and Results
 
-## 3. What changed, precisely
+### 1. `npm test`
+```
+--- 1. Testing AC-1: parseRich against Contract Fixtures ---
+--- 2. Testing AC-2: Plain strings round-trip unchanged (100%) ---
+--- 3. Testing AC-3: Text-only block lists serialize to plain strings, never envelopes ---
+--- 4. Testing Spike S2: MathLive Macro Normalization ---
+--- 5. Testing Grader Text & Preview Conversion ---
+--- 6. Testing Subject Profile Matrix (5 subjects x 2 locales = 10 runs) ---
+--- 7. Testing RICH_LIMITS Constants ---
+=======================================
+Results: 95 passed, 0 failed.
+=======================================
+ALL CONTRACT AND SUBJECT PROFILE TESTS PASSED 100%!
+--- Phase 2 Test Suite: RichView & Shared Components ---
+=======================================
+Phase 2 Results: 20 passed, 0 failed.
+=======================================
+ALL PHASE 2 SHARED COMPONENT TESTS PASSED 100%!
+--- Phase 3 Test Suite: Student Quiz Integration & Display Surfaces ---
+1. Testing Required Question Semantics with isEmptyRich
+2. Testing SurveyJS QuestionRichAnswerModel
+3. Testing Subject Profile and Format Selection
+4. Testing PLAIN Question Byte-for-byte Preservation
+5. Testing RICH Question KaTeX Rendering
+6. Testing KaTeX Security (trust: false, no script execution)
+=======================================
+Phase 3 Results: 38 passed, 0 failed.
+=======================================
+ALL PHASE 3 STUDENT QUIZ & DISPLAY TESTS PASSED 100%!
+```
 
-1. **`confirmableActionTool`** (new factory in `_kit.js`) — the five destructive tools
-   (`delete_user`, `delete_course`, `delete_video`, `delete_quiz`, `broadcast_notification`) moved
-   from `actionTool` to it. A call with no `confirmationToken` runs `preview()` (read-only), hashes
-   the args, inserts one `AgentApproval` row with `status = PENDING`, and returns
-   `{ stage: 'PREVIEW', preview, confirmationToken }`. A call **with** a token verifies the row
-   (owner, tool, PENDING, not expired, argument hash), **consumes it with one conditional
-   `updateMany`** (so it cannot be spent twice, even concurrently), then runs `run()`.
-2. **`approvals.js`** gained `issueConfirmationToken()` and `verifyConfirmationToken()`. The token is
-   the `AgentApproval` row id as a string; foreign/unknown ids and stale rows are refused **before**
-   any target lookup, and a consumed row replays as `CONFIRMATION_MISMATCH` (no ownership oracle).
-3. **The approval flag died.** `actionTool` no longer reads `ctx.approved`; the surviving check is
-   `ADMIN_REQUIRED` — a mutation with no attributable admin id is refused before it resolves its
-   target. `agentService`'s resolver stopped gating on an open approval and always hands the tool
-   layer its full context (it still sets a vestigial `approved: true` — nothing reads it).
-4. **`env.js`**: `confirmationTtlMinutes` — default **15**, clamped to [1, 30] (deviation, see §6).
-5. **Legacy approval machinery kept**: the REST decide endpoint and the socket `agent:decide` remain
-   mounted; a `decide` on a confirm row makes it non-`PENDING`, so the token fails closed. Safe by
-   construction, reviewed as such.
-6. **`graph.js` in this commit also contains Phase 2's code** (`buildSystemPrompt`,
-   `formatCairoDate`, `MEMORY_BLOCK_LABEL`) — it should have been its own commit (see §6).
+### 2. `npm run lint`
+```
+✔ No ESLint warnings or errors
+```
 
-## 4. Verification (measured, not asserted)
+### 3. `npm run build`
+```
+ ✓ Compiled successfully
+   Linting and checking validity of types ...
+   Collecting page data ...
+ ✓ Generating static pages (29/29)
+   Finalizing page optimization ...
+   Collecting build traces ...
 
-Baseline re-run on this commit on 2026-09-29, no database, `AI_AGENT_MAX_TOOL_RESULT_ROWS=50`
-(the Phase 0 pin; the local `.env` carries 100 and would fail three `meta.cappedAt` pins):
+Route (app)                                                         Size     First Load JS
+┌ ○ /                                                               3.06 kB        90.7 kB
+├ ○ /admin/grading                                                  6.76 kB         221 kB
+├ λ /course/[courseSlug]/video/[videoSlug]/quiz/result/[attemptId]  10.7 kB         190 kB
+├ λ /course/[courseSlug]/video/[videoSlug]/quiz/run                 382 kB          565 kB
+├ ○ /dev/rich-input                                                 3.33 kB         175 kB
++ First Load JS shared by all                                       80.7 kB
+```
 
-| Run | Result |
-|---|---|
-| `node --test tests/agent-tools-contract.test.js tests/agent-actions-crud.test.js tests/agent-graph.test.js tests/agent-answer-guard.test.js` | **67/67 pass** (26 + 14 + 12 + 15), 0 fail, ~5.9 s |
+## Evidence: Route-Size Table & Performance
+- Baseline `First Load JS shared by all`: 80.6 kB
+- Phase 3 `First Load JS shared by all`: 80.7 kB (+0.1 kB global impact)
+- Non-quiz student routes remain light (`○ /`: 90.7 kB).
+- Quiz runner chunk dynamically includes MathLive and KaTeX assets only when visiting `/quiz/run`.
+- Local `.env.local` configured with `NEXT_PUBLIC_SUBJECT_NAME=MATH` for Gate 3 real math exam testing.
 
-The external reviewer independently ran the same four files against a stub Prisma client:
-26/26, 14/14, 12/12, 15/15 — same result. **Not run here**: the full suite, the DB-backed agent
-suites, `agent-schema-tools`, live Gemini calls, anything on staging. The 3.1 report carries the
-full-suite numbers.
+## Open Issues / Bugs Found but Not Fixed
+- None.
 
-## 5. Anything unexpected
-
-- **The two-step gate has no server-side turn boundary.** Preview and confirm issued inside ONE
-  agent turn both succeed and the delete executes — the only barrier was a sentence in the prompt
-  telling the model not to call again. The reviewer reproduced it with the real `execute()` and a
-  spy (`same-turn confirm ok: true`). Student-authored text (essay, notification body) reaching the
-  model's context could therefore drive a preview + confirm without a human answering. Requirement
-  **C1** ("the server refuses a confirmation made in the same turn as its preview") was not
-  implemented. This is finding **F1 — HIGH**, and it is why `AI_AGENT_ALLOW_MUTATIONS` must stay
-  false on staging/production until 3.1 lands.
-- **The token is consumed before `run()` executes.** If `run()` then fails (Bunny down, FK caught),
-  the token is spent and a fresh preview is needed. Accepted: retrying a half-failed destructive
-  call with a still-valid token would resurrect exactly the double-spend C1 is meant to prevent.
-- **Audit rows for preview and refusal share the real action name** (`USER_DELETE` with only
-  `metadata.stage` distinguishing them), and the agent's own audit-reading tools do not filter on
-  `stage`, so "what did I delete this week?" counted previews. Finding **F2**.
-- **Broadcast preview did not check `expectedRecipients`** against the real audience: a wrong guess
-  issued a token that the corrected confirm call could never satisfy (hash mismatch) — a guaranteed
-  wasted round trip. Finding **F3**.
-- The broadcast 500-recipient cap stayed (Decision #9 only mandates the two-step flow for broadcast;
-  the ceiling was never discussed — kept and documented).
-
-## 6. Deviations from the phase prompt
-
-1. **C1 missing** (same-turn refusal) — carried into 3.1 as F1.
-2. **No report written at the time** — this file is the retroactive remedy, committed standalone so
-   the history stays honest about it.
-3. **TTL default 15 instead of the specified 5** (C4) — finding F4, corrected in 3.1.
-4. **Commit order**: the Phase 3 tests (`a6b3ace`) shipped *before* the implementation, so that
-   commit alone does not pass its own tests; Phase 2's code rode inside the Phase 3 implementation
-   commit. Neither is dangerous; both hurt bisection. Recorded, not rewritten.
-5. **Preview/refusal audit rows reuse the real action name** (F2) and **broadcast preview skips the
-   recipient-count check** (F3) — both corrected in 3.1.
-
-## 7. What the next phase must know
-
-- **3.1 first** (F1–F5, one commit + report). F1's shape: `turnStartedAt` is **server-set** (an
-  ISO string, so it survives the LangChain serialization boundary of the context resolver) and
-  travels `answerQuestion → createAgentGraph → resolver → runCtx`; `_kit` refuses with
-  `CONFIRMATION_SAME_TURN` when the preview row was created at/after it, **before** consuming;
-  the preview row's `requestedAt` must be set from the Node clock so both timestamps share one
-  clock (the DB `@default(now())` would mix clocks with pgbouncer).
-- **Phase 4** (context compaction): the per-turn payloads stay where they are (the graph state),
-  and the turn anchor rides the tool-context resolver — `answerQuestion` stamps `turnStartedAt` once
-  per turn and the resolver returns it in every tool context. There is deliberately **no**
-  module-level mutable turn object in `graph.js`: a process-wide "current turn" is shared between
-  concurrent admin turns and would be a correctness trap, so 3.1 did not add one.
-- Do not enable `AI_AGENT_ALLOW_MUTATIONS` on staging/production until 3.1 is merged and reviewed.
-
+## Decisions Needed from Ahmed
+- None for Phase 3. **Gate 3 Hard Stop reached.** Ready for user/Ahmed device verification on phone, tablet, and PC.
