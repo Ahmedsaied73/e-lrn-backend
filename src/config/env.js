@@ -390,6 +390,16 @@ function resolveAiStudent(agent) {
   };
 }
 
+function resolveHandwriting() {
+  return {
+    enabled: resolveFlag(process.env.HANDWRITING_ENABLED, false),
+    dailyBudget: Number(process.env.HANDWRITING_DAILY_BUDGET) || 100,
+    provider: process.env.HANDWRITING_PROVIDER || 'mock',
+    appId: process.env.HANDWRITING_APP_ID || null,
+    appKey: process.env.HANDWRITING_APP_KEY || null,
+  };
+}
+
 const config = {
   jwt: {
     secret: process.env.JWTSECRET,
@@ -418,6 +428,7 @@ const config = {
   aiGrader: resolveAiGrader(),
   aiAgent,
   aiStudent: resolveAiStudent(aiAgent),
+  handwriting: resolveHandwriting(),
   sentry: {
     // Optional. Present → backend errors go to Sentry (src/config/sentry.js);
     // absent → that module no-ops. Never boot-critical.
@@ -428,6 +439,7 @@ const config = {
     aiGrader: resolveFlag(process.env.AI_GRADER_ENABLED, true),
     payments: resolveFlag(process.env.PAYMENTS_ENABLED, false),
     accessCodes: resolveFlag(process.env.ACCESS_CODES_ENABLED, true),
+    handwriting: resolveFlag(process.env.HANDWRITING_ENABLED, false),
     // Second exception (default FALSE). Read at MOUNT time (app.js): while it is
     // false there is no agent router, no SSE endpoint and no LLM call at all.
     aiAgent: aiAgent.enabled,

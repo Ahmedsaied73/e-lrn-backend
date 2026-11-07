@@ -442,6 +442,18 @@ if (enabledFeatures.accessCodes) {
   }
 }
 
+// ── Handwriting recognition infrastructure shell (Phase 8) ─────────────────
+// Mounted at /api/handwriting and /handwriting. When HANDWRITING_ENABLED is false,
+// the route returns 404 (disabled).
+try {
+  const handwritingRoutes = require('./src/routes/handwritingRoutes');
+  app.use('/api/handwriting', handwritingRoutes);
+  app.use('/handwriting', handwritingRoutes);
+  console.log('[INFO] Handwriting router mounted: /api/handwriting/recognize');
+} catch (err) {
+  console.warn('[WARN] Handwriting router failed to mount:', err.message);
+}
+
 // ── AI admin agent (Phase 4) — REST routes mounted BEFORE global error handler ──
 // Disabled means no /admin/agent routes at all (never stubs), the same doctrine as
 // the payments and notifications modules above.
