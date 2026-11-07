@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 // bcrypt v5 runs on libuv's threadpool — default 4 workers serializes a login
 // burst into ~100ms quanta. 16 removes the queue at 500 simultaneous logins.
 process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '16';
