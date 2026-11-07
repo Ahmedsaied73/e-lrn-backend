@@ -31,4 +31,19 @@ try {
 
 const prisma = new PrismaClient({ datasources: { db: { url: datasourceUrl } } });
 
+try {
+  prisma.$use(async (params, next) => {
+    try {
+      return await next(params);
+    } catch (err) {
+      if (err && (err.code === 'P2024' || (err.message && err.message.includes('P2024')))) {
+        try { require('../metrics/metrics').recordPrismaTimeout(); } catch { /* ignore */ }
+      }
+      throw err;
+    }
+  });
+} catch {
+  // Ignore if $use fails or during special client contexts
+}
+
 module.exports = prisma;

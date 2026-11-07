@@ -42,7 +42,10 @@ function shortHash(value) {
 function withTimeout(promise, ms = COMMAND_TIMEOUT_MS) {
   let timer;
   const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error('redis command timeout')), ms);
+    timer = setTimeout(() => {
+      try { require('../../metrics/metrics').recordRedisTimeout(); } catch { /* ignore */ }
+      reject(new Error('redis command timeout'));
+    }, ms);
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }

@@ -63,7 +63,10 @@ class RateLimitStoreUnavailableError extends Error {
 function withTimeout(promise, ms = COMMAND_TIMEOUT_MS) {
   let timer;
   const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new RateLimitStoreUnavailableError('redis store timeout')), ms);
+    timer = setTimeout(() => {
+      try { require('../../metrics/metrics').recordRedisTimeout(); } catch { /* ignore */ }
+      reject(new RateLimitStoreUnavailableError('redis store timeout'));
+    }, ms);
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }

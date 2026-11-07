@@ -1,0 +1,75 @@
+{
+  "evaluatedAt": "2026-11-01T21:11:51.850Z",
+  "sloThresholds": {
+    "p95Max": 1000,
+    "gateP95Max": 2000,
+    "errorRateMax": 0.01,
+    "max429": 0,
+    "eventLoopP99Max": 100,
+    "generatorMaxCpu": 85
+  },
+  "baselineP95": null,
+  "maxSustainableRps": null,
+  "breakpointRps": null,
+  "hardBreakRps": null,
+  "kneeRps": null,
+  "firstBottleneck": "None",
+  "studentsSupportedAtMaxSustainable": 0,
+  "sensitivity": [
+    {
+      "watchingRatio": 0.5,
+      "heartbeatSeconds": 15,
+      "rpsPerStudent": 0.09167,
+      "studentsAtTargetRps": 10909
+    },
+    {
+      "watchingRatio": 0.5,
+      "heartbeatSeconds": 30,
+      "rpsPerStudent": 0.075,
+      "studentsAtTargetRps": 13333
+    },
+    {
+      "watchingRatio": 0.5,
+      "heartbeatSeconds": 60,
+      "rpsPerStudent": 0.06667,
+      "studentsAtTargetRps": 15000
+    },
+    {
+      "watchingRatio": 0.7,
+      "heartbeatSeconds": 15,
+      "rpsPerStudent": 0.085,
+      "studentsAtTargetRps": 11765
+    },
+    {
+      "watchingRatio": 0.7,
+      "heartbeatSeconds": 30,
+      "rpsPerStudent": 0.06167,
+      "studentsAtTargetRps": 16216
+    },
+    {
+      "watchingRatio": 0.7,
+      "heartbeatSeconds": 60,
+      "rpsPerStudent": 0.05,
+      "studentsAtTargetRps": 20000
+    },
+    {
+      "watchingRatio": 0.9,
+      "heartbeatSeconds": 15,
+      "rpsPerStudent": 0.07833,
+      "studentsAtTargetRps": 12766
+    },
+    {
+      "watchingRatio": 0.9,
+      "heartbeatSeconds": 30,
+      "rpsPerStudent": 0.04833,
+      "studentsAtTargetRps": 20690
+    },
+    {
+      "watchingRatio": 0.9,
+      "heartbeatSeconds": 60,
+      "rpsPerStudent": 0.03333,
+      "studentsAtTargetRps": 30000
+    }
+  ],
+  "steps": []
+}

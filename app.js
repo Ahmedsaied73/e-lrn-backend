@@ -191,6 +191,8 @@ app.use(express.json({ limit: '512kb' }));
 app.use(cookieParser()); // Add cookie-parser middleware
 // Add request logger middleware to log all requests
 app.use(requestLogger);
+const { metricsMiddleware } = require('./src/metrics/metrics');
+app.use(metricsMiddleware);
 
 // Set up rate limiter: maximum of 1000 requests per 15 minutes per IP.
 // Raised from 100 (Sept 2026) — the default starved automated + real browsing
@@ -200,10 +202,20 @@ app.use(requestLogger);
 // in-memory counter (so limiting still holds locally) UNLESS REQUIRE_REDIS_RATE_LIMIT=true
 // (then a dead store throws → 503 RATE_LIMIT_STORE_UNAVAILABLE). failClosed mirrors
 // requireRedisRateLimit so both the throw and the 503 stay in lock-step.
+let globalLimitMax = 1000;
+const isLoadTestProfile = process.env.LOAD_TEST === 'true' && process.env.NODE_ENV !== 'production';
+if (isLoadTestProfile && process.env.RATE_LIMIT_MAX) {
+  const parsedMax = Number(process.env.RATE_LIMIT_MAX);
+  if (Number.isSafeInteger(parsedMax) && parsedMax > 0) {
+    globalLimitMax = parsedMax;
+    console.log(`[LOAD_TEST] Global rate limiter override active: max=${globalLimitMax} requests per 15min`);
+  }
+}
+
 const limiter = rateLimit({
   validate: { ip: false },
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 1000, // limit each IP to 1000 requests per windowMs
+  max: globalLimitMax, // limit each IP to max requests per windowMs
   message: 'Too many requests from this IP, please try again later.',
   ...(redisStoreEnabled ? { store: createRateLimitStore(undefined, { failClosed: requireRedisRateLimit }) } : {}),
 });
