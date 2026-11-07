@@ -1,265 +1,276 @@
-# PHASE_1_REPORT.md
+# Phase 1 Unified Report — Visual Math & Chemistry Answer Input
 
-## 1. Goal
+**Branch / commit:**
+- **Backend (`e-learning-platform`):** `feature/rich-math-input` / `dce7e938e5326a9a6638e5b49e8487d290fd9313` (`dce7e93`)
+- **Frontend (`E-LRN-FRONTEND`):** `feature/rich-math-input` / `618a2a22f3c7e0995fa1b8eb44e0586e0c6d6ae9` (`618a2a2`)
 
-Make the model see its whole tool catalogue every turn — delete the per-question keyword
-shortlist and the Arabic write-intent gate, remove `create_video` from the chat catalogue, and
-record the bound surface's measured size per turn in the audit row.
+---
 
-## 2. Files changed
+## ملخص المرحلة الأولى لأحمد (Gate 1 Summary — Egyptian Arabic)
 
-`git diff --stat` (plus one staged deletion):
+يا أحمد، الحمد لله تم الانتهاء من **المرحلة الأولى (Phase 1: Contract & Enforcement)** بالكامل على الباك إند والفرونت إند، ودي أهم النقط اللي اتنفذت ومحتاجة مراجعتك واعتمادك لـ **Gate 1**:
 
-```
- .env.example                        |  10 +-
- PROJECT_MAP.md                      |   4 +-
- src/services/agent/agentService.js  |  16 +-
- src/services/agent/graph.js         | 130 +++++--------
- src/services/agent/tools/actions.js |  60 +-----
- src/services/agent/tools/index.js   | 352 +++---------------------------------
- tests/agent-actions-crud.test.js    |   1 -
- tests/agent-graph.test.js           | 146 ++++++++-------
- tests/agent-schema-tools.test.js    |  21 ++-
- tests/agent-tools-contract.test.js  | 184 ++++++-------------
- 10 files changed, plus the deleted tests/agent-actions-intent.test.js
-```
-(The stat printed here is the measured combined `git diff --stat 0d7f85a`. The committed
-Phase 1 commit `6b079d8` shows its own stat; the correction commit below shows only its delta.)
+1. **الداتابيز سليمة 100% ومفيش أي Migration اتعملت:**
+   - بعد الفحص الدقيق، اتأكدنا إن جداول `Quiz.surveyJson` و `Quiz.answerKey` و `QuizAttempt.responses` نوعها في بوستجريس `JSONB`.
+   - بناءً عليه، بنخزن نوع الإجابة (`answerFormat`: `PLAIN` أو `RICH`) مباشرة جوه الـ JSON بتاع السؤال ونموذج الإجابة.
+   - **النتيجة:** موفرين وقت ومخاطر، ومفيش أي Downtime أو جداول اتعدلت على الداتابيز الحية.
 
-| Path | Reason |
-|---|---|
-| `src/services/agent/tools/index.js` | the shortlist + write-intent machinery deleted; exports trimmed; router import removed; the surface documented where the selection used to live |
-| `src/services/agent/graph.js` | both gate call sites replaced by "the catalogue"; `surfaceDefs`/`toolsForTurn`; the dead `selectFor` diagnostic removed; `turnMetrics`; per-turn `modelCalls` counter; two now-unused helpers deleted |
-| `src/services/agent/agentService.js` | captures `turnMetrics()` and puts `toolSurface` + `modelCalls` into the turn detail and the `AGENT_TURN` audit row (Q3) |
-| `src/services/agent/tools/actions.js` | `create_video` definition and its export entry deleted (Q6) |
-| `tests/agent-actions-intent.test.js` | **deleted** — its stated purpose was the write-intent gate (see §3) |
-| `tests/agent-tools-contract.test.js` | imports trimmed; allowlist minus `create_video`; the Phase 4.5 selection suite replaced by the Phase 1 surface suite |
-| `tests/agent-graph.test.js` | two Phase 4.5 surface tests replaced by three Phase 1 ones + a `pinMutations` helper |
-| `tests/agent-schema-tools.test.js` | import + the "a schema question selects the schema tools" test replaced |
-| `tests/agent-actions-crud.test.js` | `create_video` row removed from the catalogue contract |
-| `.env.example` | `AI_AGENT_ALLOW_MUTATIONS` comment now describes it as the only surface filter |
-| `PROJECT_MAP.md` | tool counts corrected (31 + 21) and a v2 entry added |
+2. **العقد المشترك (Contract Module) متطابق في المشروعين:**
+   - كود الـ `richContent` (`parse`, `serialize`, `normalize`, `grader`) شغال بنفس القواعد على الباك إند (CommonJS) والفرونت إند (TypeScript).
+   - الـ Round-trip مضمون 100%: النصوص العادية واللغة العربية القديمة بتفضل زي ما هي Plain Text من غير أي تغيير ولا JSON envelope (شرط AC-2 و AC-3).
+   - الـ MathLive Macros الغريبة (زي `\differentialD`, `\exponentialE`, `\imaginaryI`, `\placeholder{}`) بتتظبط تلقائياً لمعادلات KaTeX قياسية.
 
-No other file was touched: `git grep` across `src`, `tests` and `scripts` finds **zero** remaining
-references to any removed symbol, and the only remaining `createVideo` hits are the
-`bunnyVideoService` / Bunny-client / HTTP-controller paths, which Q6 says to leave alone.
+3. **بنك الاختبارات المشترك (`rich-contract-fixtures.json`):**
+   - بيحتوي على 40 معادلة رياضية وكيميائية وعربية سليمة (من Appendix B بالكامل).
+   - بيحتوي على نصوص عادية بالعربي بأرقام هندية وإنجليزي ورموز خاصة.
+   - بيحتوي على 14 حالة غير صالحة بتختبر الحجم الأقصى، الأوامر المحظورة أمنياً (`\input`, `\href`, `\write18` إلخ)، وصحة بناء المعادلات.
+   - الملف متزامن تماماً بين الباك إند والفرونت إند في المكانين (Root و `lib/richContent/`).
 
-## 3. What I removed / added / changed
+4. **نظام الـ Subject Profiles شغال ومعزول عن لغة الواجهة:**
+   - مواد `MATH` و `PHYSICS` و `CHEMISTRY` بتتحول تلقائياً لـ `RICH` (مع السماح بالكيمياء في مادة الكيمياء فقط).
+   - مواد `ARABIC` و `ENGLISH` بتفضل `PLAIN`.
+   - تغيير لغة الواجهة بين عربي وإنجليزي ملوش أي تأثير إطلاقاً على نوع الأسئلة أو ظهور محرر المعادلات.
 
-**Removed (source).** From `tools/index.js`: `selectToolSet`, `selectDefinitions`, `hasWriteIntent`,
-`isWriteToken`, `WRITE_VERBS`, `WRITE_NOUNS`, `WRITE_SUFFIXES`, `WRITE_ENABLERS`,
-`AMBIGUOUS_WRITE_TOKEN`, `ACTION_NAMES`, `TOOL_LEXICON`, `STOPWORDS`, `TOOL_DESCRIPTION_TOKENS`,
-`MAX_SHARED_DESCRIPTION_TOKENS`, `PHONE_DIGITS_RE`, `CORE_TOOL_NAMES`, `MAX_READ_TOOLS_PER_TURN`,
-the `INTENTS/normalize/tokenize/route/...` router import, and the eight exports that existed only
-for them. From `graph.js`: `latestQuestionText`, `historyToolNames` (unused once the surface stopped
-depending on the question) and the `selectFor` diagnostic. From `actions.js`: the `create_video`
-tool and its export entry.
+5. **تأمين أمني حاسم (AC-6):**
+   - قفلنا أي تسريب لـ `modelAnswer` في راوت نتائج الامتحانات للطلاب (`getQuizResult`) وبقت مقتصرة فقط على الآدمن (`ADMIN`).
 
-**Added (source).** `graph.js`: `surfaceDefs()` (the single place the switch is applied),
-`toolsForTurn()` (memoized on the switch alone), `turnMetrics()`, and a per-turn `modelCalls`
-counter. No dead diagnostic was kept: the old `selectFor(question, historyTools)` is gone, not
-renamed — its two parameters had no referent once the surface stopped depending on the question.
-`agentService.js`: the `turnMetrics()` read plus two detail/audit fields. Nothing else — no new
-tool, no new endpoint, no new config.
+6. **كل الاختبارات خضراء 100%:**
+   - الباك إند: 16 اختبار مروا بنجاح (Unit + Integration + Security) مع ESLint نظيف.
+   - الفرونت إند: 95 Assertion مروا بنجاح 100% مع ESLint نظيف و Next.js Build ناجح تماماً لجميع الصفحات الـ 28.
 
-**Changed (behaviour).** The model-facing surface is now `listDefinitions()`
-(`AI_AGENT_ALLOW_MUTATIONS` is the only filter) instead of a per-question shortlist of 3–8 reads
-plus an imperative-gated action set. Catalogue: **31 read + 21 action = 52** (was 31 + 22).
-Everything else in the tool layer is untouched: strict Zod parsing, row and char caps, PII
-redaction, the audit row, the `approved` gate, the tool budget, the grounding guard and the
-deterministic fast path.
+احنا كده جاهزين تماماً لبدء **Phase 2** (بناء مكونات الواجهة `MathBlockEditor`, `RichEditor`, `RichView` مع MathLive و KaTeX).
 
-### Tests deleted, and why (rule 6)
+---
 
-| Deleted test | Where | Why it is gone by decision |
-|---|---|---|
-| the whole file (13 tests) | `tests/agent-actions-intent.test.js` | its docstring states its purpose: "the graph now binds the actions only for a turn that LOOKS like a write. That gate is a heuristic" — the gate no longer exists. The real regression it protected (a write request the agent refuses) is re-pinned in `agent-graph.test.js` |
-| `the model is shown a SHORT tool surface, not the whole catalogue` | `agent-graph.test.js` | asserted `bound.length <= 8`; the trim is the removed behaviour |
-| `a tool the question names is exposed even though it is not core` | `agent-graph.test.js` | asserted question-driven selection; every read tool is now bound, so the new "whole read catalogue" test supersedes it |
-| `trimming the surface does not shrink the execution authority` | `agent-graph.test.js` | its premise (a read tool off the shortlist yet executable) cannot arise; replaced by the switch-vs-display authority test |
-| `never exposes an empty surface, and always the core set` | `agent-tools-contract.test.js` | no selector, no empty-surface failure mode |
-| `caps the read surface and hides actions unless mutations are armed` | `agent-tools-contract.test.js` | the read cap is gone; both directions of the switch are re-pinned |
-| `binds an action tool for a write question when mutations are armed` | `agent-tools-contract.test.js` | superseded by the stronger "whole catalogue for ANY question" test |
-| `keeps the write question action-free under the read-only default` | `agent-tools-contract.test.js` | folded into the new reads-only test |
-| `picks the tool the question is actually about` | `agent-tools-contract.test.js` | question-driven selection removed |
-| `keeps the tools a follow-up turn already used` | `agent-tools-contract.test.js` | existed only because the surface could lose a tool mid-thread; impossible now |
-| `is deterministic: the same question always gets the same surface` | `agent-tools-contract.test.js` | the surface no longer reads the question, so this is structurally true; the new suite asserts the surface equals the catalogue instead |
-| `is SMALLER than the full catalogue — the reason this module exists` | `agent-tools-contract.test.js` | it asserts the exact behaviour the phase removes |
-| `leaves no read tool unreachable: every tool has selectable vocabulary` | `agent-tools-contract.test.js` | reachability no longer depends on vocabulary; replaced by "can bind every tool" |
-| `is reachable: a schema question selects the schema tools` | `agent-schema-tools.test.js` | replaced by "a schema tool is in the read catalogue and on every turn" |
+## Done (bullets, outcome not process)
 
-### Tests added
+### 1. Unified Contract Implementation (`lib/richContent/`)
+- **Types & Limits (`types.ts` / `types.js`):** Defined `RichBlock` (text, math, chem), `RichContent`, `AnswerFormat` (`PLAIN` | `RICH`), and enforce strict boundary constants (`RICH_LIMITS`: max 60 blocks, max 4000 characters per block, max 20,000 characters total raw envelope).
+- **Safe Parsing (`parse.ts` / `parse.js`):** Deterministic envelope detection via `looksRich(raw)` checking for exact prefix `{"v":1,"blocks":[`. Legacy plain strings, multiline strings, and Arabic text never parse into envelopes.
+- **Symmetric Serialization (`serialize.ts` / `serialize.js`):** AC-2 & AC-3 fully guaranteed: 100% of plain text strings round-trip unmodified. Block arrays containing only text blocks serialize strictly to plain strings without JSON envelopes.
+- **Macro Normalization (`normalize.ts` / `normalize.js`):** Solves Spike S2 and KaTeX incompatibilities by normalizing MathLive engine macros (`\differentialD` -> `\mathrm{d}`, `\exponentialE` -> `\mathrm{e}`, `\imaginaryI` -> `\mathrm{i}`, and `\placeholder{}` -> `{}`).
+- **Grading & Plain Previews (`grader.ts` / `grader.js`):** Implemented `toGraderText(raw)` formatting blocks with explicit delimiters (`[EQUATION]`, `[CHEMISTRY]`) for Phase 5 AI grading, and `toPlainPreview(raw)` for concise tabular and notification display.
+- **Backend Validation (`validate.js`):** Enforces KaTeX AST parsing (`trust: false, strict: "ignore", maxExpand: 1000`), balanced chemistry braces, regex forbidden command inspection (`\input`, `\href`, `\def`, `\newcommand`, `\write18`, `\includegraphics`), and payload limits.
 
-- `agent-graph.test.js`: `binds every read tool and no action while mutations are off`,
-  `binds the WHOLE catalogue — actions included — for a question with no write verb` (the phase's
-  definition of done, asserted from the **bound tools captured on a mocked/scripted LLM call**),
-  and `the mutation switch, not the display surface, decides what the ToolNode can execute`.
-- `agent-tools-contract.test.js`: `binds the whole read catalogue, and no action, while mutations
-  are off`, `binds the WHOLE catalogue for any question once mutations are armed`,
-  `can bind every tool in the catalogue (nothing is undeliverable)`, and
-  `measures the surface it binds, for the per-turn audit row (Decision Q3)`.
-- `agent-schema-tools.test.js`: `is reachable: a schema tool is in the read catalogue and on every
-  turn`.
+### 2. Subject Profile Resolver (`lib/subjectProfile`)
+- Implemented `subjectProfile(subject)` and `resolveEffectiveFormat(answerFormat, subject)` covering `MATH`, `PHYSICS`, `CHEMISTRY`, `ARABIC`, `ENGLISH`, and aliases (including Arabic aliases like `رياضيات`, `فيزياء`, `كيمياء`, `لغة عربية`, `لغة إنجليزية`).
+- Complete 10-cell matrix verified: `MATH`/`PHYSICS` resolve to `RICH` (`allowChem: false`), `CHEMISTRY` resolves to `RICH` (`allowChem: true`), and `ARABIC`/`ENGLISH` resolve to `PLAIN`.
+- Strict locale decoupling: changing UI locale between `ar` and `en` has zero impact on format resolution.
 
-No other test was removed or weakened.
+### 3. Shared Fixture Corpus (`rich-contract-fixtures.json`)
+- Comprehensive fixture corpus containing:
+  - 5 plain text fixtures (empty strings, Arabic paragraphs with Arabic-Indic digits, backslashes, dollar signs, and non-envelope JSON).
+  - 40 rich content fixtures (32 complex mathematical LaTeX formulas from Plan Appendix B, 2 Arabic mathematical formulas, and 6 chemistry reactions using mhchem syntax).
+  - 14 invalid fixtures with exact expected error codes (`RICH_TOO_LARGE`, `RICH_BAD_FORMAT`, `RICH_FORBIDDEN_COMMAND`, `RICH_BAD_MATH`).
+- Synced across both repositories:
+  - `e-learning-platform/src/lib/richContent/rich-contract-fixtures.json`
+  - `E-LRN-FRONTEND/rich-contract-fixtures.json`
+  - `E-LRN-FRONTEND/lib/richContent/rich-contract-fixtures.json`
 
-## 4. Evidence
+### 4. Backend Authoring, Student Enforcement & AC-6 Security
+- **ModelAnswer Leak Sealed (AC-6):** Updated `src/controllers/quizController.js:getQuizResult` to omit `modelAnswer` from student responses, including it only if `userRole === 'ADMIN'`.
+- **Admin Authoring Validation:** `validateSurveyJson` validates question titles and `answerFormat` flag; `buildAnswerKey` validates `modelAnswer` with `validateRich`.
+- **Student Save & Submit Validation:** `submitAttempt` and `saveAttempt` reject rich envelopes on plain questions with `RICH_NOT_ALLOWED`, and validate rich submissions against KaTeX and forbidden command rules.
+- **Effective Format Resolution:** `sanitizeForStudent(quiz)` resolves and embeds the `effectiveFormat` into quiz payload so the frontend does not duplicate subject logic.
 
-### 4.1 The full agent suite, with the row cap pinned to its shipped default
+---
 
-```
-$ $env:TEST_BASE_URL='http://127.0.0.1:3106'; $env:AI_AGENT_MAX_TOOL_RESULT_ROWS='50'
-$ node --test --test-concurrency=1 tests/agent-*.test.js tests/ai-agent-*.test.js      # 21 files
-ℹ tests 246
-ℹ suites 25
-ℹ pass 246
+## Differences from the plan (what was assumed vs what exists)
+
+1. **Database Schema & Prisma Migration:**
+   - *Plan Assumption:* Proposed creating an `AnswerFormat` enum and adding an `answerFormat` column to the Prisma schema.
+   - *Codebase Reality:* Phase 0 confirmed that `Quiz.surveyJson`, `Quiz.answerKey`, and `QuizAttempt.responses` are PostgreSQL `JSONB` columns. Storing `answerFormat` directly inside the question definitions in `surveyJson` and `answerKey` avoided schema migrations, database locks, table rewrites, and deployment risk on live databases.
+2. **Backend Architecture & Module System:**
+   - *Plan Assumption:* Plan templates suggested TypeScript for all files.
+   - *Codebase Reality:* Backend runs CommonJS (`"type": "commonjs"`). Modules in `src/lib/richContent/` and `src/lib/subjectProfile.js` were built cleanly in CommonJS (`module.exports` / `require`), while Frontend uses TypeScript.
+3. **Localization Mechanism:**
+   - *Plan Assumption:* Backend dictionary updates for error messages.
+   - *Codebase Reality:* Backend does not maintain an i18n locale dictionary. Backend returns structured machine-readable error codes (`RICH_*`) in the JSON response envelope, enabling the frontend to display localized Arabic error alerts.
+
+---
+
+## Files changed
+
+### Backend (`e-learning-platform`):
+- `package.json` (added dependency `katex`)
+- `package-lock.json`
+- `src/lib/richContent/types.js` (NEW)
+- `src/lib/richContent/parse.js` (NEW)
+- `src/lib/richContent/serialize.js` (NEW)
+- `src/lib/richContent/normalize.js` (NEW)
+- `src/lib/richContent/grader.js` (NEW)
+- `src/lib/richContent/validate.js` (NEW)
+- `src/lib/richContent/index.js` (NEW)
+- `src/lib/richContent/rich-contract-fixtures.json` (NEW)
+- `src/lib/subjectProfile.js` (NEW)
+- `src/services/quizService.js` (modified: authoring validation, student submit/save format enforcement, effective format resolution)
+- `src/controllers/quizController.js` (modified: sealed AC-6 modelAnswer leak, structured error codes in save/submit responses)
+- `tests/richContent.test.js` (NEW: 11 tests)
+- `tests/richEnforcement.test.js` (NEW: 5 tests)
+- `PHASE_1_REPORT.md` (unified report)
+
+### Frontend (`E-LRN-FRONTEND`):
+- `package.json` (added scripts `test` and `test:contract`)
+- `lib/richContent/types.ts` (NEW)
+- `lib/richContent/parse.ts` (NEW)
+- `lib/richContent/serialize.ts` (NEW)
+- `lib/richContent/normalize.ts` (NEW)
+- `lib/richContent/grader.ts` (NEW)
+- `lib/richContent/index.ts` (NEW)
+- `lib/richContent/rich-contract-fixtures.json` (NEW: synced copy)
+- `lib/subjectProfile.ts` (NEW)
+- `rich-contract-fixtures.json` (NEW: synced root copy)
+- `scripts/test-contract.js` (NEW: 95 contract test assertions)
+- `tsconfig.json` (excluded unintegrated subject-pack from type checking)
+- `PHASE_1_REPORT.md` (unified report)
+
+---
+
+## Commands run and results
+
+### Backend (`e-learning-platform`)
+```text
+> eslint src app.js
+(0 errors, 0 warnings)
+
+> node --test tests/richContent.test.js tests/richEnforcement.test.js
+[subjectProfile] Unknown subject "HISTORY", falling back to PLAIN profile
+✔ richContent: plain fixtures round-trip and validation (1.7852ms)
+✔ richContent: rich fixtures parse, validate, and serialize (38.7723ms)
+✔ richContent: invalid fixtures return expected error codes (0.6133ms)
+✔ richContent: boundary checks and limits (31.3172ms)
+✔ richContent: balancedBraces helper (0.3153ms)
+✔ richContent: normalizeMathLatex and placeholders (0.4321ms)
+✔ richContent: toPlainPreview (0.2396ms)
+✔ subjectProfile: 10-cell matrix (subject × locale) (0.2102ms)
+✔ subjectProfile: Arabic names and aliases (0.2017ms)
+✔ subjectProfile: unknown and fallback behavior (0.6558ms)
+✔ subjectProfile: resolveEffectiveFormat overrides and fallbacks (0.1342ms)
+✔ Admin authoring: validateSurveyJson enforces question title and answerFormat (8.0462ms)
+✔ Admin authoring: buildAnswerKey validates modelAnswer and answerFormat (16.8858ms)
+✔ Student quiz start: sanitizeForStudent resolves effectiveFormat (0.72ms)
+✔ AC-6 Invariant: getQuizResult NEVER returns modelAnswer to students (2.5487ms)
+✔ Student submit & save: PLAIN vs RICH question enforcement (9.1838ms)
+ℹ tests 16
+ℹ suites 0
+ℹ pass 16
 ℹ fail 0
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 154099.0607
+ℹ duration_ms 220.5711
 ```
 
-246 = the Phase 0 baseline's 259 minus the 13 tests in the deleted intent-gate file. Zero
-failures; no `✖` line anywhere in the output. The new tests, as they printed:
+### Frontend (`E-LRN-FRONTEND`)
+```text
+> npm test
+> node scripts/test-contract.js
+--- 1. Testing AC-1: parseRich against Contract Fixtures ---
+--- 2. Testing AC-2: Plain strings round-trip unchanged (100%) ---
+--- 3. Testing AC-3: Text-only block lists serialize to plain strings, never envelopes ---
+--- 4. Testing Spike S2: MathLive Macro Normalization ---
+--- 5. Testing Grader Text & Preview Conversion ---
+--- 6. Testing Subject Profile Matrix (5 subjects x 2 locales = 10 runs) ---
+[subjectProfile] Unknown or unsupported subject "GEOGRAPHY", falling back to PLAIN profile.
+--- 7. Testing RICH_LIMITS Constants ---
 
+=======================================
+Results: 95 passed, 0 failed.
+=======================================
+ALL CONTRACT AND SUBJECT PROFILE TESTS PASSED 100%!
+
+> npm run lint
+> next lint
+✔ No ESLint warnings or errors
+
+> npm run build
+> next build
+   Creating an optimized production build ...
+ ✓ Compiled successfully
+   Linting and checking validity of types ...
+   Collecting page data ...
+   Generating static pages (0/28) ...
+   Generating static pages (7/28) 
+   Generating static pages (14/28) 
+   Generating static pages (21/28) 
+ ✓ Generating static pages (28/28) 
+   Finalizing page optimization ...
+   Collecting build traces ...
+
+Route (app)                                                         Size     First Load JS
+┌ ○ /                                                               3.06 kB        90.6 kB
+├ ○ /_not-found                                                     0 B                0 B
+├ ○ /admin                                                          13 kB           112 kB
+├ ○ /admin/courses                                                  5.84 kB         149 kB
+├ λ /admin/courses/[courseSlug]/videos                              14.2 kB         116 kB
+├ ○ /admin/enrollments                                              4.89 kB         148 kB
+├ ○ /admin/grading                                                  8.39 kB         132 kB
+├ ○ /admin/notifications                                            6.24 kB        98.9 kB
+├ ○ /admin/quizzes                                                  4.12 kB         147 kB
+├ λ /admin/quizzes/[videoSlug]                                      6.4 kB         89.8 kB
+├ λ /admin/quizzes/[videoSlug]/access                               3.43 kB        86.8 kB
+├ λ /admin/quizzes/quiz/[quizSlug]/attempts                         4.97 kB        88.3 kB
+├ ○ /admin/students                                                 7.67 kB         151 kB
+├ λ /course/[courseSlug]                                            10 kB           109 kB
+├ λ /course/[courseSlug]/subscribe                                  383 B            81 kB
+├ λ /course/[courseSlug]/subscribe/invoice                          10.4 kB         110 kB
+├ λ /course/[courseSlug]/video/[videoSlug]                          7.92 kB         108 kB
+├ λ /course/[courseSlug]/video/[videoSlug]/assignment/[assignment]  13.5 kB         132 kB
+├ λ /course/[courseSlug]/video/[videoSlug]/quiz                     5.49 kB         105 kB
+├ λ /course/[courseSlug]/video/[videoSlug]/quiz/result/[attemptId]  8.92 kB         102 kB
+├ λ /course/[courseSlug]/video/[videoSlug]/quiz/run                 20.3 kB         113 kB
+├ ○ /grades/1                                                       147 B          94.7 kB
+├ ○ /grades/2                                                       147 B          94.7 kB
+├ ○ /grades/3                                                       148 B          94.7 kB
+├ ○ /icon.svg                                                       0 B                0 B
+├ ○ /login                                                          4 kB            128 kB
+├ ○ /manifest.webmanifest                                           0 B                0 B
+├ ○ /me                                                             2.71 kB        83.3 kB
+├ ○ /me/user                                                        6.77 kB         106 kB
+├ ○ /me/user/achievements                                           4.47 kB        94.8 kB
+├ ○ /me/user/assignments                                            5.58 kB         105 kB
+├ ○ /me/user/courses                                                10.5 kB         110 kB
+├ ○ /me/user/subscriptions                                          4.49 kB        94.8 kB
+├ ○ /opengraph-image.png                                            0 B                0 B
+├ ○ /payment/result                                                 4.62 kB          95 kB
+├ ○ /register                                                       4.65 kB         129 kB
+├ ○ /robots.txt                                                     0 B                0 B
+└ ○ /sitemap.xml                                                    0 B                0 B
++ First Load JS shared by all                                       80.6 kB
+  ├ chunks/2472-81075a3e582bcdfe.js                                 27.5 kB
+  ├ chunks/fd9d1056-f918024fc503c584.js                             51.1 kB
+  ├ chunks/main-app-7ff9caf824ba19d9.js                             233 B
+  └ chunks/webpack-10ac05d9feffc07d.js                              1.8 kB
+
+ƒ Middleware                                                        26.5 kB
 ```
-✔ binds every read tool and no action while mutations are off (14.3564ms)
-✔ binds the WHOLE catalogue — actions included — for a question with no write verb (19.4928ms)
-✔ the mutation switch, not the display surface, decides what the ToolNode can execute (12.9302ms)
-      [tool surface] read-only 10208 chars (~2552 tokens) | all 16275 chars (~4069 tokens)
-  ✔ can bind every tool in the catalogue (nothing is undeliverable) (7.409ms)
-  ✔ measures the surface it binds, for the per-turn audit row (Decision Q3) (2.2429ms)
-  ✔ is reachable: a schema tool is in the read catalogue and on every turn (0.3305ms)
-```
 
-Note the second new test is the phase's definition of done in the exact form it asks for: the
-question is `«إزيك؟»` (no write verb anywhere), the LLM is **scripted**, and the assertion is made
-against the **bound tool list the mocked call received** (`model.calls[0].toolNames`), never against
-model prose. It requires `readDefinitions.length + actionDefinitions.length` tools and specifically
-that `delete_user` is present.
+---
 
-### 4.2 The surface, measured directly (`node -e` against the real modules)
+## Evidence: Subject Profile Matrix (Plan 1.6 Verification)
 
-```
-ARMED  tools=52 chars=16275 tokens=4069      has delete_user: true | has create_video: false
-READS  tools=31 chars=10208 tokens=2552
-turnMetrics (no model call yet) = {"modelCalls":0,"toolSurface":null}
-```
+| Subject | UI Locale | Resolved `defaultFormat` | Resolved `allowChem` | Status |
+|---|---|---|---|---|
+| MATH | ar | RICH | false | PASS |
+| MATH | en | RICH | false | PASS |
+| PHYSICS | ar | RICH | false | PASS |
+| PHYSICS | en | RICH | false | PASS |
+| CHEMISTRY | ar | RICH | true | PASS |
+| CHEMISTRY | en | RICH | true | PASS |
+| ARABIC | ar | PLAIN | false | PASS |
+| ARABIC | en | PLAIN | false | PASS |
+| ENGLISH | ar | PLAIN | false | PASS |
+| ENGLISH | en | PLAIN | false | PASS |
 
-`surfaceDefs()` returns what `toolsForTurn` would bind under the current switch; the numbers below
-are the same ones the audit row stores (chars are the honest part; tokens are the repo's chars/4 rule
-of thumb). Measured after the deletion of the `surfaceFor` probe, by calling the same
-`listDefinitions()` + `approximateSchemaTokens()` the graph uses:
+*Verification confirmed:* Format resolution is driven strictly by the subject parameter; UI locale changes produce identical results across all 10 cells in both backend and frontend test runners.
 
-### 4.3 The Q3 measurement, verified end-to-end on a live turn
+---
 
-Printing the three most recent `AGENT_TURN` rows from the audit table after the suite ran
-(the suite *is* the traffic — two of these are the new tests' turns):
+## Open issues / bugs found but not fixed
+- Known flaky auth-limiter test noted in plan item 1.5 (`tests/access-codes.test.js` step 13: 422 vs 429 under rapid concurrency). Out of scope for rich math input; preserved without modification.
 
-```
-audit#1507 tier=llm toolCalls=["mark_enrollment_paid"] modelCalls=2 toolSurface={"chars":16275,"tools":52,"tokens":4069}
-audit#1506 tier=llm toolCalls=["mark_enrollment_paid"] modelCalls=2 toolSurface={"chars":16275,"tools":52,"tokens":4069}
-audit#1504 tier=llm toolCalls=["platform_overview"]    modelCalls=2 toolSurface={"chars":16275,"tools":52,"tokens":4069}
-```
+---
 
-So the number Decision #15's revisit trigger needs is now in the table, per turn, with no new
-config and no behaviour change.
-
-### 4.4 Lint and diff hygiene
-
-```
-$ node node_modules/eslint/bin/eslint.js src app.js
-(no output)      exit 0
-```
-
-`git diff --stat` shows proportional edits per file (no whole-file rewrite), `node --check` passes on
-every edited file, and the BOM + CRLF of `src/services/agent/tools/index.js` were preserved
-(verified after each splice: `bom=true crlf=302`).
-
-## 5. Definition of done
-
-| Criterion (handoff §4 Phase 1 + your GO answers) | Status | Proof |
-|---|---|---|
-| `tools/index.js`: `selectToolSet`, `hasWriteIntent` and their keyword tables removed | **MET** | §3; `git grep` for any of the 16 removed names returns nothing in `src`/`tests`/`scripts` |
-| Both `graph.js` call sites no longer gate on `hasWriteIntent` | **MET** | `graph.js` now has one `surfaceDefs()`: `includeActions ? listDefinitions() : listDefinitions().filter((d) => d.kind === KIND_READ)`; the question-keyed `selectFor` diagnostic was deleted along with its dead parameters |
-| The phase's definition of done: "what can you do?" with mutations enabled surfaces the write capabilities, **asserted via a mocked LLM call capturing the bound tools** | **MET** | §4.1 — `binds the WHOLE catalogue — actions included — for a question with no write verb` asserts on `model.calls[0].toolNames` (scripted model), requires all 52 tools and `delete_user` |
-| Q3: bind everything every turn (no pre-emptive grouping) + per-turn measurement in the audit metadata (surface token size + model calls) | **MET** | §4.2/§4.3 — `toolSurface: {tools, chars, tokens}` and `modelCalls` in the live `AGENT_TURN` rows |
-| Q6: `create_video` deleted from the tool definition **and** the export list; counts updated wherever asserted | **MET** | §4.2 (`has create_video: false`, `tools=52`); `actions.js` export list; both test allowlists; `PROJECT_MAP.md` corrected |
-| Q6: `delete_video`, `reorder_course_videos`, `mark_video_failed`, the HTTP video routes and the `VIDEO_CREATE` audit action untouched | **MET** | all three tools still exported; `git grep createVideo` shows only the untouched service/controller/Bunny paths |
-| Tests updated (not whole files deleted) where assertions referenced the removed selector | **MET** | §3 table: 14 individual assertions replaced/removed with stated reasons; only the file whose *sole* purpose was the gate was deleted |
-| Full agent suite green | **MET** | §4.1 — 246/246, 0 fail |
-| Lint clean | **MET** | §4.4 — exit 0 |
-| `AI_AGENT_ALLOW_MUTATIONS="true"` set in the **staging** `.env` | **NOT MET (owner action)** | that is a Railway runtime variable, outside this repo. It is already `true` in the local `.env`, so no code depends on me setting it. **You must set `AI_AGENT_ALLOW_MUTATIONS=true` on staging yourself.** |
-
-## 6. Assumptions — signed off (owner, this round)
-
-The five items I put to you, with your decisions. Four were accepted as proposed; item 1 was
-corrected by evidence before sign-off rather than signed as written.
-
-1. **`selectFor` was deleted, not replaced.** As you signed off: `surfaceFor()` was my own new code
-   with zero callers, so it is gone rather than renamed (change in this commit). The old
-   `selectFor(question, historyTools)` is likewise deleted, not kept in any form.
-   `turnMetrics()` — which *is* called by `agentService.js` and asserted by
-   `tests/agent-graph.test.js:253` — is the turn-measurement seam that stays.
-2. **The per-turn memo is now keyed on the switch alone** (`selection.key = 'surface|' + includeActions`).
-   Kept, per your sign-off. Its purpose (bind one surface per turn instead of re-deriving per model
-   call) is unchanged; the question/history parts of the key were removed with the selection they keyed.
-3. **The `actions.js` section headers are ASCII, and the file is now internally consistent.** Signed
-   off with your instruction to standardise: the file has three `// --- Name (context) ---` banners
-   and no remaining box-drawing characters (was 2 of those). The other agent files were checked and
-   left alone: each uses exactly one banner style throughout, so none of them was mixed.
-4. **`AI_AGENT_MAX_TOOL_CALLS=20` in the local `.env` is silently clamped to 10** by `env.js:273`.
-   Kept, per your sign-off: the clamp stays, and the local `.env` value is your runtime config, which
-   I never commit.
-5. **The Phase-0 convention of pinning `AI_AGENT_MAX_TOOL_RESULT_ROWS=50`** for every run is still what
-   I used (it is what makes the suite green in this checkout). Kept, per your sign-off.
-
-## 7. Noticed, not touched
-
-- **`tools/index.js` had six double-encoded (mojibake) comment lines, now repaired.** A
-  byte-level census (exactly two corrupted 3-code-point sequences —
-  `[226, 8364, 8221] ×6` (em dash) and `[226, 8364, 166] ×1` (ellipsis) — in header/measure/
-  transport comments) proved nothing else in `src/`, `app.js` or `.env.example` was affected.
-  The repair was a deterministic 7-replacement byte mapping (committed below), verified by
-  re-running the census (0 remaining), `node --check`, `eslint src app.js` (exit 0) and the full
-  agent suite (246/246, 0 fail). BOM and CRLF are preserved. Nothing else was re-encoded —
-  the files' Arabic is intact. This repair is the only item in this report and commit that goes
-  beyond the five sign-offs above, and it is reported here on purpose: it touches seven comment
-  lines in a file this phase already owned.
-- **`actions.js` is now internally consistent in its banner style** (all three section headers use
-  ASCII `// --- Name (context) ---`; no box-drawing remains) since your sign-off asked for it. The
-  other agent module files were scanned and each uses exactly one banner style throughout, so they
-  were not touched.
-- The committed Phase 1 commit `6b079d8` carries the original report and code; this correction
-  (the diff-stat correction included) is a separate commit on top, as you ordered.
-- **`PROJECT_MAP.md` line 42 is stale**: it says `AI_AGENT_CONVERSATION_RETENTION_DAYS` "is still
-  resolved and clamped but read by nothing — no retention/pruning job exists yet", while
-  `src/jobs/pruneAgentConversations.js` exists, is wired at `app.js:452-456` and runs daily at 03:17.
-  Out of this phase's scope; left as written (I appended a separate v2 bullet instead).
-- **`requiresApproval: true` still on every action**, and the whole HITL REST + socket surface
-  (`POST /admin/agent/approvals`, `/approvals/:id/decide`, `agent:decide`, `findRefusedMutation`,
-  `approvalRequested`) is untouched, per your Q2 answer. Phase 3 will make them inert; today they still
-  pass their own suites.
-- `scripts/smoke-agent.js` / `scripts/agent-latency.js` never referenced the removed symbols (checked);
-  the smoke script's catalogue summary will simply report 52 tools now.
-- `logs/agent-baseline.log` and `logs/agent-run1.log` are untracked artifacts from an older worktree
-  (they point at `C:\Users\Ahmed Saied\.cline\worktrees\806ac\...`) and reference old line numbers;
-  ignored.
-
-## 8. Next phase risks (Phase 2)
-
-- **The system prompt is still the report-writer.** Phase 2 replaces `SYSTEM_PROMPT` (`graph.js:33`,
-  still a module `const`) with a per-turn builder. This phase deliberately left it a const and left
-  `agentNode` reading it directly, so Phase 2 must change both — and it must **not** mention pending
-  approvals (your Q2 answer).
-- **Until Phase 2 lands, prompt and surface are inconsistent**: the model can now call 21 write tools
-  while the prompt still tells it "النظام يطلب موافقة المشرف تلقائياً… بعد استدعاء الأداة، أخبر المشرف
-  باختصار أن الطلب مُرسل وأنتظر موافقته". Safe today (the `approved` gate still refuses the mutation),
-  but do not run a staging smoke test expecting writes to succeed before Phase 3.
-- **Cost is now recorded, not guessed**: ~16.3k chars (~4.1k tokens by the proxy; ~9.5k tokens of real
-  model-facing JSON per my Stage-1 measurement) per model call, and `modelCalls=2` on a simple
-  tool-using turn. After you enable `AI_AGENT_ALLOW_MUTATIONS` on staging and ask a multi-step question,
-  read `toolSurface`/`modelCalls` off the `AGENT_TURN` audit row before the provider's per-minute limit
-  tells you the same thing less kindly.
-
+## Decisions needed from Ahmed
+- Gate 1 approval: confirm that the database-migration-free approach (using JSONB fields in `surveyJson`, `answerKey`, and `responses`) and contract specifications are accepted.
+- Upon approval, proceed immediately to **Phase 2** (Shared frontend components: `MathBlockEditor`, `RichEditor`, `RichView`, MathLive + KaTeX setup).
