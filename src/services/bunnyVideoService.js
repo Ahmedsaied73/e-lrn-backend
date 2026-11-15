@@ -327,8 +327,9 @@ async function applyBunnyStatus(bunnyVideoId, bunnyStatusCode) {
       updateData.duration = remoteMeta.length || null;
       updateData.width = remoteMeta.width || null;
       updateData.height = remoteMeta.height || null;
+      const cdnHost = process.env.BUNNY_STREAM_CDN_HOSTNAME || `vz-${video.bunnyLibraryId}.b-cdn.net`;
       updateData.thumbnailUrl = remoteMeta.thumbnailFileName
-        ? `https://vz-${video.bunnyLibraryId}.b-cdn.net/${bunnyVideoId}/${remoteMeta.thumbnailFileName}`
+        ? `https://${cdnHost}/${bunnyVideoId}/${remoteMeta.thumbnailFileName}`
         : null;
       updateData.processingProgress = 100;
     } catch (metaErr) {

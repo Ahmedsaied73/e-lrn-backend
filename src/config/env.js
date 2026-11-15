@@ -463,6 +463,8 @@ const config = {
     readOnlyApiKey: process.env.BUNNY_STREAM_READ_ONLY_API_KEY,
     // Token key for Embed Token Authentication (signed playback URLs)
     tokenKey: process.env.BUNNY_STREAM_TOKEN_KEY,
+    // CDN hostname for video thumbnails (e.g. vz-3dfea6fd-6e9.b-cdn.net)
+    cdnHostname: process.env.BUNNY_STREAM_CDN_HOSTNAME || (process.env.BUNNY_STREAM_LIBRARY_ID ? `vz-${process.env.BUNNY_STREAM_LIBRARY_ID}.b-cdn.net` : null),
     // Playback token TTL in seconds — default: 21600 (6 hours)
     tokenTtlSeconds: Number(process.env.BUNNY_STREAM_TOKEN_TTL_SECONDS) || 21600,
     // Max upload size in bytes — defaults to 5GB; override per Bunny plan/needs
