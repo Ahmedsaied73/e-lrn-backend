@@ -553,28 +553,58 @@ process.on('unhandledRejection', (reason) => {
 });
 
 let server = null;
+let reconciliationTask = null; // node-cron task handle (stopped on shutdown)
+let paymentReconciliationTask = null; // payments cron handle (only when enabled)
+let agentRetentionTask = null; // agent transcript retention cron handle
+let agentMemoryRetentionTask = null; // agent memory retention cron handle (Phase 7)
+let softDeletePurgeTask = null; // soft-delete purge cron handle (Phase 8)
+
 if (require.main === module) {
-  server = app.listen(port, () => {
-    console.log(`Example app listening at http://localhost:${port}`);
-    console.log('CORS enabled for configured origins');
+  const appMode = String(process.env.APP_MODE || 'monolith').toLowerCase();
+  const isWorkerOnly = appMode === 'worker';
+  const isApiOnly = appMode === 'api';
+  const shouldRunHttp = !isWorkerOnly;
+  const shouldRunCrons = !isApiOnly;
 
-    // The agent's WebSocket needs the listening HTTP server, so it is attached
-    // here rather than at require time: unit tests that import app.js without
-    // listening never create a socket server (or its timers) by accident.
-    if (config.aiAgent && config.aiAgent.enabled) {
-      try {
-        const { initAgentSocket, SOCKET_PATH } = require('./src/services/agent/socketHandler');
-        initAgentSocket(server);
-        console.log(`[INFO] Agent WebSocket mounted at ${SOCKET_PATH}`);
-      } catch (err) {
-        console.warn('[WARN] Agent WebSocket failed to mount:', err.message);
+  if (shouldRunHttp) {
+    server = app.listen(port, () => {
+      console.log(`[APP] HTTP server listening on port ${port} (mode: ${appMode})`);
+      console.log('CORS enabled for configured origins');
+
+      // The agent's WebSocket needs the listening HTTP server, so it is attached
+      // here rather than at require time: unit tests that import app.js without
+      // listening never create a socket server (or its timers) by accident.
+      if (config.aiAgent && config.aiAgent.enabled) {
+        try {
+          const { initAgentSocket, SOCKET_PATH } = require('./src/services/agent/socketHandler');
+          initAgentSocket(server);
+          console.log(`[INFO] Agent WebSocket mounted at ${SOCKET_PATH}`);
+        } catch (err) {
+          console.warn('[WARN] Agent WebSocket failed to mount:', err.message);
+        }
+      } else {
+        // Same reason as the REST mount above: a silently absent /agent-ws looks like
+        // a broken client, so the boot log states it was configuration, not failure.
+        console.log('[INFO] AI admin agent disabled (AI_AGENT_ENABLED=false) — /agent-ws is not mounted.');
       }
-    } else {
-      // Same reason as the REST mount above: a silently absent /agent-ws looks like
-      // a broken client, so the boot log states it was configuration, not failure.
-      console.log('[INFO] AI admin agent disabled (AI_AGENT_ENABLED=false) — /agent-ws is not mounted.');
-    }
 
+      // Crash recovery: uploads interrupted by a previous shutdown can never
+      // resume (their process is gone) — mark them FAILED so re-upload works.
+      // Best-effort and boot-non-blocking: a DB outage here must not kill boot.
+      try {
+        const { recoverInterruptedUploads } = require('./src/services/bunnyVideoService');
+        recoverInterruptedUploads()
+          .then((count) => { if (count > 0) console.log(`[INFO] Recovered ${count} interrupted upload(s) to FAILED`); })
+          .catch((err) => console.warn('[WARN] Upload crash recovery failed:', err.message));
+      } catch (err) {
+        console.warn('[WARN] Upload crash recovery failed:', err.message);
+      }
+    });
+  } else {
+    console.log(`[APP] Worker process online (mode: ${appMode}) — HTTP server disabled; hosting crons & queues.`);
+  }
+
+  if (shouldRunCrons) {
     // Start Bunny video reconciliation job (every 10 minutes). Keep the task
     // handle so shutdown can stop it.
     reconciliationTask = startReconciliationJob();
@@ -627,18 +657,6 @@ if (require.main === module) {
       }
     }
 
-    // Crash recovery: uploads interrupted by a previous shutdown can never
-    // resume (their process is gone) — mark them FAILED so re-upload works.
-    // Best-effort and boot-non-blocking: a DB outage here must not kill boot.
-    try {
-      const { recoverInterruptedUploads } = require('./src/services/bunnyVideoService');
-      recoverInterruptedUploads()
-        .then((count) => { if (count > 0) console.log(`[INFO] Recovered ${count} interrupted upload(s) to FAILED`); })
-        .catch((err) => console.warn('[WARN] Upload crash recovery failed:', err.message));
-    } catch (err) {
-      console.warn('[WARN] Upload crash recovery failed:', err.message);
-    }
-
     // Start AI essay-grading worker (in-process BullMQ). No-ops with a warning
     // when GEMINI_API_KEY is missing or Redis is disabled — human grading path
     // is unaffected.
@@ -654,18 +672,15 @@ if (require.main === module) {
     } else {
       console.log('[INFO] AI_WORKER_PROCESS=true — AI grading worker running standalone; API will not start an in-process worker.');
     }
-});
+  } else {
+    console.log(`[APP] Background cron jobs disabled (mode: ${appMode}) — crons delegated to worker container.`);
+  }
 }
 
 // ── Graceful shutdown (SIGTERM/SIGINT) ──────────────────────────────────────
 // Closes the HTTP server, then drains Prisma + Redis so queued writes finish
 // instead of the platform SIGKILL-ing mid-transaction. Force-exit after 10s
 // so a hung connection can't keep the instance "up" after detach.
-let reconciliationTask = null; // node-cron task handle (stopped on shutdown)
-let paymentReconciliationTask = null; // payments cron handle (only when enabled)
-let agentRetentionTask = null; // agent transcript retention cron handle
-let agentMemoryRetentionTask = null; // agent memory retention cron handle (Phase 7)
-let softDeletePurgeTask = null; // soft-delete purge cron handle (Phase 8)
 
 function shutdown(signal) {
   console.log(`[SHUTDOWN] ${signal} received — draining connections...`);
@@ -741,8 +756,7 @@ function shutdown(signal) {
     console.warn('[WARN] AI queue stop failed:', err.message);
   }
 
-  if (server) {
-    server.close(async () => {
+  const drainAndExit = async () => {
     try {
       await Promise.allSettled(bullMqClosers);
     } catch (err) {
@@ -762,7 +776,12 @@ function shutdown(signal) {
     }
     console.log('[SHUTDOWN] clean exit');
     process.exit(0);
-    });
+  };
+
+  if (server) {
+    server.close(drainAndExit);
+  } else {
+    drainAndExit();
   }
   // Force-exit if connections refuse to drain (keeps Railway's healthcheck honest).
   setTimeout(() => {

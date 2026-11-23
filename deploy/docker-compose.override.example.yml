@@ -1,0 +1,20 @@
+# Example docker-compose.override.yml
+# Copy to docker-compose.override.yml on the VPS or local dev machine for debugging.
+version: '3.8'
+
+services:
+  # Expose database to host for direct inspection / Prisma studio (DO NOT USE IN PRODUCTION)
+  # postgres:
+  #   ports:
+  #     - "127.0.0.1:5432:5432"
+
+  # Expose redis to host for redis-cli inspection
+  # redis:
+  #   ports:
+  #     - "127.0.0.1:6379:6379"
+
+  # Mount local source code for rapid development
+  # api:
+  #   volumes:
+  #     - ../:/usr/src/app
+  #     - /usr/src/app/node_modules

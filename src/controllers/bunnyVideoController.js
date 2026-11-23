@@ -301,7 +301,8 @@ const getBunnyVideoPlayback = async (req, res, next) => {
       }
       const { token, expiresAt } = bunnyClient.generatePlaybackToken(video.bunnyVideoId);
       const playbackUrl = `https://iframe.mediadelivery.net/embed/${video.bunnyLibraryId}/${video.bunnyVideoId}?token=${token}&expires=${expiresAt}`;
-      return res.json({ success: true, data: { videoSlug, playbackUrl, expiresAt } });
+      const hlsUrl = await bunnyVideoService.resolveHlsUrl(video.bunnyLibraryId, video.bunnyVideoId, token, expiresAt);
+      return res.json({ success: true, data: { videoSlug, playbackUrl, hlsUrl, expiresAt } });
     }
 
     // Student path: enrollment + READY checks enforced in the sequential gate.
@@ -324,7 +325,8 @@ const getBunnyVideoPlayback = async (req, res, next) => {
       }
       const { token, expiresAt } = bunnyClient.generatePlaybackToken(v.bunnyVideoId);
       const playbackUrl = `https://iframe.mediadelivery.net/embed/${v.bunnyLibraryId}/${v.bunnyVideoId}?token=${token}&expires=${expiresAt}`;
-      return res.json({ success: true, data: { videoSlug: v.slug, playbackUrl, expiresAt } });
+      const hlsUrl = await bunnyVideoService.resolveHlsUrl(v.bunnyLibraryId, v.bunnyVideoId, token, expiresAt);
+      return res.json({ success: true, data: { videoSlug: v.slug, playbackUrl, hlsUrl, expiresAt } });
     }
 
     const video = await bunnyVideoService.findBySlug(videoSlug);

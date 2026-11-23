@@ -364,6 +364,35 @@ async function applyBunnyStatus(bunnyVideoId, bunnyStatusCode) {
 }
 
 /**
+ * Resolve direct HLS playlist URL for a video, cached in Redis.
+ *
+ * @param {string|number} bunnyLibraryId
+ * @param {string} bunnyVideoId
+ * @param {string} token
+ * @param {number} expiresAt
+ * @returns {Promise<string|null>}
+ */
+async function resolveHlsUrl(bunnyLibraryId, bunnyVideoId, token, expiresAt) {
+  const cacheKey = cache.buildKey('hls', bunnyVideoId);
+  try {
+    const cached = await cache.get(cacheKey);
+    if (cached) return cached;
+  } catch (_err) {
+    // Fail open on cache error
+  }
+
+  const hlsUrl = await bunnyClient.fetchHlsPlaylistUrl(bunnyLibraryId, bunnyVideoId, token, expiresAt);
+  if (hlsUrl) {
+    try {
+      await cache.set(cacheKey, hlsUrl, 18000);
+    } catch (_err) {
+      // Fail open on cache error
+    }
+  }
+  return hlsUrl;
+}
+
+/**
  * Generate a signed playback URL for a READY BunnyVideo.
  *
  * Authorization chain:
@@ -462,6 +491,7 @@ async function getPlaybackAccess(videoId, userId, { video: preloadedVideo } = {}
   // Generate signed embed URL — token is safe to return; it's time-limited and video-scoped
   const { token, expiresAt } = bunnyClient.generatePlaybackToken(video.bunnyVideoId);
   const playbackUrl = `https://iframe.mediadelivery.net/embed/${video.bunnyLibraryId}/${video.bunnyVideoId}?token=${token}&expires=${expiresAt}`;
+  const hlsUrl = await resolveHlsUrl(video.bunnyLibraryId, video.bunnyVideoId, token, expiresAt);
 
   log.info('video.playback.authorized', {
     videoId: video.id,
@@ -473,6 +503,7 @@ async function getPlaybackAccess(videoId, userId, { video: preloadedVideo } = {}
   return {
     videoSlug: video.slug,
     playbackUrl,
+    hlsUrl,
     expiresAt,
   };
 }
@@ -725,6 +756,7 @@ module.exports = {
   markFailed,
   applyBunnyStatus,
   getPlaybackAccess,
+  resolveHlsUrl,
   deleteVideo,
   listCourseVideos,
   findById,

@@ -1,27 +1,35 @@
 FROM node:22-alpine
 
-# Prisma engines need OpenSSL at runtime on Alpine (musl)
-RUN apk add --no-cache openssl libc6-compat
+# dumb-init forwards OS signals (SIGTERM/SIGINT) directly to Node for graceful shutdown.
+# Prisma engines require OpenSSL (musl) and libc6-compat at runtime on Alpine.
+RUN apk add --no-cache openssl libc6-compat dumb-init wget
 
-# Create app directory
 WORKDIR /usr/src/app
 
-# Install app dependencies (npm ci for reproducible builds; falls back to npm install if lockfile missing)
+# Install production dependencies
 COPY package*.json ./
 COPY prisma ./prisma/
-RUN npm ci --no-audit --no-fund
+RUN npm ci --omit=dev --no-audit --no-fund
 
-# Generate Prisma client (postinstall runs before schema is copied, so generate explicitly)
+# Generate Prisma client for linux-musl-openssl-3.0.x
 RUN npx prisma generate
 
-# Bundle app source
+# Copy application source code
 COPY . .
 
-# Create uploads directory
-RUN mkdir -p uploads
+# Set ownership to unprivileged node user
+RUN chown -R node:node /usr/src/app
 
-# Expose port
+# Switch to non-root user
+USER node
+
+# Expose API port
 EXPOSE 3005
 
-# Start the application
-CMD ["npm", "start"]
+# Process-level healthcheck
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:3005/healthz || exit 1
+
+# dumb-init as PID 1 ensures clean signal handling and zombie process reaping
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["node", "app.js"]

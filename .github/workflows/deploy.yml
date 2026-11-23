@@ -1,0 +1,126 @@
+name: Build & Deploy to VPS Fleet
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Deployment target'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - canary
+      image_tag:
+        description: 'Specific image tag to deploy (defaults to git SHA)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # ── [1/3] Build & Push Docker Image to GHCR ────────────────────────────────
+  build_and_push:
+    name: Build & Publish Container
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Resolve Image Tag
+        id: meta
+        run: |
+          if [ -n "${{ github.event.inputs.image_tag }}" ]; then
+            echo "tag=${{ github.event.inputs.image_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.sha }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.tag }}
+            ghcr.io/${{ github.repository }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── [2/3] Deploy to Canary (Ahmed's Demo Instance) ─────────────────────────
+  deploy_canary:
+    name: Canary Deployment & Smoke Test
+    needs: build_and_push
+    runs-on: ubuntu-latest
+    if: success()
+    steps:
+      - name: Setup SSH for Canary
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.CANARY_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "${{ secrets.CANARY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Trigger Canary Deployment
+        run: |
+          ssh deploy@${{ secrets.CANARY_HOST }} \
+            "bash /opt/teacher-app/deploy/scripts/deploy.sh --tag ${{ needs.build_and_push.outputs.image_tag }}"
+
+      - name: Run Canary Smoke Tests
+        run: |
+          echo "Verifying Canary /healthz..."
+          curl -fsSL "https://${{ secrets.CANARY_DOMAIN }}/healthz" | grep -q '"status":"ok"'
+
+          echo "Verifying Canary /readyz..."
+          curl -fsSL "https://${{ secrets.CANARY_DOMAIN }}/readyz" | grep -q '"status":"ok"'
+
+          echo "Canary verified healthy!"
+
+  # ── [3/3] Progressive Rollout to Teacher Tenants ───────────────────────────
+  deploy_teachers:
+    name: Deploy Teacher Fleet
+    needs: [build_and_push, deploy_canary]
+    runs-on: ubuntu-latest
+    if: success() && github.event.inputs.target != 'canary'
+    steps:
+      - name: Setup Deploy SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.FLEET_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+      - name: Rollout to Teachers (Sequential with Health Gate)
+        run: |
+          # TEACHER_HOSTS is a newline-separated list of teacher VPS IPs/hostnames
+          echo "${{ secrets.TEACHER_HOSTS }}" | while IFS= read -r host || [ -n "$host" ]; do
+            # Skip empty lines or comments
+            [ -z "$host" ] && continue
+            [[ "$host" =~ ^#.* ]] && continue
+
+            echo "=== Deploying to Teacher Node: $host ==="
+            ssh-keyscan -H "$host" >> ~/.ssh/known_hosts 2>/dev/null
+
+            ssh deploy@$host \
+              "bash /opt/teacher-app/deploy/scripts/deploy.sh --tag ${{ needs.build_and_push.outputs.image_tag }}"
+
+            echo "Node $host deployed and verified healthy!"
+            sleep 5
+          done

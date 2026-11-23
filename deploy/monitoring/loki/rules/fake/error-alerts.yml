@@ -1,0 +1,35 @@
+groups:
+  - name: application_error_alerts
+    rules:
+      # ── Unhandled Application Errors in Backend ────────────────────────────
+      - alert: BackendUnhandledError
+        expr: |
+          count_over_time({job="docker"} |= "[ERROR]" [1m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Application Error detected on {{ $labels.tenant }}"
+          description: "An unhandled error or 5xx occurred in the Node process. Inspect logs in Grafana."
+
+      # ── Fatal Node Process Crash (uncaughtException / unhandledRejection) ──
+      - alert: BackendFatalCrash
+        expr: |
+          count_over_time({job="docker"} |= "[FATAL]" [1m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "FATAL Crash detected on {{ $labels.tenant }}"
+          description: "Process crashed due to uncaughtException or unhandledRejection."
+
+      # ── Nginx 5xx Spike ────────────────────────────────────────────────────
+      - alert: Nginx5xxErrorLogged
+        expr: |
+          count_over_time({job="nginx"} | json | status >= 500 [1m]) > 5
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Nginx 5xx HTTP errors spiking on {{ $labels.tenant }}"
+          description: "Multiple 5xx responses were returned to clients through Nginx."

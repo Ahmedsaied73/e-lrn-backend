@@ -1,0 +1,37 @@
+# Connection Settings
+listen_addresses = '*'
+max_connections = ${PG_MAX_CONNECTIONS}
+superuser_reserved_connections = 3
+
+# Memory Tuning
+shared_buffers = ${PG_SHARED_BUFFERS}
+work_mem = ${PG_WORK_MEM}
+maintenance_work_mem = ${PG_MAINTENANCE_WORK_MEM}
+effective_cache_size = ${PG_EFFECTIVE_CACHE_SIZE}
+
+# WAL & Checkpoints
+wal_level = replica
+checkpoint_completion_target = 0.9
+checkpoint_timeout = 15min
+wal_buffers = 16MB
+min_wal_size = 1GB
+max_wal_size = 4GB
+
+# Query Planner for NVMe SSD
+random_page_cost = 1.1
+effective_io_concurrency = 200
+default_statistics_target = 100
+
+# Authentication & Security
+password_encryption = scram-sha-256
+
+# Logging
+logging_collector = on
+log_directory = 'log'
+log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'
+log_min_duration_statement = 500
+log_checkpoints = on
+log_connections = off
+log_disconnections = off
+log_lock_waits = on
+log_temp_files = 0

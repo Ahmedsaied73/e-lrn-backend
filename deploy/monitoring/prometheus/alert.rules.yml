@@ -1,0 +1,82 @@
+groups:
+  - name: elearning_infrastructure_alerts
+    rules:
+      # ── Instance / Container Down ──────────────────────────────────────────
+      - alert: InstanceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Instance {{ $labels.instance }} (job: {{ $labels.job }}) is down"
+          description: "Service has been unreachable for more than 1 minute."
+
+      # ── High Host RAM Usage (> 85%) ────────────────────────────────────────
+      - alert: HostMemoryRunningLow
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host RAM usage is above 85% on {{ $labels.instance }}"
+          description: "Available memory has dropped below 15% for >3 minutes."
+
+      # ── High Disk Usage (> 80%) ────────────────────────────────────────────
+      - alert: HostDiskRunningLow
+        expr: (1 - (node_filesystem_free_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"})) * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk space is above 80% on {{ $labels.instance }}"
+          description: "Root partition is more than 80% full. Clean Docker images or check logs."
+
+      # ── Redis Memory > 70% (Crucial for noeviction) ────────────────────────
+      - alert: RedisMemoryHigh
+        expr: redis_memory_used_bytes / redis_memory_max_bytes * 100 > 70
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis memory reached {{ $value | printf \"%.1f\" }}% on {{ $labels.instance }}"
+          description: "With noeviction policy, exceeding 100% memory will cause write operations to fail!"
+
+      # ── PostgreSQL High Connection Count (> 80%) ───────────────────────────
+      - alert: PostgresConnectionsHigh
+        expr: pg_stat_activity_count / pg_settings_max_connections * 100 > 80
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL connections at {{ $value | printf \"%.1f\" }}%"
+          description: "PostgreSQL active connections are near the maximum capacity."
+
+      # ── API 5xx Error Spike ────────────────────────────────────────────────
+      - alert: HighHttp5xxRate
+        expr: sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m])) * 100 > 2
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High 5xx HTTP error rate ({{ $value | printf \"%.1f\" }}%)"
+          description: "More than 2% of API requests are failing with 5xx errors."
+
+      # ── High Latency p95 > 1.5s ────────────────────────────────────────────
+      - alert: HighHttpLatencyP95
+        expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le)) > 1.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "API p95 latency is high (> 1.5s)"
+          description: "95th percentile response time is exceeding 1.5 seconds."
+
+      # ── BullMQ Failed Queue Jobs ───────────────────────────────────────────
+      - alert: BullMqFailedJobsDetected
+        expr: bullmq_jobs_failed_total > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AI grading jobs failed in BullMQ queue"
+          description: "Detected multiple failed jobs in the ai-grading queue."

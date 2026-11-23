@@ -405,6 +405,52 @@ function generatePlaybackToken(bunnyVideoId, ttlSeconds) {
   return { token, expiresAt };
 }
 
+/**
+ * Resolves the direct HLS playlist URL from Bunny embed.
+ * Timeouts after 3.5s and resolves null on failure so playback flows never block.
+ *
+ * @param {string|number} bunnyLibraryId
+ * @param {string} bunnyVideoId
+ * @param {string} token
+ * @param {number} expiresAt
+ * @returns {Promise<string|null>}
+ */
+function fetchHlsPlaylistUrl(bunnyLibraryId, bunnyVideoId, token, expiresAt) {
+  return new Promise((resolve) => {
+    let resolved = false;
+    const done = (val) => {
+      if (!resolved) {
+        resolved = true;
+        resolve(val);
+      }
+    };
+
+    const embedUrl = `https://iframe.mediadelivery.net/embed/${bunnyLibraryId}/${bunnyVideoId}?token=${token}&expires=${expiresAt}`;
+    const req = https.get(embedUrl, { timeout: 3500 }, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        return done(null);
+      }
+      let html = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        html += chunk;
+      });
+      res.on('end', () => {
+        const match = html.match(/var\s+urlPlaylistUrl\s*=\s*'([^']+)'/) ||
+                      html.match(/<source\s+type="application\/vnd\.apple\.mpegURL"\s+src="([^']+)"/);
+        done(match ? match[1] : null);
+      });
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      done(null);
+    });
+    req.on('error', () => done(null));
+  });
+}
+
 // ─── Webhook Verification ─────────────────────────────────────────────────────
 
 /**
@@ -460,6 +506,7 @@ module.exports = {
   deleteVideo,
   uploadVideoStream,
   generatePlaybackToken,
+  fetchHlsPlaylistUrl,
   verifyWebhookSignature,
   BunnyApiError,
   BunnyCircuitOpenError,

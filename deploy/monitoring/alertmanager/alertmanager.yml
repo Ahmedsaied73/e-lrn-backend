@@ -1,0 +1,25 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ['alertname', 'tenant', 'severity']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: 'telegram-notifications'
+
+receivers:
+  - name: 'telegram-notifications'
+    telegram_configs:
+      - bot_token: '${TELEGRAM_BOT_TOKEN}'
+        chat_id: ${TELEGRAM_CHAT_ID}
+        send_resolved: true
+        parse_mode: 'HTML'
+        message: >-
+          {{ if eq .Status "firing" }}🚨 <b>ALERT FIRING:</b>{{ else }}✅ <b>ALERT RESOLVED:</b>{{ end }}
+          <b>Rule:</b> {{ .CommonLabels.alertname }}
+          <b>Severity:</b> {{ .CommonLabels.severity }}
+          <b>Tenant:</b> {{ .CommonLabels.tenant }}
+          
+          <b>Summary:</b> {{ .CommonAnnotations.summary }}
+          <b>Details:</b> {{ .CommonAnnotations.description }}
