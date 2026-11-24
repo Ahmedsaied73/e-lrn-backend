@@ -24,7 +24,7 @@ LOCAL_FILE=""
 
 if [ "$BACKUP_SOURCE" == "latest" ]; then
   echo "[RESTORE] Fetching latest daily backup from storage..."
-  LATEST_REMOTE=$(rclone lsf "${DEST}/daily" --files-only --sort-by-time | tail -n 1)
+  LATEST_REMOTE=$(rclone lsf "${DEST}/daily" --files-only --format 'tp' --separator ';' | sort | tail -n 1 | cut -d';' -f2)
   if [ -z "$LATEST_REMOTE" ]; then
     echo "[FATAL] No backups found in ${DEST}/daily"
     exit 1

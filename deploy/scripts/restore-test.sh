@@ -57,7 +57,7 @@ done
 
 echo "=== [2/4] Fetching latest backup from object storage ==="
 DEST="${BACKUP_STORAGE_DEST:-r2:teacher-backups}/${TENANT_NAME:-teacher-default}"
-LATEST_BACKUP=$(rclone lsf "${DEST}/daily" --files-only --sort-by-time | tail -n 1)
+LATEST_BACKUP=$(rclone lsf "${DEST}/daily" --files-only --format 'tp' --separator ';' | sort | tail -n 1 | cut -d';' -f2)
 
 if [ -z "$LATEST_BACKUP" ]; then
   echo "[DRILL ERROR] No backup found in ${DEST}/daily"
