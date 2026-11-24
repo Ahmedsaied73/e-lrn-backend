@@ -1,5 +1,13 @@
 node_modules
-.env
+.env*
+!.env.example
+!deploy/tenants/_template.env.example
+*.pem
+*.key
+*.crt
+*.cert
+.rclone.conf
+rclone.conf
 .vscode
 examples
 backend.log
