@@ -8,6 +8,8 @@ node_modules
 *.cert
 .rclone.conf
 rclone.conf
+deploy/nginx/site.conf
+deploy/postgres/postgresql.conf
 .vscode
 examples
 backend.log
