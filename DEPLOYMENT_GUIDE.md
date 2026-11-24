@@ -9,11 +9,12 @@
    - [1.1 Hostinger VPS Provisioning](#11-hostinger-vps-provisioning)
    - [1.2 Cloudflare DNS & Origin CA SSL Setup](#12-cloudflare-dns--origin-ca-ssl-setup)
    - [1.3 Cloudflare R2 Bucket (for Backups)](#13-cloudflare-r2-bucket-for-backups)
-   - [1.4 Telegram Bot Setup (for Alerts)](#14-telegram-bot-setup-for-alerts)
-   - [1.5 Bunny.net Stream Setup (Video Hosting & 5 Keys)](#15-bunnynet-stream-setup)
-   - [1.6 Google Gemini API Setup (AI Essay Grader)](#16-google-gemini-api-setup)
-   - [1.7 Supabase Storage Setup (Quiz & Course Thumbnails)](#17-supabase-storage-setup)
-   - [1.8 Auto-Generated Passwords & Secrets (No Account Needed)](#18-auto-generated-passwords--secrets)
+   - [1.4 Healthchecks.io (Missed-Backup Alerts)](#14-healthchecksio-missed-backup-alerts)
+   - [1.5 Telegram Bot Setup (for Alerts)](#15-telegram-bot-setup-for-alerts)
+   - [1.6 Bunny.net Stream Setup (Video Hosting & 5 Keys)](#16-bunnynet-stream-setup)
+   - [1.7 Google Gemini API Setup (AI Essay Grader)](#17-google-gemini-api-setup)
+   - [1.8 Supabase Storage Setup (Quiz & Course Thumbnails)](#18-supabase-storage-setup)
+   - [1.9 Auto-Generated Passwords & Secrets (No Account Needed)](#19-auto-generated-passwords--secrets)
 2. [Phase 2: VPS Server Commissioning (First-Time Server Setup)](#phase-2-vps-server-commissioning)
    - [2.1 Run the Provisioning Script](#21-run-the-provisioning-script)
    - [2.2 Install Cloudflare Origin CA Certificates](#22-install-cloudflare-origin-ca-certificates)
@@ -86,7 +87,9 @@ Ahmed manages the domain in his Cloudflare account. The teacher never touches DN
    - **Bucket name:** `teacher-backups`
    - **Location:** Automatic (or Western Europe).
 3. Click **Manage R2 API Tokens** -> **Create API token**:
-   - **Permissions:** Admin Read & Write.
+   - **Token Name:** `backup-teacher1-token` (best practice: one token per teacher).
+   - **Permissions:** **Object Read & Write** (do **NOT** select Admin Read & Write).
+   - **Specify bucket(s):** Apply strictly to `teacher-backups`.
    - Note down:
      - **Access Key ID**
      - **Secret Access Key**
@@ -94,7 +97,20 @@ Ahmed manages the domain in his Cloudflare account. The teacher never touches DN
 
 ---
 
-### 1.4 Telegram Bot (for Alerts)
+### 1.4 Healthchecks.io (Missed-Backup Alerts)
+To ensure you are alerted if a scheduled daily backup fails to run (e.g. VPS power loss or crond stopped):
+1. Create a free account on **[healthchecks.io](https://healthchecks.io)**.
+2. Click **Add Check**:
+   - **Name:** `backup-teacher1`
+   - **Schedule:** Period `24 hours`, Grace time `2 hours`.
+3. Set up notification integrations (Telegram / Email).
+4. Copy your unique Ping URL (e.g. `https://hc-ping.com/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`).
+   - Add this URL to `.env` as `HEALTHCHECK_URL=https://hc-ping.com/...`.
+   - `backup.sh` automatically pings `/start` at kickoff, pings the base URL on success, and `/fail` on error. If no ping is received for 26 hours, Healthchecks.io fires an alert.
+
+---
+
+### 1.5 Telegram Bot (for Alerts)
 1. Open Telegram and search for `@BotFather`.
 2. Send `/newbot`, choose a name and username (e.g. `AkademiaAlertsBot`).
 3. Save the **Bot Token** (e.g. `7123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ`).
@@ -104,7 +120,7 @@ Ahmed manages the domain in his Cloudflare account. The teacher never touches DN
 
 ---
 
-### 1.5 Bunny.net Stream Setup (Video Hosting & 5 Keys)
+### 1.6 Bunny.net Stream Setup (Video Hosting & 5 Keys)
 Create an account on **[bunny.net](https://bunny.net)**:
 1. Click **Stream** in the left sidebar -> **Add Video Library**:
    - Name: `teacher1-videos` (or teacher's name).
@@ -122,7 +138,7 @@ Create an account on **[bunny.net](https://bunny.net)**:
 
 ---
 
-### 1.6 Google Gemini API Setup (AI Essay Grader)
+### 1.7 Google Gemini API Setup (AI Essay Grader)
 1. Go to **[aistudio.google.com](https://aistudio.google.com/)** and sign in with any Google account.
 2. Click the **Get API key** button in the left sidebar.
 3. Click **Create API key** -> select or create a project -> click **Create API key in existing project**.
@@ -132,7 +148,7 @@ Create an account on **[bunny.net](https://bunny.net)**:
 
 ---
 
-### 1.7 Supabase Storage Setup (Quiz & Course Thumbnails)
+### 1.8 Supabase Storage Setup (Quiz & Course Thumbnails)
 *(For hosting course cards, teacher photos, and quiz question diagrams)*:
 1. Go to **[supabase.com](https://supabase.com)** and create a project (Free tier).
 2. Go to **Project Settings** -> **API**:
@@ -145,7 +161,7 @@ Create an account on **[bunny.net](https://bunny.net)**:
 
 ---
 
-### 1.8 Auto-Generated Passwords & Secrets (No Account Needed)
+### 1.9 Auto-Generated Passwords & Secrets (No Account Needed)
 When you run `add-tenant.sh` in Phase 3, the script **automatically generates** secure random 64-character keys:
 - `POSTGRES_PASSWORD`
 - `REDIS_PASSWORD`
@@ -162,37 +178,35 @@ When you run `add-tenant.sh` in Phase 3, the script **automatically generates** 
 Run these commands from your local computer terminal (PowerShell, macOS, or Linux).
 
 ### 2.1 Run the Provisioning Script
-This single command updates Ubuntu, installs Docker CE + Compose, configures the UFW firewall (locking ports 80/443 strictly to Cloudflare IPs), enables Fail2ban, sets up a 2GB swap file, and creates the unprivileged `deploy` user.
+This single command updates Ubuntu, installs Docker CE + Compose, configures the UFW firewall (locking ports 80/443 strictly to Cloudflare IPs), enables Fail2ban, sets up a 2GB swap file, creates the `deploy` user with passwordless sudo & docker privileges, and hardens SSH by **disabling root login completely** (`PermitRootLogin no`).
 
 ```bash
-# Replace with your Hostinger VPS IP and your personal SSH public key:
+# Run once as root to provision the server and install your deploy SSH key:
 ssh root@<HOSTINGER_VPS_IP> 'bash -s' < deploy/scripts/provision-vps.sh "$(cat ~/.ssh/id_rsa.pub)"
 ```
+> **Security Note:** Once this script completes, root SSH is disabled. All subsequent commands use the `deploy` user.
 
 ---
 
 ### 2.2 Install Cloudflare Origin CA Certificates
-Transfer the `origin.pem` and `origin.key` files you saved in Step 1.2 to the VPS:
+Transfer the `origin.pem` and `origin.key` files you saved in Step 1.2 directly into `/opt/teacher-app/deploy/nginx/ssl/` (which is owned by the `deploy` user):
 
 ```bash
-# Create directory on VPS:
-ssh root@<HOSTINGER_VPS_IP> "mkdir -p /etc/ssl/cloudflare && chmod 700 /etc/ssl/cloudflare"
-
-# Copy certificates:
-scp origin.pem root@<HOSTINGER_VPS_IP>:/etc/ssl/cloudflare/origin.pem
-scp origin.key root@<HOSTINGER_VPS_IP>:/etc/ssl/cloudflare/origin.key
+# Copy certificates as deploy user (no root permissions needed):
+scp origin.pem deploy@<HOSTINGER_VPS_IP>:/opt/teacher-app/deploy/nginx/ssl/origin.pem
+scp origin.key deploy@<HOSTINGER_VPS_IP>:/opt/teacher-app/deploy/nginx/ssl/origin.key
 
 # Set strict permissions:
-ssh root@<HOSTINGER_VPS_IP> "chmod 644 /etc/ssl/cloudflare/origin.pem && chmod 600 /etc/ssl/cloudflare/origin.key"
+ssh deploy@<HOSTINGER_VPS_IP> "chmod 644 /opt/teacher-app/deploy/nginx/ssl/origin.pem && chmod 600 /opt/teacher-app/deploy/nginx/ssl/origin.key"
 ```
 
 ---
 
-### 2.3 Copy Project Files to the VPS
-Copy the deployment template into `/opt/teacher-app`:
+### 2.3 Copy Project Deployment Files to the VPS
+Copy only `docker-compose.yml` and the `deploy/` template directory to `/opt/teacher-app/` on the VPS (excluding `.git`, logs, and source files):
 
 ```bash
-rsync -avz --exclude '.env' --exclude 'node_modules' --exclude '.git' ./ deploy@<HOSTINGER_VPS_IP>:/opt/teacher-app/
+rsync -avz --exclude '.git' --exclude '*.log' --exclude '.env*' deploy/ docker-compose.yml deploy@<HOSTINGER_VPS_IP>:/opt/teacher-app/
 ```
 
 ---
@@ -267,7 +281,7 @@ The automated backup container uses `rclone` to sync encrypted database dumps to
 On the VPS, create the `rclone` config file:
 ```bash
 sudo mkdir -p /root/.config/rclone
-sudo nano /root/.rclone.conf
+sudo nano /root/.config/rclone/rclone.conf
 ```
 
 Paste this configuration (fill in your R2 credentials from Step 1.3):
@@ -280,7 +294,7 @@ secret_access_key = <YOUR_R2_SECRET_ACCESS_KEY>
 endpoint = https://<ACCOUNT_ID>.r2.cloudflarestorage.com
 acl = private
 ```
-Save and secure it: `sudo chmod 600 /root/.rclone.conf`.
+Save and secure it: `sudo chmod 600 /root/.config/rclone/rclone.conf`.
 
 ---
 
@@ -404,41 +418,69 @@ Backups run automatically inside the `backup` container every night at **03:00 A
 - Automatic retention: 7 daily copies, 4 weekly copies, 3 monthly copies.
 
 ### Full Disaster Recovery (Restoring onto a Fresh Server)
+> ⚠️ **CRITICAL PREREQUISITE:** Restoring onto a new server **REQUIRES your `BACKUP_ENCRYPTION_PASSPHRASE` and R2 credentials** saved in your external password manager. GPG AES-256 encrypted backups CANNOT be decrypted without this passphrase.
+
 If the VPS hardware fails completely:
-1. Provision a new VPS following Phase 2.
-2. Start PostgreSQL:
+1. Provision a new VPS following Phase 2 (`provision-vps.sh` + copy deployment files).
+2. Configure `/root/.config/rclone/rclone.conf` with your R2 credentials.
+3. Create `/opt/teacher-app/.env` containing your database secrets and `BACKUP_ENCRYPTION_PASSPHRASE`.
+4. Start PostgreSQL:
    ```bash
    docker compose up -d postgres
    ```
-3. Restore the latest backup from Cloudflare R2:
+5. Restore the latest backup from Cloudflare R2:
    ```bash
    bash deploy/scripts/restore.sh latest
    ```
-4. Start the full application stack:
+6. Start the full application stack:
    ```bash
    docker compose up -d
    ```
-5. Update Cloudflare DNS `api` record to the new VPS IP. **Total Recovery Time (RTO): < 10 minutes.**
+7. Update Cloudflare DNS `api` record to the new VPS IP.
+   - **Target Recovery Time (RTO):** Target under one hour, to be confirmed by a real restore drill on your infrastructure.
 
 ---
 
 ## Phase 7: Central Monitoring Server Setup (Option 1: Loki + Telegram)
 
-To monitor all your teacher instances in one place, provision a small **€3.79/month VPS** (e.g. Hetzner CX22 or Hostinger KVM 1):
+To monitor all your teacher instances in one central dashboard, provision a small **€3.79/month VPS** (e.g. Hetzner CX22 or Hostinger KVM 1):
 
-1. On the monitoring VPS, copy `deploy/monitoring/docker-compose.monitoring.yml`.
-2. Start the monitoring suite:
+### 7.1 Security Architecture (Private Mesh VPN via Tailscale)
+- **Localhost Binding:** Grafana, Prometheus, Alertmanager, and Loki bind strictly to `127.0.0.1` by default and are **never exposed to the public internet**.
+- **Exporters Network Isolation:** The teacher VPS firewall (UFW) only allows ports 80/443 from Cloudflare IP ranges. Exporters (`node-exporter:9100`, `cadvisor:8080`, `postgres-exporter:9187`, `redis-exporter:9121`) are **not** publicly accessible.
+- **Tailscale Mesh VPN:** Connect the central monitoring server to each teacher VPS over Tailscale:
+  ```bash
+  # Run on both monitoring server and each teacher VPS:
+  curl -fsSL https://tailscale.com/install.sh | sh
+  sudo tailscale up
+  ```
+  - Prometheus scrapes exporters over the private Tailscale interface (`100.x.y.z`).
+  - Promtail ships logs to Loki over the private Tailscale interface.
+
+### 7.2 Starting the Monitoring Suite
+1. On the monitoring VPS, navigate to `deploy/monitoring/`:
+2. Launch the stack:
    ```bash
    docker compose -f docker-compose.monitoring.yml up -d
    ```
-3. Open Grafana: `http://<MONITORING_VPS_IP>:3000` (User: `admin`, Password: set in `.env`).
-4. **How Alerts Work:**
-   - Promtail on each teacher VPS ships logs to this server.
-   - Loki Ruler scans for `[ERROR]`, `[FATAL]`, or HTTP 5xx.
-   - Alertmanager immediately fires a formatted card to your Telegram Bot.
-   - You can search, filter, and trace logs live inside Grafana without logging into the teacher's server.
+3. Access Grafana securely:
+   - **Option A (SSH Tunnel):** Run on your local computer: `ssh -L 3000:127.0.0.1:3000 deploy@<MONITORING_VPS_IP>`, then open `http://localhost:3000` in your browser.
+   - **Option B (Tailscale):** Set `GRAFANA_BIND_IP=<MONITORING_TAILSCALE_IP>` in `.env` and browse directly to `http://<MONITORING_TAILSCALE_IP>:3000`.
+   - Default login: `admin` / password from `GRAFANA_ADMIN_PASSWORD`.
 
----
+### 7.3 Rate-Limiting & Alert Grouping
+Alertmanager (`alertmanager.yml`) is preconfigured with smart rate-limiting to prevent notification storms:
+- `group_by: ['alertname', 'tenant', 'severity']`
+- `group_wait: 30s` (batches initial bursts)
+- `group_interval: 5m` (batches follow-up notifications)
+- `repeat_interval: 4h` (suppresses recurring alerts for the same issue for 4 hours)
+
+### 7.4 External Uptime Checks (Independent Verifier)
+Host a lightweight uptime monitor (e.g. **UptimeRobot** free tier or **Uptime Kuma** on a separate independent provider):
+- **Probe URL:** `https://api.teacherdomain.com/healthz`
+- **Interval:** 60 seconds
+- **Alert Channel:** Telegram or Email
+- This alerts you immediately if Cloudflare DNS, CDN edge, or the host VPS network drops completely, independent of internal monitoring.
 
 ## Summary of Useful Commands
 
