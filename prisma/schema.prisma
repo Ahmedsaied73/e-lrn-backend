@@ -34,6 +34,7 @@ model User {
   slug              String             @unique // Opaque public identifier (u_<random>) — replaces numeric id in URLs
   role              Role               @default(STUDENT)
   grade             Grade              @default(FIRST_SECONDARY) // Student's grade/year (required)
+  essayPhotoEnabled Boolean            @default(false)
   courses           Course[]           @relation("AdminCourses") // Courses created by the admin
   enrollments       Enrollment[]
   payments          Payment[]
@@ -261,6 +262,7 @@ model QuizAttempt {
   earnedPoints  Int?
   scorePercent  Float?
   essayFeedback Json?                                 // { [qName]: { points, feedback } }
+  essayMeta     Json?                                 // Metadata for essay photo extractions
   essayGradedBy Int?
   essayGradedAt DateTime?
   // Q-5: frozen { surveyJson, answerKey } at start — grading/review resolve
@@ -693,4 +695,30 @@ model AiStudentMessage {
 enum AiStudentRole {
   USER
   ASSISTANT
+}
+
+model EssayPhotoExtraction {
+  id               String   @id @default(uuid())
+  teacherId        Int
+  examId           Int
+  attemptId        Int
+  questionId       String
+  studentIdHash    String
+  imageSha256      String   @db.Char(64)
+  modelId          String
+  promptVersion    String
+  unreadableCount  Int
+  imageQuality     String
+  inputTokens      Int
+  outputTokens     Int
+  thinkingTokens   Int
+  estimatedCostUsd Decimal  @db.Decimal(10, 6)
+  latencyMs        Int
+  status           String
+  createdAt        DateTime @default(now())
+
+  @@index([attemptId])
+  @@index([teacherId, createdAt])
+  @@index([imageSha256])
+  @@map("essay_photo_extractions")
 }

@@ -413,6 +413,26 @@ function resolveHandwriting() {
   };
 }
 
+function resolveEssayPhoto() {
+  const num = (val, fallback) => {
+    const n = Number(val);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+  };
+  return {
+    enabled: resolveFlag(process.env.ESSAY_PHOTO_ENABLED, false),
+    apiKey: agentSecret('GEMINI_API_KEY'),
+    model: process.env.ESSAY_PHOTO_MODEL || 'gemini-3.1-flash-lite',
+    fallbackModel: process.env.ESSAY_PHOTO_FALLBACK_MODEL || 'gemini-3.5-flash-lite',
+    timeoutMs: num(process.env.ESSAY_PHOTO_TIMEOUT_MS, 15000),
+    maxAttemptsPerExam: num(process.env.ESSAY_PHOTO_MAX_ATTEMPTS_PER_EXAM, 10),
+    dailyBudgetUsd: num(process.env.ESSAY_PHOTO_DAILY_BUDGET_USD, 10),
+    monthlyBudgetUsd: num(process.env.ESSAY_PHOTO_MONTHLY_BUDGET_USD, 100),
+    maxConcurrency: num(process.env.ESSAY_PHOTO_MAX_CONCURRENCY, 20),
+    mediaResolution: process.env.ESSAY_PHOTO_MEDIA_RESOLUTION || 'high',
+    thinkingLevel: process.env.ESSAY_PHOTO_THINKING_LEVEL || 'low',
+  };
+}
+
 const config = {
   jwt: {
     secret: process.env.JWTSECRET,
@@ -442,6 +462,7 @@ const config = {
   aiAgent,
   aiStudent: resolveAiStudent(aiAgent),
   handwriting: resolveHandwriting(),
+  essayPhoto: resolveEssayPhoto(),
   sentry: {
     // Optional. Present → backend errors go to Sentry (src/config/sentry.js);
     // absent → that module no-ops. Never boot-critical.
@@ -453,6 +474,7 @@ const config = {
     payments: resolveFlag(process.env.PAYMENTS_ENABLED, false),
     accessCodes: resolveFlag(process.env.ACCESS_CODES_ENABLED, true),
     handwriting: resolveFlag(process.env.HANDWRITING_ENABLED, false),
+    essayPhoto: resolveFlag(process.env.ESSAY_PHOTO_ENABLED, false),
     // Second exception (default FALSE). Read at MOUNT time (app.js): while it is
     // false there is no agent router, no SSE endpoint and no LLM call at all.
     aiAgent: aiAgent.enabled,
