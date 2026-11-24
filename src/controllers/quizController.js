@@ -7,9 +7,11 @@
  */
 
 const prisma = require('../config/db');
+const config = require('../config/env');
 const quizService = require('../services/quizService');
 const { STATUS } = require('../config/quizConfig');
 const cache = require('../integrations/redis/cache');
+const { getRedis, isRedisReady } = require('../integrations/redis/redisClient');
 const busboy = require('busboy');
 const crypto = require('crypto');
 const audit = require('../services/auditLog');
@@ -180,7 +182,14 @@ async function startQuiz(req, res) {
 
     const videoRow = await prisma.bunnyVideo.findUnique({
       where: { id: videoId },
-      include: { quiz: true },
+      include: {
+        quiz: true,
+        course: {
+          select: {
+            teacher: { select: { essayPhotoEnabled: true } },
+          },
+        },
+      },
     });
 
     if (!videoRow || !videoRow.quiz) {
@@ -210,6 +219,23 @@ const { attempt, quiz, resumed } = await quizService.startAttempt(userId, videoR
     const safeQuiz = quizService.sanitizeForStudent(quiz);
     safeQuiz.videoSlug = videoSlug;
 
+    const teacher = videoRow.course && videoRow.course.teacher;
+    const maxPhotoAttempts = (config.essayPhoto && config.essayPhoto.maxAttemptsPerExam) || 10;
+    const essayPhotoEnabled = Boolean(config.essayPhoto?.enabled && teacher?.essayPhotoEnabled);
+    let remainingPhotoAttempts = maxPhotoAttempts;
+    if (essayPhotoEnabled && isRedisReady()) {
+      try {
+        const redis = getRedis();
+        const usedRaw = redis ? await redis.get(`essay_photo:attempts:${attempt.id}`) : null;
+        const used = usedRaw ? parseInt(usedRaw, 10) : 0;
+        if (Number.isFinite(used) && used > 0) {
+          remainingPhotoAttempts = Math.max(0, maxPhotoAttempts - used);
+        }
+      } catch {
+        // fail-open: default to maxPhotoAttempts
+      }
+    }
+
     return res.status(200).json({
       success: true,
       data: {
@@ -221,6 +247,8 @@ const { attempt, quiz, resumed } = await quizService.startAttempt(userId, videoR
         resumed,
         responses: resumed ? attempt.responses || null : null,
         quiz: safeQuiz,
+        essayPhotoEnabled,
+        remainingPhotoAttempts,
       },
     });
   } catch (error) {
@@ -238,7 +266,7 @@ async function saveQuizAttempt(req, res) {
   try {
     const attemptId = parseInteger(req.params.id);
     const userId = req.user.id;
-    const { responses } = req.body || {};
+    const { responses, essayMeta } = req.body || {};
 
     if (attemptId === null || attemptId <= 0) {
       return res.status(400).json({ success: false, error: 'Invalid attempt ID' });
@@ -248,7 +276,7 @@ async function saveQuizAttempt(req, res) {
       return res.status(400).json({ success: false, error: 'responses must be an object map of question responses' });
     }
 
-    const saved = await quizService.saveAttempt(userId, attemptId, responses);
+    const saved = await quizService.saveAttempt(userId, attemptId, responses, essayMeta);
     return res.status(200).json({
       success: true,
       data: { attemptId: saved.id, saved: true },
@@ -272,7 +300,7 @@ async function submitQuiz(req, res) {
   try {
     const attemptId = parseInteger(req.params.id);
     const userId = req.user.id;
-    const { answers, autoSubmitted } = req.body;
+    const { answers, autoSubmitted, essayMeta } = req.body;
 
     if (attemptId === null || attemptId <= 0) {
       return res.status(400).json({ success: false, error: 'Invalid attempt ID' });
@@ -282,7 +310,7 @@ async function submitQuiz(req, res) {
       return res.status(400).json({ success: false, error: 'answers must be an object map of question responses' });
     }
 
-    const result = await quizService.submitAttempt(userId, attemptId, answers, !!autoSubmitted);
+    const result = await quizService.submitAttempt(userId, attemptId, answers, !!autoSubmitted, essayMeta);
 
     return res.status(200).json({
       success: true,
@@ -303,6 +331,7 @@ async function submitQuiz(req, res) {
       success: false,
       error: error.message,
       ...(error.code ? { code: error.code } : {}),
+      ...(error.questionIds ? { questionIds: error.questionIds } : {}),
     });
   }
 }

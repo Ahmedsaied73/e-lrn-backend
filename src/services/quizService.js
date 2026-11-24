@@ -12,7 +12,7 @@ const prisma = require('../config/db');
 const config = require('../config/env');
 const { ALLOWED_QUESTION_TYPES, MAX_SURVEY_JSON_BYTES, GRACE_SEC, DEFAULT_MAX_ATTEMPTS, STALE_ATTEMPT_MS, STATUS } = require('../config/quizConfig');
 const bunny = require('../integrations/bunny/bunnyStreamClient');
-const { validateRich, looksRich } = require('../lib/richContent');
+const { validateRich, looksRich, parseRich } = require('../lib/richContent');
 const { resolveEffectiveFormat } = require('../lib/subjectProfile');
 
 // ─── Validation ───────────────────────────────────────────────────────────────
@@ -858,6 +858,86 @@ function validateEssayResponses(answerKey, responses, surveyJson) {
 }
 
 /**
+ * Rejects essay responses (plain or Envelope v1) containing unresolved `[?]` markers.
+ *
+ * @param {object} answerKey
+ * @param {object} responses
+ * @param {object} [surveyJson]
+ */
+function validateUnresolvedMarkers(answerKey, responses, surveyJson) {
+  if (!responses || typeof responses !== 'object') return;
+
+  const elementsMap = {};
+  if (surveyJson && Array.isArray(surveyJson.pages)) {
+    for (const page of surveyJson.pages) {
+      if (Array.isArray(page.elements)) {
+        for (const el of page.elements) {
+          if (el.name) elementsMap[el.name] = el;
+        }
+      }
+    }
+  }
+
+  const unresolved = [];
+  for (const [qName, val] of Object.entries(responses)) {
+    const keyEntry = answerKey && answerKey[qName];
+    const elType = elementsMap[qName] && elementsMap[qName].type;
+    const keyType = keyEntry && keyEntry.type;
+    const isEssay =
+      keyType === 'comment' ||
+      keyType === 'richanswer' ||
+      elType === 'comment' ||
+      elType === 'richanswer';
+    if (!isEssay || typeof val !== 'string' || !val.includes('[?]')) continue;
+
+    if (looksRich(val)) {
+      const parsed = parseRich(val);
+      if (parsed.blocks.some((b) => typeof b.v === 'string' && b.v.includes('[?]'))) {
+        unresolved.push(qName);
+      }
+    } else {
+      unresolved.push(qName);
+    }
+  }
+
+  if (unresolved.length > 0) {
+    throw Object.assign(
+      new Error(`Unresolved [?] markers in essay response(s): ${unresolved.join(', ')}`),
+      { statusCode: 422, code: 'UNRESOLVED_MARKERS', questionIds: unresolved }
+    );
+  }
+}
+
+/**
+ * Sanitizes optional essayMeta map to allowed fields only (never stores rawExtraction).
+ *
+ * @param {unknown} essayMeta
+ * @returns {object|null|undefined}
+ */
+function sanitizeEssayMeta(essayMeta) {
+  if (essayMeta === undefined) return undefined;
+  if (!essayMeta || typeof essayMeta !== 'object' || Array.isArray(essayMeta)) return null;
+
+  const clean = {};
+  for (const [qName, entry] of Object.entries(essayMeta)) {
+    if (typeof qName !== 'string' || !qName || !entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      continue;
+    }
+    const source = entry.source === 'photo' ? 'photo' : 'keyboard';
+    const wasEdited = Boolean(entry.wasEdited);
+    const confirmedAt = typeof entry.confirmedAt === 'string' && entry.confirmedAt.trim()
+      ? entry.confirmedAt.trim().slice(0, 64)
+      : null;
+    clean[qName] = {
+      source,
+      wasEdited,
+      ...(confirmedAt ? { confirmedAt } : {}),
+    };
+  }
+  return Object.keys(clean).length > 0 ? clean : null;
+}
+
+/**
  * Submit quiz answers for an attempt.
  * Enforces server-side timer, auto-grades MCQs, computes scorePercent.
  * Status → GRADED (MCQ only) or GRADING (has essays).
@@ -866,9 +946,10 @@ function validateEssayResponses(answerKey, responses, surveyJson) {
  * @param {number} attemptId
  * @param {object} responses - { [qName]: value }
  * @param {boolean} autoSubmitted
+ * @param {object} [essayMeta]
  * @returns {Promise<object>} Updated attempt
  */
-async function submitAttempt(userId, attemptId, responses, autoSubmitted = false) {
+async function submitAttempt(userId, attemptId, responses, autoSubmitted = false, essayMeta) {
   const serialized = JSON.stringify(responses);
   if (Buffer.byteLength(serialized, 'utf8') > MAX_SURVEY_JSON_BYTES) {
     throw Object.assign(new Error('Responses exceed the maximum allowed size.'), { statusCode: 413 });
@@ -902,6 +983,9 @@ async function submitAttempt(userId, attemptId, responses, autoSubmitted = false
   const answerKey = resolveAttemptKey(attempt);
   const surveyJson = resolveAttemptSurvey(attempt);
   validateEssayResponses(answerKey, responses, surveyJson);
+  validateUnresolvedMarkers(answerKey, responses, surveyJson);
+
+  const sanitizedMeta = sanitizeEssayMeta(essayMeta);
 
   const { mcqEarned, perQuestion } = gradeMcq(answerKey, responses);
   const { totalPoints, totalEssayPoints } = computeTotalPoints(answerKey);
@@ -924,6 +1008,7 @@ async function submitAttempt(userId, attemptId, responses, autoSubmitted = false
       submittedAt: new Date(),
       autoSubmitted,
       responses,
+      ...(sanitizedMeta !== undefined ? { essayMeta: sanitizedMeta } : {}),
       mcqEarned,
       essayEarned: hasEssays ? 0 : null,
       totalPoints,
@@ -973,7 +1058,7 @@ async function submitAttempt(userId, attemptId, responses, autoSubmitted = false
  * @param {object} responses - { [qName]: value }
  * @returns {Promise<object>} Updated attempt identifier
  */
-async function saveAttempt(userId, attemptId, responses) {
+async function saveAttempt(userId, attemptId, responses, essayMeta) {
   const serialized = JSON.stringify(responses);
   if (Buffer.byteLength(serialized, 'utf8') > MAX_SURVEY_JSON_BYTES) {
     throw Object.assign(new Error('Responses exceed the maximum allowed size.'), { statusCode: 413 });
@@ -994,9 +1079,14 @@ async function saveAttempt(userId, attemptId, responses) {
   const surveyJson = resolveAttemptSurvey(attempt);
   validateEssayResponses(answerKey, responses, surveyJson);
 
+  const sanitizedMeta = sanitizeEssayMeta(essayMeta);
+
   const updated = await prisma.quizAttempt.update({
     where: { id: attemptId },
-    data: { responses },
+    data: {
+      responses,
+      ...(sanitizedMeta !== undefined ? { essayMeta: sanitizedMeta } : {}),
+    },
     select: { id: true },
   });
 
@@ -1241,4 +1331,6 @@ module.exports = {
   resolveAttemptKey,
   resolveAttemptSurvey,
   uploadQuestionImage,
+  validateUnresolvedMarkers,
+  sanitizeEssayMeta,
 };

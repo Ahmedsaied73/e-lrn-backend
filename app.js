@@ -187,6 +187,11 @@ if (config.features && config.features.payments && config.paymob && config.paymo
   }
 }
 
+// ── Essay Photo Extraction (mounted BEFORE express.json() for Busboy) ──────
+if (config.essayPhoto && config.essayPhoto.enabled) {
+  app.use('/api/essay-photo', cookieParser(), require('./src/modules/essay-photo/routes'));
+}
+
 // Body cap 512kb: quiz payloads validate up to 256KB server-side, so the
 // parser must accept that range (default 100kb would 413 legit admin saves).
 app.use(express.json({ limit: '512kb' }));
