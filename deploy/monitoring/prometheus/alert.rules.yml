@@ -80,3 +80,13 @@ groups:
         annotations:
           summary: "AI grading jobs failed in BullMQ queue"
           description: "Detected multiple failed jobs in the ai-grading queue."
+
+      # ── Missed / Stale Backup Alert (> 26 hours without backup) ───────────
+      - alert: DatabaseBackupStale
+        expr: time() - backup_last_success_timestamp_seconds > 93600
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Database backup is stale on {{ $labels.instance }}"
+          description: "No successful database backup has completed in the last 26 hours."
