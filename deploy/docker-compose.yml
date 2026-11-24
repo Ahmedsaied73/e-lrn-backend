@@ -1,5 +1,3 @@
-version: '3.8'
-
 networks:
   web:
     driver: bridge
@@ -135,7 +133,7 @@ services:
       - ./nginx/site.conf:/etc/nginx/conf.d/site.conf:ro
       - ./nginx/upstream.conf:/etc/nginx/conf.d/upstream.conf:ro
       - ./nginx/cloudflare-ips.conf:/etc/nginx/conf.d/cloudflare-ips.conf:ro
-      - /etc/ssl/cloudflare:/etc/ssl/cloudflare:ro
+      - ./nginx/ssl:/etc/ssl/cloudflare:ro
       - nginx_logs:/var/log/nginx
     depends_on:
       api:
@@ -156,7 +154,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data:ro
       - ./scripts/backup.sh:/usr/local/bin/backup.sh:ro
-      - /root/.rclone.conf:/root/.rclone.conf:ro
+      - /root/.config/rclone/rclone.conf:/root/.config/rclone/rclone.conf:ro
       - backup_logs:/var/log/backup
     environment:
       - PGHOST=postgres
@@ -164,8 +162,10 @@ services:
       - PGUSER=${POSTGRES_USER:-postgres}
       - PGPASSWORD=${POSTGRES_PASSWORD}
       - PGDATABASE=${POSTGRES_DB:-elearning}
+      - RCLONE_CONFIG=/root/.config/rclone/rclone.conf
       - BACKUP_STORAGE_DEST=${BACKUP_STORAGE_DEST:-r2:teacher-backups}
       - BACKUP_ENCRYPTION_PASSPHRASE=${BACKUP_ENCRYPTION_PASSPHRASE}
+      - HEALTHCHECK_URL=${HEALTHCHECK_URL:-}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
       - TENANT_NAME=${TENANT_NAME:-teacher-default}

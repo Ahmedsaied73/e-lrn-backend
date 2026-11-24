@@ -1,6 +1,5 @@
 # Example docker-compose.override.yml
 # Copy to docker-compose.override.yml on the VPS or local dev machine for debugging.
-version: '3.8'
 
 services:
   # Expose database to host for direct inspection / Prisma studio (DO NOT USE IN PRODUCTION)
