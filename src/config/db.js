@@ -19,6 +19,7 @@ const { PrismaClient } = require("@prisma/client");
 // connection time) is what consumes the pool; both levers shrink it.
 const POOL_SIZE = Math.max(2, Math.min(Number(process.env.DATABASE_CONNECTION_LIMIT) || 20, 50));
 const POOL_TIMEOUT_MS = Math.max(1000, Number(process.env.DATABASE_POOL_TIMEOUT) || 20000);
+const CONNECT_TIMEOUT_S = Math.max(5, Number(process.env.DATABASE_CONNECT_TIMEOUT) || 30);
 
 const baseUrl = process.env.DATABASE_URL || '';
 let datasourceUrl = baseUrl;
@@ -26,6 +27,9 @@ try {
   const u = new URL(baseUrl);
   u.searchParams.set('connection_limit', String(POOL_SIZE));
   u.searchParams.set('pool_timeout', String(POOL_TIMEOUT_MS));
+  if (!u.searchParams.has('connect_timeout')) {
+    u.searchParams.set('connect_timeout', String(CONNECT_TIMEOUT_S));
+  }
   datasourceUrl = u.toString();
 } catch { /* invalid URL — Prisma will use the raw env value and throw */ }
 
