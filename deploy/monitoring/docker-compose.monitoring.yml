@@ -30,12 +30,14 @@ services:
   alertmanager:
     image: prom/alertmanager:v0.27.0
     restart: unless-stopped
+    entrypoint: /entrypoint.sh
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-123456789}
     volumes:
-      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml.template:ro
+      - ./alertmanager/entrypoint.sh:/entrypoint.sh:ro
       - alertmanager_data:/alertmanager
-    command:
-      - '--config.file=/etc/alertmanager/alertmanager.yml'
-      - '--storage.path=/alertmanager'
     ports:
       - "${ALERTMANAGER_BIND_IP:-127.0.0.1}:9093:9093"
     networks:
