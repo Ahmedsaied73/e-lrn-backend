@@ -14,10 +14,14 @@
  */
 
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const router = express.Router();
 
 const { authenticateToken, optionalAuth, authorizeAdmin } = require('../middlewares/index');
 const { ensureBunnySequentialAccess } = require('../middlewares/bunnySequentialAccess');
+const { createRateLimitStore } = require('../integrations/redis/rateLimitStore');
+const { isRedisEnabled } = require('../integrations/redis/redisClient');
+const config = require('../config/env');
 const {
   createBunnyVideo,
   uploadBunnyVideo,
@@ -25,7 +29,19 @@ const {
   deleteBunnyVideo,
   listCourseBunnyVideos,
   reorderCourseVideos,
+  recordVideoTelemetry,
 } = require('../controllers/bunnyVideoController');
+
+const telemetryLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  message: { error: 'Too many telemetry requests', code: 'RATE_LIMIT_EXCEEDED' },
+  keyGenerator: (req) => (req.user && req.user.id ? `u:${req.user.id}` : `ip:${req.ip}`),
+  validate: { ip: false },
+  ...(isRedisEnabled()
+    ? { store: createRateLimitStore('rl:video-telemetry:', { failClosed: config.rateLimit.requireRedis }) }
+    : {}),
+});
 
 // ─── Course-scoped video management ───────────────────────────────────────────
 
@@ -54,6 +70,13 @@ router.get('/:courseSlug/bunny-videos', optionalAuth, listCourseBunnyVideos);
 router.put('/:courseSlug/reorder', authenticateToken, authorizeAdmin(), reorderCourseVideos);
 
 // ─── Video-level operations ────────────────────────────────────────────────────
+
+/**
+ * POST /videos/telemetry
+ * Record client-side video playback & segment cache telemetry.
+ * Auth: authenticateToken (students + admins)
+ */
+router.post('/telemetry', authenticateToken, telemetryLimiter, recordVideoTelemetry);
 
 /**
  * POST /videos/:videoSlug/upload

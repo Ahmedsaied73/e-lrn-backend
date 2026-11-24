@@ -301,8 +301,18 @@ const getBunnyVideoPlayback = async (req, res, next) => {
       }
       const { token, expiresAt } = bunnyClient.generatePlaybackToken(video.bunnyVideoId);
       const playbackUrl = `https://iframe.mediadelivery.net/embed/${video.bunnyLibraryId}/${video.bunnyVideoId}?token=${token}&expires=${expiresAt}`;
-      const hlsUrl = await bunnyVideoService.resolveHlsUrl(video.bunnyLibraryId, video.bunnyVideoId, token, expiresAt);
-      return res.json({ success: true, data: { videoSlug, playbackUrl, hlsUrl, expiresAt } });
+      const { hlsUrl, hlsExpiresAt } = await bunnyVideoService.resolveHlsUrl(video.bunnyLibraryId, video.bunnyVideoId, token, expiresAt);
+      return res.json({
+        success: true,
+        data: {
+          videoSlug,
+          playbackUrl,
+          hlsUrl,
+          expiresAt,
+          hlsExpiresAt,
+          cacheConfig: bunnyVideoService.getCacheConfig(),
+        },
+      });
     }
 
     // Student path: enrollment + READY checks enforced in the sequential gate.
@@ -325,8 +335,18 @@ const getBunnyVideoPlayback = async (req, res, next) => {
       }
       const { token, expiresAt } = bunnyClient.generatePlaybackToken(v.bunnyVideoId);
       const playbackUrl = `https://iframe.mediadelivery.net/embed/${v.bunnyLibraryId}/${v.bunnyVideoId}?token=${token}&expires=${expiresAt}`;
-      const hlsUrl = await bunnyVideoService.resolveHlsUrl(v.bunnyLibraryId, v.bunnyVideoId, token, expiresAt);
-      return res.json({ success: true, data: { videoSlug: v.slug, playbackUrl, hlsUrl, expiresAt } });
+      const { hlsUrl, hlsExpiresAt } = await bunnyVideoService.resolveHlsUrl(v.bunnyLibraryId, v.bunnyVideoId, token, expiresAt);
+      return res.json({
+        success: true,
+        data: {
+          videoSlug: v.slug,
+          playbackUrl,
+          hlsUrl,
+          expiresAt,
+          hlsExpiresAt,
+          cacheConfig: bunnyVideoService.getCacheConfig(),
+        },
+      });
     }
 
     const video = await bunnyVideoService.findBySlug(videoSlug);
@@ -458,6 +478,101 @@ const reorderCourseVideos = async (req, res, next) => {
   }
 };
 
+// ─── POST /videos/telemetry ──────────────────────────────────────────────────
+
+const TELEMETRY_PLAYER_MODES = new Set(['hls', 'iframe']);
+const TELEMETRY_DEVICE_CLASSES = new Set(['mobile', 'tablet', 'desktop']);
+const isNonNegInt = (v) => Number.isSafeInteger(v) && v >= 0;
+
+function validateTelemetryPayload(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, error: 'Telemetry payload must be a JSON object' };
+  }
+  const {
+    videoSlug,
+    playerMode,
+    deviceClass,
+    cacheEnabled,
+    segmentHits,
+    segmentMisses,
+    bytesFromCache,
+    bytesFromNetwork,
+    idbErrors,
+    ttffMs,
+    fallbackReason,
+  } = body;
+
+  if (typeof videoSlug !== 'string' || !isValidSlug(videoSlug)) {
+    return { ok: false, error: 'Invalid videoSlug' };
+  }
+  if (!TELEMETRY_PLAYER_MODES.has(playerMode)) {
+    return { ok: false, error: 'Invalid playerMode' };
+  }
+  if (!TELEMETRY_DEVICE_CLASSES.has(deviceClass)) {
+    return { ok: false, error: 'Invalid deviceClass' };
+  }
+  if (typeof cacheEnabled !== 'boolean') {
+    return { ok: false, error: 'cacheEnabled must be a boolean' };
+  }
+  for (const [key, val] of [
+    ['segmentHits', segmentHits],
+    ['segmentMisses', segmentMisses],
+    ['bytesFromCache', bytesFromCache],
+    ['bytesFromNetwork', bytesFromNetwork],
+    ['idbErrors', idbErrors],
+  ]) {
+    if (!isNonNegInt(val)) {
+      return { ok: false, error: `${key} must be a non-negative integer` };
+    }
+  }
+  if (ttffMs !== null && (typeof ttffMs !== 'number' || !Number.isFinite(ttffMs) || ttffMs < 0)) {
+    return { ok: false, error: 'ttffMs must be null or a non-negative number' };
+  }
+  if (
+    fallbackReason !== undefined &&
+    fallbackReason !== null &&
+    (typeof fallbackReason !== 'string' || fallbackReason.length > 200)
+  ) {
+    return { ok: false, error: 'fallbackReason must be null or a string up to 200 chars' };
+  }
+
+  return {
+    ok: true,
+    payload: {
+      videoSlug,
+      playerMode,
+      deviceClass,
+      cacheEnabled,
+      segmentHits,
+      segmentMisses,
+      bytesFromCache,
+      bytesFromNetwork,
+      idbErrors,
+      ttffMs,
+      fallbackReason: fallbackReason ?? null,
+    },
+  };
+}
+
+/**
+ * Record client-side video playback & segment cache telemetry.
+ * Auth: authenticateToken
+ * Returns 204 No Content.
+ */
+const recordVideoTelemetry = (req, res, next) => {
+  const check = validateTelemetryPayload(req.body);
+  if (!check.ok) {
+    return next(new AppError(check.error, 400, 'VALIDATION_ERROR'));
+  }
+
+  log.info('video.telemetry', {
+    ...check.payload,
+    userId: req.user && req.user.id ? req.user.id : null,
+  });
+
+  return res.status(204).end();
+};
+
 module.exports = {
   createBunnyVideo,
   uploadBunnyVideo,
@@ -465,4 +580,6 @@ module.exports = {
   deleteBunnyVideo,
   listCourseBunnyVideos,
   reorderCourseVideos,
+  recordVideoTelemetry,
+  validateTelemetryPayload,
 };

@@ -433,6 +433,16 @@ function resolveEssayPhoto() {
   };
 }
 
+function resolveSegmentCache() {
+  const maxMb = Number(process.env.VIDEO_SEGMENT_CACHE_MAX_MB);
+  const ttlDays = Number(process.env.VIDEO_SEGMENT_CACHE_TTL_DAYS);
+  return {
+    enabled: resolveFlag(process.env.VIDEO_SEGMENT_CACHE_ENABLED, false),
+    maxBudgetMb: Number.isFinite(maxMb) && maxMb > 0 ? maxMb : 300,
+    ttlDays: Number.isFinite(ttlDays) && ttlDays > 0 ? ttlDays : 14,
+  };
+}
+
 const config = {
   jwt: {
     secret: process.env.JWTSECRET,
@@ -504,6 +514,8 @@ const config = {
     tokenTtlSeconds: Number(process.env.BUNNY_STREAM_TOKEN_TTL_SECONDS) || 21600,
     // Max upload size in bytes — defaults to 5GB; override per Bunny plan/needs
     maxUploadBytes: Number(process.env.BUNNY_VIDEO_MAX_BYTES) || 5 * 1024 * 1024 * 1024,
+    // Client-side HLS segment cache configuration
+    segmentCache: resolveSegmentCache(),
   }
 };
 

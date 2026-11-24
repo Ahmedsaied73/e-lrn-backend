@@ -22,6 +22,7 @@
  */
 
 const prisma = require('../config/db');
+const config = require('../config/env');
 const bunnyClient = require('../integrations/bunny/bunnyStreamClient');
 const { AppError, ErrorCodes } = require('../utils/AppError');
 const cache = require('../integrations/redis/cache');
@@ -363,6 +364,15 @@ async function applyBunnyStatus(bunnyVideoId, bunnyStatusCode) {
   });
 }
 
+function getCacheConfig() {
+  const sc = config.bunny && config.bunny.segmentCache;
+  return {
+    enabled: Boolean(sc && sc.enabled),
+    maxBudgetMb: sc && Number.isFinite(sc.maxBudgetMb) ? sc.maxBudgetMb : 300,
+    ttlDays: sc && Number.isFinite(sc.ttlDays) ? sc.ttlDays : 14,
+  };
+}
+
 /**
  * Resolve direct HLS playlist URL for a video, cached in Redis.
  *
@@ -370,26 +380,36 @@ async function applyBunnyStatus(bunnyVideoId, bunnyStatusCode) {
  * @param {string} bunnyVideoId
  * @param {string} token
  * @param {number} expiresAt
- * @returns {Promise<string|null>}
+ * @returns {Promise<{ hlsUrl: string|null, hlsExpiresAt: number|null }>}
  */
 async function resolveHlsUrl(bunnyLibraryId, bunnyVideoId, token, expiresAt) {
   const cacheKey = cache.buildKey('hls', bunnyVideoId);
   try {
     const cached = await cache.get(cacheKey);
-    if (cached) return cached;
+    if (typeof cached === 'string' && cached) {
+      return { hlsUrl: cached, hlsExpiresAt: null };
+    }
+    if (cached && typeof cached === 'object' && typeof cached.hlsUrl === 'string' && cached.hlsUrl) {
+      return { hlsUrl: cached.hlsUrl, hlsExpiresAt: cached.hlsExpiresAt ?? null };
+    }
   } catch (_err) {
     // Fail open on cache error
   }
 
   const hlsUrl = await bunnyClient.fetchHlsPlaylistUrl(bunnyLibraryId, bunnyVideoId, token, expiresAt);
-  if (hlsUrl) {
-    try {
-      await cache.set(cacheKey, hlsUrl, 18000);
-    } catch (_err) {
-      // Fail open on cache error
-    }
+  if (!hlsUrl) {
+    log.warn('video.hls.resolve_failed', { bunnyLibraryId, bunnyVideoId });
+    return { hlsUrl: null, hlsExpiresAt: null };
   }
-  return hlsUrl;
+
+  const remainingSeconds = Math.max(0, expiresAt - Math.floor(Date.now() / 1000));
+  const ttl = Math.max(60, remainingSeconds - 3600);
+  try {
+    await cache.set(cacheKey, { hlsUrl, hlsExpiresAt: expiresAt }, ttl);
+  } catch (_err) {
+    // Fail open on cache error
+  }
+  return { hlsUrl, hlsExpiresAt: expiresAt };
 }
 
 /**
@@ -491,7 +511,7 @@ async function getPlaybackAccess(videoId, userId, { video: preloadedVideo } = {}
   // Generate signed embed URL — token is safe to return; it's time-limited and video-scoped
   const { token, expiresAt } = bunnyClient.generatePlaybackToken(video.bunnyVideoId);
   const playbackUrl = `https://iframe.mediadelivery.net/embed/${video.bunnyLibraryId}/${video.bunnyVideoId}?token=${token}&expires=${expiresAt}`;
-  const hlsUrl = await resolveHlsUrl(video.bunnyLibraryId, video.bunnyVideoId, token, expiresAt);
+  const { hlsUrl, hlsExpiresAt } = await resolveHlsUrl(video.bunnyLibraryId, video.bunnyVideoId, token, expiresAt);
 
   log.info('video.playback.authorized', {
     videoId: video.id,
@@ -505,6 +525,8 @@ async function getPlaybackAccess(videoId, userId, { video: preloadedVideo } = {}
     playbackUrl,
     hlsUrl,
     expiresAt,
+    hlsExpiresAt,
+    cacheConfig: getCacheConfig(),
   };
 }
 
@@ -757,6 +779,7 @@ module.exports = {
   applyBunnyStatus,
   getPlaybackAccess,
   resolveHlsUrl,
+  getCacheConfig,
   deleteVideo,
   listCourseVideos,
   findById,

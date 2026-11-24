@@ -395,7 +395,8 @@ function uploadVideoStream({ bunnyVideoId, fileStream }) {
 function generatePlaybackToken(bunnyVideoId, ttlSeconds) {
   const defaultTtl = Number(process.env.BUNNY_STREAM_TOKEN_TTL_SECONDS) || 21600; // 6 hours
   const ttl = ttlSeconds || defaultTtl;
-  const expiresAt = Math.floor(Date.now() / 1000) + ttl;
+  // Quantize to 1-hour boundaries so cached HLS playlists share a stable token window
+  const expiresAt = Math.ceil((Math.floor(Date.now() / 1000) + ttl) / 3600) * 3600;
 
   const token = crypto
     .createHash('sha256')
@@ -426,8 +427,20 @@ function fetchHlsPlaylistUrl(bunnyLibraryId, bunnyVideoId, token, expiresAt) {
     };
 
     const embedUrl = `https://iframe.mediadelivery.net/embed/${bunnyLibraryId}/${bunnyVideoId}?token=${token}&expires=${expiresAt}`;
-    const req = https.get(embedUrl, { timeout: 3500 }, (res) => {
+    const referer = process.env.FRONTEND_URL
+      ? process.env.FRONTEND_URL.split(',').map((s) => s.trim()).find(Boolean)
+      : null;
+    const reqOptions = {
+      timeout: 3500,
+      ...(referer ? { headers: { Referer: referer } } : {}),
+    };
+
+    const req = https.get(embedUrl, reqOptions, (res) => {
       if (res.statusCode !== 200) {
+        console.warn(
+          '[WARN] bunny.hls_fetch_non_200',
+          JSON.stringify({ bunnyLibraryId, bunnyVideoId, statusCode: res.statusCode })
+        );
         res.resume();
         return done(null);
       }
@@ -439,15 +452,29 @@ function fetchHlsPlaylistUrl(bunnyLibraryId, bunnyVideoId, token, expiresAt) {
       res.on('end', () => {
         const match = html.match(/var\s+urlPlaylistUrl\s*=\s*'([^']+)'/) ||
                       html.match(/<source\s+type="application\/vnd\.apple\.mpegURL"\s+src="([^']+)"/);
-        done(match ? match[1] : null);
+        if (!match) {
+          console.warn(
+            '[WARN] bunny.hls_fetch_no_match',
+            JSON.stringify({ bunnyLibraryId, bunnyVideoId, htmlLength: html.length })
+          );
+          return done(null);
+        }
+        done(match[1]);
       });
     });
 
     req.on('timeout', () => {
+      console.warn('[WARN] bunny.hls_fetch_timeout', JSON.stringify({ bunnyLibraryId, bunnyVideoId }));
       req.destroy();
       done(null);
     });
-    req.on('error', () => done(null));
+    req.on('error', (err) => {
+      console.warn(
+        '[WARN] bunny.hls_fetch_error',
+        JSON.stringify({ bunnyLibraryId, bunnyVideoId, error: err && err.message })
+      );
+      done(null);
+    });
   });
 }
 
