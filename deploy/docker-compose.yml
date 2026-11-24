@@ -189,6 +189,8 @@ services:
       - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
     volumes:
       - /:/host:ro,rslave
+    ports:
+      - "${TAILSCALE_IP:-127.0.0.1}:9100:9100"
     networks:
       - internal
 
@@ -204,6 +206,8 @@ services:
     privileged: true
     devices:
       - /dev/kmsg
+    ports:
+      - "${TAILSCALE_IP:-127.0.0.1}:8080:8080"
     networks:
       - internal
 
@@ -215,6 +219,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    ports:
+      - "${TAILSCALE_IP:-127.0.0.1}:9187:9187"
     networks:
       - internal
 
@@ -227,6 +233,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    ports:
+      - "${TAILSCALE_IP:-127.0.0.1}:9121:9121"
     networks:
       - internal
 
