@@ -13,6 +13,7 @@ TMP_DIR="/tmp/pg_restore"
 mkdir -p "$TMP_DIR"
 
 if [ -f .env ]; then
+  # shellcheck source=/dev/null
   source .env
 fi
 
@@ -40,6 +41,11 @@ echo "[RESTORE] Processing backup file: $LOCAL_FILE"
 # Decrypt if GPG encrypted
 UNENCRYPTED_FILE="$LOCAL_FILE"
 if [[ "$LOCAL_FILE" == *.gpg ]]; then
+  if [ -z "$PASSPHRASE" ]; then
+    echo "[FATAL] BACKUP_ENCRYPTION_PASSPHRASE is not set in environment or .env."
+    echo "Restoring an encrypted backup requires the encryption passphrase from your password manager."
+    exit 1
+  fi
   UNENCRYPTED_FILE="${LOCAL_FILE%.gpg}"
   echo "[RESTORE] Decrypting with GPG..."
   gpg --batch --yes --decrypt --passphrase "$PASSPHRASE" -o "$UNENCRYPTED_FILE" "$LOCAL_FILE"

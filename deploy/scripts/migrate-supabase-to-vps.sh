@@ -16,6 +16,7 @@ if [ -z "$SUPABASE_URL" ]; then
 fi
 
 if [ -f .env ]; then
+  # shellcheck source=/dev/null
   source .env
 fi
 

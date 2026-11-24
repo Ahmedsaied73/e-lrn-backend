@@ -18,9 +18,11 @@ for ip in $(curl -sSL https://www.cloudflare.com/ips-v6); do
   echo "set_real_ip_from $ip;" >> "$TMP_CONF"
 done
 
-echo "" >> "$TMP_CONF"
-echo "real_ip_header CF-Connecting-IP;" >> "$TMP_CONF"
-echo "real_ip_recursive on;" >> "$TMP_CONF"
+{
+  echo ""
+  echo "real_ip_header CF-Connecting-IP;"
+  echo "real_ip_recursive on;"
+} >> "$TMP_CONF"
 
 mv "$TMP_CONF" "$TARGET_CONF"
 echo "Cloudflare IPs updated in $TARGET_CONF"

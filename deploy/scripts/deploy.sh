@@ -38,11 +38,13 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
+# shellcheck source=/dev/null
 source .env
 
 # Source preset if provided
 if [ -n "$PRESET" ] && [ -f "deploy/presets/${PRESET}.env" ]; then
   echo "[INFO] Applying preset: deploy/presets/${PRESET}.env"
+  # shellcheck source=/dev/null
   source "deploy/presets/${PRESET}.env"
 fi
 
@@ -78,9 +80,13 @@ docker compose run --rm --no-deps api npx prisma migrate deploy || {
 echo "=== [4/6] Starting Standby Health Gate Verification ==="
 # Launch temporary standby container to verify readiness before replacing active API
 STANDBY_NAME="api_standby_$(date +%s)"
+# shellcheck disable=SC2016
+TARGET_NET=$(docker compose ps -q api 2>/dev/null | xargs -r docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}' 2>/dev/null || true)
+TARGET_NET="${TARGET_NET:-deploy_internal}"
+
 docker run -d \
   --name "$STANDBY_NAME" \
-  --network "$(docker compose ps -q api | xargs docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}' 2>/dev/null || echo 'deploy_internal')" \
+  --network "$TARGET_NET" \
   --env-file .env \
   -e APP_MODE=api \
   "$APP_IMAGE"

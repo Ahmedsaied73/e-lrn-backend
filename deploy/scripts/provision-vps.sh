@@ -85,8 +85,10 @@ fi
 
 echo "=== [5/8] Creating 'deploy' user and securing SSH ==="
 if ! id "deploy" &>/dev/null; then
-    useradd -m -s /bin/bash -G docker deploy
-    echo "Created user 'deploy' and added to 'docker' group."
+    useradd -m -s /bin/bash -G docker,sudo deploy
+    echo "deploy ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/99-deploy
+    chmod 440 /etc/sudoers.d/99-deploy
+    echo "Created user 'deploy' with sudo and docker group access."
 fi
 
 mkdir -p /home/deploy/.ssh
@@ -99,9 +101,9 @@ if [ -n "$DEPLOY_PUBKEY" ]; then
     echo "Deploy public key installed."
 fi
 
-# SSH hardening
+# SSH hardening: Disable root login completely now that deploy user is configured
 cat <<EOF > /etc/ssh/sshd_config.d/99-hardening.conf
-PermitRootLogin prohibit-password
+PermitRootLogin no
 PasswordAuthentication no
 PubkeyAuthentication yes
 X11Forwarding no
@@ -148,13 +150,14 @@ echo "=== [8/8] Creating Application Directory Structure ==="
 mkdir -p "$APP_DIR"
 mkdir -p "$APP_DIR/deploy"
 mkdir -p "$APP_DIR/deploy/nginx"
+mkdir -p "$APP_DIR/deploy/nginx/ssl"
 mkdir -p "$APP_DIR/deploy/postgres"
 mkdir -p "$APP_DIR/deploy/redis"
 mkdir -p "$APP_DIR/deploy/scripts"
-mkdir -p /etc/ssl/cloudflare
 
 chown -R deploy:deploy "$APP_DIR"
 chmod 755 "$APP_DIR"
+chmod 700 "$APP_DIR/deploy/nginx/ssl"
 
 echo "=== VPS Provisioning Complete! ==="
 echo "Application directory: $APP_DIR"

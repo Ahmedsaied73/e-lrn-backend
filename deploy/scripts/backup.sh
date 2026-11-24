@@ -19,6 +19,7 @@ mkdir -p "$TMP_DIR"
 TENANT="${TENANT_NAME:-teacher-default}"
 DEST="${BACKUP_STORAGE_DEST:-r2:teacher-backups}/${TENANT}"
 PASSPHRASE="${BACKUP_ENCRYPTION_PASSPHRASE:-}"
+HEALTHCHECK_URL="${HEALTHCHECK_URL:-}"
 
 send_telegram() {
   local msg="$1"
@@ -29,6 +30,22 @@ send_telegram() {
       -d text="${msg}" > /dev/null || true
   fi
 }
+
+on_failure() {
+  local exit_code=$?
+  echo "[BACKUP ERROR] Backup failed with exit code $exit_code."
+  if [ -n "$HEALTHCHECK_URL" ]; then
+    curl -fsS -m 10 --retry 3 "${HEALTHCHECK_URL}/fail" > /dev/null 2>&1 || true
+  fi
+  send_telegram "🚨 <b>BACKUP FAILED:</b> Database backup for <code>${TENANT}</code> failed! Check logs."
+  rm -f "${RAW_FILE:-}" "${ENC_FILE:-}"
+  exit "$exit_code"
+}
+trap on_failure ERR
+
+if [ -n "$HEALTHCHECK_URL" ] && [ "$IS_PRE_DEPLOY" != "--pre-deploy" ]; then
+  curl -fsS -m 10 --retry 3 "${HEALTHCHECK_URL}/start" > /dev/null 2>&1 || true
+fi
 
 if [ "$IS_PRE_DEPLOY" == "--pre-deploy" ]; then
   BACKUP_TYPE="pre-deploy"
@@ -94,7 +111,15 @@ fi
 # Cleanup local temp files
 rm -f "$RAW_FILE" "$ENC_FILE"
 
+# Record Prometheus metric for node-exporter textfile collector
+if [ -d /var/log/backup ]; then
+  echo "backup_last_success_timestamp_seconds $(date +%s)" > /var/log/backup/backup.prom 2>/dev/null || true
+fi
+
 echo "[BACKUP] Finished successfully for ${TENANT} (${FILE_SIZE})."
 if [ "$IS_PRE_DEPLOY" != "--pre-deploy" ]; then
+  if [ -n "$HEALTHCHECK_URL" ]; then
+    curl -fsS -m 10 --retry 3 "$HEALTHCHECK_URL" > /dev/null 2>&1 || true
+  fi
   send_telegram "💾 <b>BACKUP SUCCESS:</b> Database dump for <code>${TENANT}</code> (${FILE_SIZE}) uploaded to storage."
 fi

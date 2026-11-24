@@ -19,7 +19,10 @@ if [ -z "$TENANT_NAME" ] || [ -z "$DOMAIN_NAME" ]; then
   exit 1
 fi
 
-APP_DIR="/opt/teacher-app"
+APP_DIR="${APP_DIR:-/opt/teacher-app}"
+if [ -d "$APP_DIR" ] && [ "$(pwd)" != "$APP_DIR" ]; then
+  cd "$APP_DIR"
+fi
 
 echo "=== Onboarding Tenant: ${TENANT_NAME} on ${DOMAIN_NAME} (Preset: ${PRESET}) ==="
 
@@ -28,11 +31,17 @@ if [ ! -f "deploy/presets/${PRESET}.env" ]; then
   exit 1
 fi
 
+# Ensure SSL directory exists
+mkdir -p deploy/nginx/ssl
+chmod 700 deploy/nginx/ssl
+
 # 1. Prepare Nginx configuration from template
 export DOMAIN_NAME
+# shellcheck disable=SC2016
 envsubst '${DOMAIN_NAME}' < deploy/nginx/site.conf.template > deploy/nginx/site.conf
 
 # 2. Prepare PostgreSQL configuration from preset
+# shellcheck source=/dev/null
 source "deploy/presets/${PRESET}.env"
 export PG_MAX_CONNECTIONS PG_SHARED_BUFFERS PG_WORK_MEM PG_MAINTENANCE_WORK_MEM PG_EFFECTIVE_CACHE_SIZE
 envsubst < deploy/postgres/postgresql.conf.template > deploy/postgres/postgresql.conf
@@ -64,12 +73,32 @@ if [ ! -f .env ]; then
   echo "Generated unique secrets in .env."
 fi
 
+# Read the generated or existing backup passphrase
+PASSPHRASE_VAL=$(grep '^BACKUP_ENCRYPTION_PASSPHRASE=' .env | cut -d '=' -f2- || true)
+
 echo "==================================================================="
 echo "TENANT INITIALIZED!"
 echo "Next steps:"
 echo "1. Place Cloudflare Origin CA certificates in:"
-echo "   - /etc/ssl/cloudflare/origin.pem"
-echo "   - /etc/ssl/cloudflare/origin.key"
-echo "2. Edit /opt/teacher-app/.env to configure Bunny, Gemini, and Telegram keys."
+echo "   - ${APP_DIR}/deploy/nginx/ssl/origin.pem"
+echo "   - ${APP_DIR}/deploy/nginx/ssl/origin.key"
+echo "2. Edit ${APP_DIR}/.env to configure Bunny, Gemini, and Telegram keys."
 echo "3. Run: docker compose up -d"
+echo "==================================================================="
+echo ""
+echo "==================================================================="
+echo "⚠️  CRITICAL: BACKUP ENCRYPTION PASSPHRASE MUST BE STORED SECURELY ⚠️"
+echo "==================================================================="
+echo "BACKUP_ENCRYPTION_PASSPHRASE: ${PASSPHRASE_VAL}"
+echo ""
+echo "YOU MUST SAVE THIS PASSPHRASE AND YOUR RCLONE CREDENTIALS IN A SECURE"
+echo "PASSWORD MANAGER (e.g. 1Password / Bitwarden / KeePass) OUTSIDE THIS SERVER."
+echo "If this server is destroyed, backups CANNOT be decrypted without it!"
+echo "==================================================================="
+read -r -p "Have you securely saved BACKUP_ENCRYPTION_PASSPHRASE outside the server? (yes/no): " CONFIRM_SAVED
+if [ "$CONFIRM_SAVED" != "yes" ]; then
+  echo "[WARNING] Please save BACKUP_ENCRYPTION_PASSPHRASE in your password manager immediately!"
+else
+  echo "[OK] Passphrase confirmed saved."
+fi
 echo "==================================================================="

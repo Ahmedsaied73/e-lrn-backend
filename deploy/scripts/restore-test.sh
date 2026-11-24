@@ -15,6 +15,7 @@ TMP_DIR="/tmp/restore_drill"
 mkdir -p "$TMP_DIR"
 
 if [ -f /opt/teacher-app/.env ]; then
+  # shellcheck source=/dev/null
   source /opt/teacher-app/.env
 fi
 
@@ -48,7 +49,7 @@ docker run -d \
 echo "Waiting for test PostgreSQL to be ready..."
 for i in {1..20}; do
   if docker exec "$TEST_CONTAINER" pg_isready -U test_user -d test_restore_db >/dev/null 2>&1; then
-    echo "Test PostgreSQL online!"
+    echo "Test PostgreSQL online (ready on attempt $i)!"
     break
   fi
   sleep 1
@@ -70,6 +71,10 @@ rclone copy "${DEST}/daily/${LATEST_BACKUP}" "$TMP_DIR"
 LOCAL_FILE="${TMP_DIR}/${LATEST_BACKUP}"
 UNENC_FILE="$LOCAL_FILE"
 if [[ "$LOCAL_FILE" == *.gpg ]]; then
+  if [ -z "${BACKUP_ENCRYPTION_PASSPHRASE:-}" ]; then
+    echo "[DRILL ERROR] BACKUP_ENCRYPTION_PASSPHRASE is not set in environment or /opt/teacher-app/.env"
+    exit 1
+  fi
   UNENC_FILE="${LOCAL_FILE%.gpg}"
   gpg --batch --yes --decrypt --passphrase "${BACKUP_ENCRYPTION_PASSPHRASE}" -o "$UNENC_FILE" "$LOCAL_FILE"
 fi
