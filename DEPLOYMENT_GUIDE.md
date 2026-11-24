@@ -417,6 +417,12 @@ Backups run automatically inside the `backup` container every night at **03:00 A
 - Synced to Cloudflare R2 bucket: `r2:teacher-backups/<teacher-slug>/daily/`.
 - Automatic retention: 7 daily copies, 4 weekly copies, 3 monthly copies.
 
+### What the Backup Does NOT Cover
+The daily backup contains a complete, encrypted dump of the **PostgreSQL relational database** (all users, courses, quiz structures, attempts, grades, enrollments, and transactions). It does **NOT** cover:
+1. **Supabase Storage:** Quiz and course thumbnail images live in your Supabase bucket. They are not stored on the VPS disk.
+2. **Bunny.net Stream:** All uploaded video files, transcoded renditions, and thumbnails live directly inside Bunny.net Stream. They are not stored on the VPS disk.
+3. **Redis:** In-memory cache, active rate-limit counters, and ephemeral BullMQ queue jobs are lost on server restore (students will receive a fresh session upon logging in; any AI grading jobs in flight at failure time will need to be re-evaluated).
+
 ### Full Disaster Recovery (Restoring onto a Fresh Server)
 > ⚠️ **CRITICAL PREREQUISITE:** Restoring onto a new server **REQUIRES your `BACKUP_ENCRYPTION_PASSPHRASE` and R2 credentials** saved in your external password manager. GPG AES-256 encrypted backups CANNOT be decrypted without this passphrase.
 
@@ -445,17 +451,64 @@ If the VPS hardware fails completely:
 
 To monitor all your teacher instances in one central dashboard, provision a small **€3.79/month VPS** (e.g. Hetzner CX22 or Hostinger KVM 1):
 
-### 7.1 Security Architecture (Private Mesh VPN via Tailscale)
-- **Localhost Binding:** Grafana, Prometheus, Alertmanager, and Loki bind strictly to `127.0.0.1` by default and are **never exposed to the public internet**.
-- **Exporters Network Isolation:** The teacher VPS firewall (UFW) only allows ports 80/443 from Cloudflare IP ranges. Exporters (`node-exporter:9100`, `cadvisor:8080`, `postgres-exporter:9187`, `redis-exporter:9121`) are **not** publicly accessible.
-- **Tailscale Mesh VPN:** Connect the central monitoring server to each teacher VPS over Tailscale:
-  ```bash
-  # Run on both monitoring server and each teacher VPS:
-  curl -fsSL https://tailscale.com/install.sh | sh
-  sudo tailscale up
-  ```
-  - Prometheus scrapes exporters over the private Tailscale interface (`100.x.y.z`).
-  - Promtail ships logs to Loki over the private Tailscale interface.
+### 7.1 Security Architecture & Port Bindings
+
+#### Monitoring Server Port Bindings
+| Service | Container Port | Host Port Binding | Cross-Host Access Rule |
+|---|---|---|---|
+| **Loki** | `3100` | `${LOKI_BIND_IP:-127.0.0.1}:3100` | Set `LOKI_BIND_IP=<MONITORING_TAILSCALE_IP>` so teacher VPS Promtail can push logs. |
+| **Prometheus** | `9090` | `${PROMETHEUS_BIND_IP:-127.0.0.1}:9090` | Localhost or Admin Tailscale IP. Scrapes teacher nodes over Tailscale. |
+| **Alertmanager** | `9093` | `${ALERTMANAGER_BIND_IP:-127.0.0.1}:9093` | Localhost or Admin Tailscale IP. Outbound alerts to Telegram API. |
+| **Grafana** | `3000` | `${GRAFANA_BIND_IP:-127.0.0.1}:3000` | Localhost SSH tunnel or Admin Tailscale IP. Never exposed on 0.0.0.0. |
+
+#### Teacher VPS Port Bindings
+| Service | Container Port | Host Port Binding | Cross-Host Access Rule |
+|---|---|---|---|
+| **Nginx** | `80, 443` | `0.0.0.0:80, 0.0.0.0:443` | Publicly reachable ONLY from Cloudflare IPs (enforced by UFW). |
+| **Node Exporter** | `9100` | `${TAILSCALE_IP:-127.0.0.1}:9100` | Scraped strictly by central Prometheus over Tailscale. |
+| **cAdvisor** | `8080` | `${TAILSCALE_IP:-127.0.0.1}:8080` | Scraped strictly by central Prometheus over Tailscale. |
+| **Postgres Exporter** | `9187` | `${TAILSCALE_IP:-127.0.0.1}:9187` | Scraped strictly by central Prometheus over Tailscale. |
+| **Redis Exporter** | `9121` | `${TAILSCALE_IP:-127.0.0.1}:9121` | Scraped strictly by central Prometheus over Tailscale. |
+| **Promtail** | None (client) | No host ports | Outbound HTTP push to `http://<MONITORING_TAILSCALE_IP>:3100/loki/api/v1/push`. |
+| **Postgres / Redis / API** | `5432, 6379, 3005` | None (internal bridge) | Never published to the host; reachable only within the internal Docker network. |
+
+#### Tailscale Mesh VPN & Zero-Trust ACL Rules
+Connect the central monitoring server to each teacher VPS over Tailscale:
+```bash
+# Run on both monitoring server and each teacher VPS:
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+```
+
+In your **Tailscale Admin Console -> Access Controls**, enforce strict tag-based boundaries:
+```json
+{
+  "tagOwners": {
+    "tag:monitoring": ["autogroup:admin"],
+    "tag:teacher-vps": ["autogroup:admin"]
+  },
+  "acls": [
+    // 1. Prometheus on monitoring server can scrape metrics from teacher nodes
+    {
+      "action": "accept",
+      "src": ["tag:monitoring"],
+      "dst": ["tag:teacher-vps:9100,8080,9187,9121"]
+    },
+    // 2. Promtail on teacher nodes can push logs to Loki on monitoring server
+    {
+      "action": "accept",
+      "src": ["tag:teacher-vps"],
+      "dst": ["tag:monitoring:3100"]
+    },
+    // 3. Admin user can access Grafana, Prometheus, Alertmanager, and SSH
+    {
+      "action": "accept",
+      "src": ["autogroup:admin"],
+      "dst": ["tag:monitoring:22,3000,9090,9093", "tag:teacher-vps:22"]
+    }
+  ]
+}
+```
 
 ### 7.2 Starting the Monitoring Suite
 1. On the monitoring VPS, navigate to `deploy/monitoring/`:
