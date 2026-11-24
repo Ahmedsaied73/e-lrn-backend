@@ -233,7 +233,7 @@ Review and fill in the missing service keys:
 ```ini
 # ── Domain & Frontend ──
 DOMAIN_NAME=api.teacherdomain.com
-FRONTEND_URL=https://teacherdomain.com,https://*.vercel.app
+FRONTEND_URL=https://teacherdomain.com
 
 # ── Admin Account (Auto-seeded on first boot) ──
 ADMIN_EMAIL=admin@teacherdomain.com

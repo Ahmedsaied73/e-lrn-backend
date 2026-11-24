@@ -23,6 +23,19 @@ if (!process.env.ADMIN_PASSWORD) {
   process.exit(1);
 }
 
+// ── FRONTEND_URL validation ─────────────────────────────────────────────────
+// With credentials: true (cookies), browsers and CORS specification strictly
+// forbid wildcards (* or *.domain). In production, origins must be explicit.
+if (process.env.NODE_ENV === 'production' && process.env.FRONTEND_URL) {
+  const origins = process.env.FRONTEND_URL.split(',').map((s) => s.trim()).filter(Boolean);
+  for (const origin of origins) {
+    if (origin.includes('*')) {
+      console.error(`[FATAL] Wildcard origin '${origin}' in FRONTEND_URL is forbidden in production with credentials: true. Specify exact origins.`);
+      process.exit(1);
+    }
+  }
+}
+
 // ── Bunny Stream config validation ──────────────────────────────────────────
 // All four are required for the video upload/playback/webhook features to work.
 // See bunny-stream-integration-spec.md for what each key is used for.
