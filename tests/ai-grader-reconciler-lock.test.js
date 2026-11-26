@@ -37,7 +37,7 @@ describe('ai reconciler lock contract', () => {
       reconcile: async () => { reconciled += 1; return { ok: true }; },
     });
     assert.equal(result.skipped, true);
-    assert.equal(result.reason, 'lock-held');
+    assert.equal(result.reason, 'lock-acquire-error');
     assert.equal(reconciled, 0);
   });
 

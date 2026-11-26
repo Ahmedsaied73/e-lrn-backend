@@ -14,6 +14,7 @@
  */
 
 const cron = require('node-cron');
+const { Prisma } = require('@prisma/client');
 const prisma = require('../config/db');
 const config = require('../config/env');
 const distributedLock = require('../integrations/redis/distributedLock');
@@ -31,10 +32,24 @@ const log = {
   alert: (event, ctx = {}) => console.error(`[ALERT] ${event}`, JSON.stringify(ctx)),
 };
 
-async function reconcileAiGrading() {
+/**
+ * @param {{ attemptIds?: number[] }} [options] Optional positive-int attempt
+ *   scope. When supplied, steps 1-4 touch only those attempts (used by tests
+ *   against a shared DB). Omitted => the cron tick's global behaviour.
+ */
+async function reconcileAiGrading({ attemptIds } = {}) {
   if (config.features && config.features.aiGrader === false) {
     return { skipped: true, reason: 'module-off' };
   }
+
+  // A malformed filter must fail closed, never silently widen to all attempts.
+  if (attemptIds !== undefined && (
+    !Array.isArray(attemptIds) ||
+    attemptIds.some((id) => !Number.isSafeInteger(id) || id <= 0)
+  )) {
+    throw new TypeError('attemptIds must be an array of positive integers');
+  }
+  const scoped = attemptIds !== undefined;
 
   const now = new Date();
   const staleCutoff = new Date(now.getTime() - STALE_MINUTES * 60 * 1000);
@@ -43,35 +58,52 @@ async function reconcileAiGrading() {
   //    Collect the capped page first — the reset below makes them ineligible.
   //    Scope the reset to that page: rows beyond it stay RUNNING with an
   //    expired lease, so a later tick can pick them up and re-enqueue them.
+  const expiredWhere = { status: 'RUNNING', leaseUntil: { lt: now } };
+  if (scoped) expiredWhere.attemptId = { in: attemptIds };
   const expiredRows = await prisma.aiGradingJob.findMany({
-    where: { status: 'RUNNING', leaseUntil: { lt: now } },
+    where: expiredWhere,
     select: { id: true, attemptId: true },
     distinct: ['attemptId'],
     take: MAX_BATCH,
   });
   const expiredLeases = await prisma.aiGradingJob.updateMany({
     where: {
-      status: 'RUNNING',
-      leaseUntil: { lt: now },
+      ...expiredWhere,
       id: { in: expiredRows.map((r) => r.id) },
     },
     data: { status: 'PENDING', nextRunAt: now, leaseUntil: null },
   });
 
-  // 2. Exhausted PENDING: tries >= maxTries -> NEEDS_REVIEW(AI_FAILED)
+  // 2. Exhausted PENDING: tries >= maxTries -> NEEDS_REVIEW(AI_FAILED).
+  //    A future nextRunAt is a budget deferral, not an exhausted job: the
+  //    worker has already incremented tries but is waiting for the budget to
+  //    reset, so escalating here would burn the deferral permanently.
+  let attemptFilter;
+  if (!scoped) {
+    attemptFilter = Prisma.empty;
+  } else if (attemptIds.length === 0) {
+    attemptFilter = Prisma.sql`AND FALSE`;
+  } else {
+    attemptFilter = Prisma.sql`AND "attemptId" IN (${Prisma.join(attemptIds)})`;
+  }
+
   const exhausted = await prisma.$executeRaw`
     UPDATE "AiGradingJob"
     SET status = 'NEEDS_REVIEW', reason = 'AI_FAILED', "leaseUntil" = NULL, "updatedAt" = NOW()
     WHERE status = 'PENDING' AND tries >= "maxTries"
+      AND ("nextRunAt" IS NULL OR "nextRunAt" <= NOW())
+      ${attemptFilter}
   `;
 
   // 3. Stale PENDING: nextRunAt <= now (or null) and createdAt < staleCutoff -> re-enqueue
+  const staleWhere = {
+    status: 'PENDING',
+    OR: [{ nextRunAt: null }, { nextRunAt: { lte: now } }],
+    updatedAt: { lt: staleCutoff },
+  };
+  if (scoped) staleWhere.attemptId = { in: attemptIds };
   const stalePending = await prisma.aiGradingJob.findMany({
-    where: {
-      status: 'PENDING',
-      OR: [{ nextRunAt: null }, { nextRunAt: { lte: now } }],
-      updatedAt: { lt: staleCutoff },
-    },
+    where: staleWhere,
     select: { attemptId: true },
     distinct: ['attemptId'],
     take: MAX_BATCH,
@@ -79,29 +111,43 @@ async function reconcileAiGrading() {
 
   // Expired leases and stale PENDING rows both need a fresh enqueue this tick.
   // One attempt may appear in both lists, so dedupe by attemptId.
+  const expiredAttemptIds = [...new Set(expiredRows.map((r) => r.attemptId))];
   const reenqueueIds = [...new Set([
-    ...expiredRows.map((r) => r.attemptId),
+    ...expiredAttemptIds,
     ...stalePending.map((r) => r.attemptId),
   ])];
 
+  // Step 2 may have escalated some of these jobs to NEEDS_REVIEW. enqueueAiGrading
+  // silently skips non-PENDING jobs, so re-check eligibility before enqueueing
+  // instead of reporting a recovery that never happened.
   let reenqueued = 0;
+  const enqueuedIds = new Set();
   if (reenqueueIds.length > 0) {
     try {
+      const stillPending = await prisma.aiGradingJob.findMany({
+        where: { status: 'PENDING', attemptId: { in: reenqueueIds } },
+        select: { attemptId: true },
+        distinct: ['attemptId'],
+      });
+      const pendingIds = new Set(stillPending.map((r) => r.attemptId));
       const { enqueueAiGrading } = require('../services/aiGrader/queue');
       for (const attemptId of reenqueueIds) {
-        reenqueued += await enqueueAiGrading(attemptId, { freshJobIds: true });
+        if (!pendingIds.has(attemptId)) continue;
+        const count = await enqueueAiGrading(attemptId, { freshJobIds: true });
+        if (count > 0) enqueuedIds.add(attemptId);
+        reenqueued += count;
       }
     } catch (err) {
       log.warn('ai.reconcile.enqueue_failed', { error: err.message });
     }
   }
+  const reenqueuedLeases = expiredAttemptIds.filter((id) => enqueuedIds.has(id)).length;
 
   // 4. Stored verdict without DONE_APPLIED (FR-7 recovery)
+  const unappliedWhere = { status: 'PENDING', verdict: { not: null } };
+  if (scoped) unappliedWhere.attemptId = { in: attemptIds };
   const unapplied = await prisma.aiGradingJob.findMany({
-    where: {
-      status: 'PENDING',
-      verdict: { not: null },
-    },
+    where: unappliedWhere,
     take: MAX_BATCH,
   });
 
@@ -163,7 +209,7 @@ async function reconcileAiGrading() {
     expiredLeases: expiredLeases.count,
     exhausted: Number(exhausted),
     reenqueued,
-    reenqueuedLeases: expiredRows.length,
+    reenqueuedLeases,
     retriedApply,
     orphans: orphanAttempts.length,
     skipped: false,
@@ -190,8 +236,9 @@ async function reconcileAiGrading() {
  *   { true, token } — we hold the lock; release the exact token afterwards.
  *   { true, null }  — fail-open (Redis unavailable); reconcile, nothing to release.
  *   { false, null } — another instance holds it; do not reconcile.
- * A throwing acquire is treated as "not acquired" (fail closed for this tick,
- * since the next cron tick will retry).
+ * A throwing acquire fails closed for this tick but is reported as
+ * 'lock-acquire-error', not 'lock-held', so a Redis outage is not mistaken for
+ * another instance holding the lock.
  */
 async function runReconciliationTick({
   acquire = () => distributedLock.acquireLock(LOCK_KEY, LOCK_TTL_SECONDS),
@@ -202,7 +249,12 @@ async function runReconciliationTick({
   isRunning = true;
   let lock = null;
   try {
-    lock = await acquire().catch(() => ({ acquired: false, token: null }));
+    try {
+      lock = await acquire();
+    } catch (err) {
+      log.warn('ai.reconcile.lock_acquire_failed', { error: err.message });
+      return { skipped: true, reason: 'lock-acquire-error' };
+    }
     if (!lock.acquired) return { skipped: true, reason: 'lock-held' };
     return await reconcile();
   } catch (err) {
