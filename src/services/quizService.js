@@ -1298,10 +1298,12 @@ async function gradeEssayAttempt(adminId, attemptId, essayScores, essayFeedbackM
       },
     });
 
-    notifyGradedSafe(updated.id);
-
     return updated;
   });
+
+  // Notification is an after-commit side effect: a notification write must
+  // never be rolled back with the grade, nor block the transaction.
+  notifyGradedSafe(updated.id);
 
   await invalidateQuizMetaForAttempt(updated.id);
   // Essay grade changes the scorePercent that gates downstream videos.
@@ -1318,96 +1320,96 @@ async function gradeEssayAttempt(adminId, attemptId, essayScores, essayFeedbackM
  * grades, applied via gradeEssayAttempt, always count — human wins ties).
  * Never overwrites an existing numeric score. Returns { finalized }.
  */
-async function applyAiVerdict(attemptId, qName, verdict) {
-  // Same row lock as gradeEssayAttempt: concurrent AI verdicts (worker
-  // concurrency 2) or a racing human grade must not read-modify-write
-  // essayFeedback over each other and drop a verdict.
-  // Invalidation happens after commit (below), never inside.
-  const out = await prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT id FROM "QuizAttempt" WHERE id = ${attemptId} FOR UPDATE`;
+/**
+ * Transaction-local seam. Same row lock as gradeEssayAttempt: concurrent AI
+ * verdicts (worker concurrency 2) or a racing human grade must not
+ * read-modify-write essayFeedback over each other and drop a verdict.
+ * The caller owns the transaction so the verdict row, attempt grade, and job
+ * state can commit — or roll back — together.
+ */
+async function applyAiVerdictInTx(tx, attemptId, qName, verdict) {
+  await tx.$queryRaw`SELECT id FROM "QuizAttempt" WHERE id = ${attemptId} FOR UPDATE`;
 
-    const attempt = await tx.quizAttempt.findUnique({
-      where: { id: attemptId },
-      include: { quiz: { select: { answerKey: true } } },
-    });
-
-    if (!attempt) throw Object.assign(new Error('Attempt not found'), { statusCode: 404 });
-    if (attempt.status !== STATUS.GRADING) {
-      return { finalized: false, reason: 'not-grading' };
-    }
-
-    // Q-5: essay set comes from the frozen start-time key.
-    const answerKey = resolveAttemptKey(attempt);
-    const keyEntry = answerKey[qName];
-    if (!keyEntry || keyEntry.type !== 'comment') {
-      return { finalized: false, reason: 'not-essay' };
-    }
-
-    const feedbackRecord = { ...(attempt.essayFeedback || {}) };
-    const current = feedbackRecord[qName];
-    if (current && typeof current.awarded === 'number') {
-      return { finalized: false, reason: 'already-graded' }; // human (or prior AI) grade stands
-    }
-
-    const awarded = Math.min(Math.max(0, Number(verdict.awarded)), keyEntry.points);
-    if (!Number.isFinite(awarded)) {
-      throw Object.assign(new Error('AI verdict awarded is not a number'), { statusCode: 422 });
-    }
-    feedbackRecord[qName] = {
-      awarded,
-      max: keyEntry.points,
-      feedback: typeof verdict.feedback === 'string' ? verdict.feedback.slice(0, 2000) : null,
-      gradedBy: 'ai',
-      confidence: verdict.confidence,
-      model: verdict.model || null,
-      promptVersion: verdict.promptVersion || null,
-      gradedAt: new Date().toISOString(),
-    };
-
-    const essayNames = Object.entries(answerKey)
-      .filter(([, e]) => e && e.type === 'comment')
-      .map(([n]) => n);
-    const allScored = essayNames.every(
-      (n) => feedbackRecord[n] && typeof feedbackRecord[n].awarded === 'number'
-    );
-
-    if (!allScored) {
-      await tx.quizAttempt.update({
-        where: { id: attemptId },
-        data: { essayFeedback: feedbackRecord },
-      });
-      return { finalized: false };
-    }
-
-    const essayEarned = essayNames.reduce((sum, n) => sum + feedbackRecord[n].awarded, 0);
-    const totalPoints = attempt.totalPoints || 0;
-    const mcqEarned = attempt.mcqEarned || 0;
-    await tx.quizAttempt.update({
-      where: { id: attemptId },
-      data: {
-        status: STATUS.GRADED,
-        essayEarned,
-        earnedPoints: mcqEarned + essayEarned,
-        scorePercent: computeScorePercent(mcqEarned + essayEarned, totalPoints),
-        essayFeedback: feedbackRecord,
-        essayGradedBy: null, // mixed/AI attribution lives per-question in essayFeedback
-        essayGradedAt: new Date(),
-      },
-    });
-  notifyGradedSafe(attemptId);
-  return { finalized: true, userId: attempt.userId };
+  const attempt = await tx.quizAttempt.findUnique({
+    where: { id: attemptId },
+    include: { quiz: { select: { answerKey: true } } },
   });
 
-  // Only the finalize path mutates meta-visible state — early returns above
-  // changed nothing and skip invalidation.
-  if (out.finalized) {
-    await invalidateQuizMetaForAttempt(attemptId);
-    if (out.userId) {
-      await invalidateGateForUser(out.userId);
-      // Achievements aggregate embeds best scores — drop it too.
-      await invalidateAchievementsForUser(out.userId);
-    }
+  if (!attempt) throw Object.assign(new Error('Attempt not found'), { statusCode: 404 });
+  if (attempt.status !== STATUS.GRADING) return { finalized: false, reason: 'not-grading' };
+
+  // Q-5: essay set comes from the frozen start-time key.
+  const answerKey = resolveAttemptKey(attempt);
+  const keyEntry = answerKey[qName];
+  if (!keyEntry || keyEntry.type !== 'comment') return { finalized: false, reason: 'not-essay' };
+
+  const feedbackRecord = { ...(attempt.essayFeedback || {}) };
+  const current = feedbackRecord[qName];
+  if (current && typeof current.awarded === 'number') {
+    return { finalized: false, reason: 'already-graded' }; // human (or prior AI) grade stands
   }
+
+  const awarded = Math.min(Math.max(0, Number(verdict.awarded)), keyEntry.points);
+  if (!Number.isFinite(awarded)) {
+    throw Object.assign(new Error('AI verdict awarded is not a number'), { statusCode: 422 });
+  }
+  feedbackRecord[qName] = {
+    awarded,
+    max: keyEntry.points,
+    feedback: typeof verdict.feedback === 'string' ? verdict.feedback.slice(0, 2000) : null,
+    gradedBy: 'ai',
+    confidence: verdict.confidence,
+    model: verdict.model || null,
+    promptVersion: verdict.promptVersion || null,
+    gradedAt: new Date().toISOString(),
+  };
+
+  const essayNames = Object.entries(answerKey)
+    .filter(([, e]) => e && e.type === 'comment')
+    .map(([n]) => n);
+  const allScored = essayNames.every(
+    (n) => feedbackRecord[n] && typeof feedbackRecord[n].awarded === 'number'
+  );
+
+  if (!allScored) {
+    await tx.quizAttempt.update({
+      where: { id: attemptId },
+      data: { essayFeedback: feedbackRecord },
+    });
+    return { finalized: false };
+  }
+
+  const essayEarned = essayNames.reduce((sum, n) => sum + feedbackRecord[n].awarded, 0);
+  const totalPoints = attempt.totalPoints || 0;
+  const mcqEarned = attempt.mcqEarned || 0;
+  await tx.quizAttempt.update({
+    where: { id: attemptId },
+    data: {
+      status: STATUS.GRADED,
+      essayEarned,
+      earnedPoints: mcqEarned + essayEarned,
+      scorePercent: computeScorePercent(mcqEarned + essayEarned, totalPoints),
+      essayFeedback: feedbackRecord,
+      essayGradedBy: null, // mixed/AI attribution lives per-question in essayFeedback
+      essayGradedAt: new Date(),
+    },
+  });
+  return { finalized: true, userId: attempt.userId };
+}
+
+/** After-commit side effects for a finalized attempt. Never throws into the caller. */
+async function postFinalize(attemptId, userId) {
+  if (!userId) return;
+  notifyGradedSafe(attemptId);
+  await invalidateQuizMetaForAttempt(attemptId);
+  await invalidateGateForUser(userId);
+  await invalidateAchievementsForUser(userId);
+}
+
+/** Legacy single-call entry point: keeps the old signature for other callers. */
+async function applyAiVerdict(attemptId, qName, verdict) {
+  const out = await prisma.$transaction((tx) => applyAiVerdictInTx(tx, attemptId, qName, verdict));
+  if (out.finalized) await postFinalize(attemptId, out.userId);
   return out;
 }
 
@@ -1446,6 +1448,8 @@ module.exports = {
   saveAttempt,
   gradeEssayAttempt,
   applyAiVerdict,
+  applyAiVerdictInTx,
+  postFinalize,
   invalidateQuizMeta,
   invalidateQuizMetaForAttempt,
   invalidateQuizMetaForUser,
