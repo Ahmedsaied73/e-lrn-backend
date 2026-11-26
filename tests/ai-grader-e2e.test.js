@@ -21,9 +21,17 @@ describe('AI Grader Hardening E2E (real Postgres + Redis)', () => {
   let course;
   let video;
   let quiz;
+  let enqueueMock;
   const createdAttemptIds = [];
 
   before(async () => {
+    // Other agents' BullMQ workers share this Redis queue. The DB outbox rows
+    // are still created by submitAttempt; suppress only the Redis enqueue so
+    // no external worker can claim the jobs this suite drives directly.
+    const { mock } = require('node:test');
+    const gradingQueue = require('../src/services/aiGrader/queue');
+    enqueueMock = mock.method(gradingQueue, 'enqueueAiGrading', async () => 0);
+
     const suffix = Date.now();
     user = await prisma.user.create({
       data: {
@@ -106,9 +114,10 @@ describe('AI Grader Hardening E2E (real Postgres + Redis)', () => {
     if (course) await prisma.course.delete({ where: { id: course.id } }).catch(() => {});
     if (user) await prisma.user.delete({ where: { id: user.id } }).catch(() => {});
     if (admin) await prisma.user.delete({ where: { id: admin.id } }).catch(() => {});
+    if (enqueueMock) enqueueMock.mock.restore();
     await closeGradingQueue().catch(() => {});
-    const { closeRedis } = require('../src/integrations/redis/redisClient');
-    if (typeof closeRedis === 'function') await closeRedis().catch(() => {});
+    const redisClient = require('../src/integrations/redis/redisClient');
+    if (typeof redisClient.disconnectRedis === 'function') await redisClient.disconnectRedis().catch(() => {});
     await prisma.$disconnect();
   });
 
@@ -171,7 +180,7 @@ describe('AI Grader Hardening E2E (real Postgres + Redis)', () => {
     // Reset q_ai back to PENDING for happy-path test
     await prisma.aiGradingJob.update({
       where: { attemptId_questionName: { attemptId, questionName: 'q_ai' } },
-      data: { status: 'PENDING', reason: null, tries: 0, error: null },
+      data: { status: 'PENDING', reason: null, tries: 0, error: null, verdict: null },
     });
 
     const goodProvider = createMockProvider([
@@ -289,5 +298,114 @@ describe('AI Grader Hardening E2E (real Postgres + Redis)', () => {
     assert.ok('DONE_APPLIED' in payload.data.byState);
     assert.ok('NEEDS_REVIEW' in payload.data.byState);
     assert.ok('SYSTEM_GRADED' in payload.data.byState);
+  });
+
+  it('6. Does not claim a PENDING job whose nextRunAt is in the future', async () => {
+    const attempt = await prisma.quizAttempt.create({
+      data: {
+        quizId: quiz.id,
+        userId: user.id,
+        attemptNumber: 6,
+        status: 'GRADING',
+        submittedAt: new Date(),
+        responses: { q_ai: 'Plants use sunlight to make glucose.' },
+        quizSnapshot: { surveyJson: quiz.surveyJson, answerKey: quiz.answerKey },
+      },
+    });
+    createdAttemptIds.push(attempt.id);
+
+    await prisma.aiGradingJob.create({
+      data: {
+        attemptId: attempt.id,
+        questionName: 'q_ai',
+        status: 'PENDING',
+        nextRunAt: new Date(Date.now() + 60 * 60 * 1000),
+      },
+    });
+
+    const provider = createMockProvider([{ score: 10, maxScore: 10, confidence: 0.9, feedback: 'Good.' }]);
+    const result = await processGradingJob(
+      { data: { attemptId: attempt.id, questionName: 'q_ai' } },
+      () => provider
+    );
+
+    assert.equal(result.skipped, 'not-pending');
+    assert.equal(provider.calls, 0);
+  });
+
+  it('7. Rolls back the job verdict and the attempt together when application fails', async () => {
+    const { mock } = require('node:test');
+    const quizService = require('../src/services/quizService');
+
+    const attempt = await prisma.quizAttempt.create({
+      data: {
+        quizId: quiz.id,
+        userId: user.id,
+        attemptNumber: 7,
+        status: 'GRADING',
+        submittedAt: new Date(),
+        responses: { q_ai: 'Plants use sunlight to make glucose.' },
+        quizSnapshot: { surveyJson: quiz.surveyJson, answerKey: quiz.answerKey },
+      },
+    });
+    createdAttemptIds.push(attempt.id);
+
+    await prisma.aiGradingJob.create({
+      data: { attemptId: attempt.id, questionName: 'q_ai', status: 'PENDING', nextRunAt: new Date() },
+    });
+
+    const provider = createMockProvider([
+      { score: 9, maxScore: 10, confidence: 0.95, feedback: 'Clear answer.' },
+    ]);
+    const verdictMock = mock.method(quizService, 'applyAiVerdictInTx', async () => {
+      throw new Error('injected application failure');
+    });
+
+    try {
+      await assert.rejects(
+        () => processGradingJob({ data: { attemptId: attempt.id, questionName: 'q_ai' } }, () => provider)
+      );
+    } finally {
+      verdictMock.mock.restore();
+    }
+
+    const job = await prisma.aiGradingJob.findUnique({
+      where: { attemptId_questionName: { attemptId: attempt.id, questionName: 'q_ai' } },
+    });
+    const fresh = await prisma.quizAttempt.findUnique({ where: { id: attempt.id } });
+    assert.equal(job.status, 'RUNNING');
+    assert.equal(job.verdict, null);
+    assert.equal(fresh.essayFeedback, null);
+  });
+
+  it('8. Refunds the full reservation when the budget is exhausted', async () => {
+    const attempt = await prisma.quizAttempt.create({
+      data: {
+        quizId: quiz.id,
+        userId: user.id,
+        attemptNumber: 8,
+        status: 'GRADING',
+        submittedAt: new Date(),
+        responses: { q_ai: 'Plants use sunlight to make glucose.' },
+        quizSnapshot: { surveyJson: quiz.surveyJson, answerKey: quiz.answerKey },
+      },
+    });
+    createdAttemptIds.push(attempt.id);
+
+    await prisma.aiGradingJob.create({
+      data: { attemptId: attempt.id, questionName: 'q_ai', status: 'PENDING', nextRunAt: new Date() },
+    });
+
+    const refunded = [];
+    const provider = createMockProvider([]);
+    const result = await processGradingJob(
+      { data: { attemptId: attempt.id, questionName: 'q_ai' } },
+      () => provider,
+      { budget: { check: async () => false, refund: async (n) => refunded.push(n) } }
+    );
+
+    assert.equal(result.skipped, 'budget-deferred');
+    assert.equal(refunded.length, 1);
+    assert.ok(refunded[0] > 0);
   });
 });

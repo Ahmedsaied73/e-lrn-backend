@@ -72,13 +72,16 @@ end
 return count
 `;
 
-async function checkBudget(tokens = 1000) {
+async function checkBudget(tokens = 1000, deps = {}) {
   const n = Number.isSafeInteger(tokens) && tokens > 0 ? tokens : 1000;
+  const redis = deps.redis || require('../../integrations/redis/redisClient');
   try {
-    const { getRedis, ensureConnected } = require('../../integrations/redis/redisClient');
-    await ensureConnected(3000).catch(() => false);
-    const client = getRedis();
-    if (!client || client.status !== 'ready') return true;
+    await redis.ensureConnected(3000).catch(() => false);
+    const client = redis.getRedis();
+    if (!client || client.status !== 'ready') {
+      logWarn('ai.budget.unavailable', { reason: 'redis-not-ready' });
+      return false;
+    }
     const key = budgetKey();
     const count = Number(await client.eval(BUDGET_RESERVE_LUA, 1, key, n));
     const used = count - n;
@@ -93,19 +96,19 @@ async function checkBudget(tokens = 1000) {
     return true;
   } catch (err) {
     logWarn('ai.budget.check_failed', { error: err.message });
-    return true;
+    return false;
   }
 }
 
-async function refundBudget(tokens) {
+async function refundBudget(tokens, deps = {}) {
   if (!Number.isSafeInteger(tokens) || tokens <= 0) return;
   try {
-    const { getRedis } = require('../../integrations/redis/redisClient');
-    const client = getRedis();
+    const redis = deps.redis || require('../../integrations/redis/redisClient');
+    const client = redis.getRedis();
     if (!client || client.status !== 'ready') return;
     await client.decrby(budgetKey(), tokens);
   } catch {
-    // non-fatal
+    // non-fatal — the reserve has a 24h TTL and the reconciler will defer work
   }
 }
 
@@ -187,33 +190,40 @@ async function applyOrEscalate({ attempt, attemptId, questionName, entry, verdic
     return { applied: false, reason: reviewPolicy.reason, confidence: verdict.confidence };
   }
 
-  // FR-7: store verdict first, then apply atomically, then mark DONE_APPLIED
-  await markJob(attemptId, questionName, {
-    confidence: verdict.confidence,
-    verdict: { ...verdict },
-    criteriaBreakdown: verdict.criteriaBreakdown || null,
-    inputHash,
-    tokensIn,
-    tokensOut,
-    error: null,
-  });
-
+  // FR-7: verdict storage, attempt grade and job completion are ONE
+  // transaction — a failure anywhere rolls all three back to RUNNING.
   const quizService = require('../quizService');
-  const applied = await quizService.applyAiVerdict(attemptId, questionName, {
-    awarded: verdict.score,
-    max: entry.points,
-    feedback: verdict.feedback,
-    confidence: verdict.confidence,
-    model: verdict.model,
-    promptVersion: verdict.promptVersion,
+  const applied = await prisma.$transaction(async (tx) => {
+    await tx.aiGradingJob.update({
+      where: { attemptId_questionName: { attemptId, questionName } },
+      data: {
+        confidence: verdict.confidence,
+        verdict: { ...verdict },
+        criteriaBreakdown: verdict.criteriaBreakdown || null,
+        inputHash,
+        tokensIn,
+        tokensOut,
+        error: null,
+      },
+    });
+
+    const result = await quizService.applyAiVerdictInTx(tx, attemptId, questionName, {
+      awarded: verdict.score,
+      max: entry.points,
+      feedback: verdict.feedback,
+      confidence: verdict.confidence,
+      model: verdict.model,
+      promptVersion: verdict.promptVersion,
+    });
+
+    await tx.aiGradingJob.update({
+      where: { attemptId_questionName: { attemptId, questionName } },
+      data: { status: 'DONE_APPLIED', applied: true, appliedAt: new Date(), leaseUntil: null },
+    });
+    return result;
   });
 
-  await markJob(attemptId, questionName, {
-    status: 'DONE_APPLIED',
-    applied: true,
-    appliedAt: new Date(),
-    leaseUntil: null,
-  });
+  if (applied.finalized) await quizService.postFinalize(attemptId, applied.userId);
 
   logInfo('ai.grade.applied', {
     attemptId,
@@ -229,7 +239,8 @@ async function applyOrEscalate({ attempt, attemptId, questionName, entry, verdic
   return { applied: true, finalized: applied.finalized, confidence: verdict.confidence };
 }
 
-async function processGradingJob(job, providerFactory = defaultProviderFactory) {
+async function processGradingJob(job, providerFactory = defaultProviderFactory, options = {}) {
+  const budget = options.budget || { check: checkBudget, refund: refundBudget };
   const { attemptId, questionName } = job.data || {};
   if (!Number.isSafeInteger(attemptId) || typeof questionName !== 'string' || !questionName) {
     throw new Error('Invalid job payload (expected {attemptId, questionName})');
@@ -254,6 +265,7 @@ async function processGradingJob(job, providerFactory = defaultProviderFactory) 
       attemptId,
       questionName,
       status: 'PENDING',
+      OR: [{ nextRunAt: null }, { nextRunAt: { lte: now } }],
     },
     data: {
       status: 'RUNNING',
@@ -346,7 +358,8 @@ async function processGradingJob(job, providerFactory = defaultProviderFactory) 
 
   // FR-5: Token budget reserve
   const estimatedTokens = Math.ceil((convertedStudent.length + convertedModel.length) / 2) + 500;
-  if (!(await checkBudget(estimatedTokens))) {
+  if (!(await budget.check(estimatedTokens))) {
+    await budget.refund(estimatedTokens); // deferred before any model call — give the whole reserve back
     await markJob(attemptId, questionName, {
       status: 'PENDING',
       nextRunAt: nextBudgetReset(),
@@ -399,8 +412,10 @@ async function processGradingJob(job, providerFactory = defaultProviderFactory) 
   }
 
   const actualTokens = (verdict.tokensIn || 0) + (verdict.tokensOut || 0);
-  if (actualTokens > 0 && estimatedTokens > actualTokens) {
-    await refundBudget(estimatedTokens - actualTokens);
+  // Runs before applyOrEscalate: applied and escalated outcomes both refund
+  // the over-estimate exactly once.
+  if (estimatedTokens > actualTokens) {
+    await budget.refund(estimatedTokens - actualTokens);
   }
 
   return applyOrEscalate({
