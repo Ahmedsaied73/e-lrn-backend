@@ -386,12 +386,29 @@ async function processGradingJob(job, providerFactory = defaultProviderFactory, 
     // Refund only what was really reserved: a not-ready/throw check consumed
     // nothing, while the exhausted branch reserved before denying us.
     if (budgetResult.reserved) await budget.refund(budgetResult.reserved);
-    await markJob(attemptId, questionName, {
-      status: 'PENDING',
-      nextRunAt: nextBudgetReset(),
-      leaseUntil: null,
-      tries: { decrement: 1 }, // the deferral is not a grader attempt
-    });
+    // The claim owns the lease: only it may turn this RUNNING job back to
+    // PENDING. A reconciler reset/escalation in between must not be rewritten
+    // (and must not have its tries decremented).
+    let deferred;
+    try {
+      deferred = await prisma.aiGradingJob.updateMany({
+        where: { attemptId, questionName, status: 'RUNNING' },
+        data: {
+          status: 'PENDING',
+          nextRunAt: nextBudgetReset(),
+          leaseUntil: null,
+          tries: { decrement: 1 }, // the deferral is not a grader attempt
+          updatedAt: new Date(),
+        },
+      });
+    } catch (err) {
+      logWarn('ai.worker.defer_failed', { attemptId, questionName, error: err && err.message });
+      return { skipped: 'defer-failed' };
+    }
+    if (deferred.count === 0) {
+      logWarn('ai.worker.defer_failed', { attemptId, questionName, error: 'job no longer RUNNING' });
+      return { skipped: 'defer-superseded' };
+    }
     return { skipped: 'budget-deferred' };
   }
 

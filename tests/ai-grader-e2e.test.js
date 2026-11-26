@@ -518,4 +518,62 @@ describe('AI Grader Hardening E2E (real Postgres + Redis)', () => {
     assert.equal(job.status, 'RUNNING'); // the simulated reset is rolled back too
     assert.equal(job.verdict, null);
   });
+
+  it('11. Does not rewrite a superseded job when the budget deferral lands', async () => {
+    const attempt = await prisma.quizAttempt.create({
+      data: {
+        quizId: quiz.id,
+        userId: user.id,
+        attemptNumber: 11,
+        status: 'GRADING',
+        submittedAt: new Date(),
+        responses: { q_ai: 'Plants use sunlight to make glucose.' },
+        quizSnapshot: { surveyJson: quiz.surveyJson, answerKey: quiz.answerKey },
+      },
+    });
+    createdAttemptIds.push(attempt.id);
+
+    await prisma.aiGradingJob.create({
+      data: {
+        attemptId: attempt.id,
+        questionName: 'q_ai',
+        status: 'PENDING',
+        nextRunAt: new Date(),
+        tries: 1,
+        maxTries: 3,
+      },
+    });
+
+    const before = await prisma.aiGradingJob.findUnique({
+      where: { attemptId_questionName: { attemptId: attempt.id, questionName: 'q_ai' } },
+    });
+    const refunded = [];
+    const result = await processGradingJob(
+      { data: { attemptId: attempt.id, questionName: 'q_ai' } },
+      () => createMockProvider([]),
+      {
+        budget: {
+          check: async (n) => {
+            // A reconciler escalation lands after the claim, before the defer.
+            await prisma.aiGradingJob.update({
+              where: { attemptId_questionName: { attemptId: attempt.id, questionName: 'q_ai' } },
+              data: { status: 'NEEDS_REVIEW', reason: 'AI_FAILED' },
+            });
+            return { allowed: false, reserved: n };
+          },
+          refund: async (n) => refunded.push(n),
+        },
+      }
+    );
+
+    assert.equal(result.skipped, 'defer-superseded');
+    assert.equal(refunded.length, 1);
+
+    const job = await prisma.aiGradingJob.findUnique({
+      where: { attemptId_questionName: { attemptId: attempt.id, questionName: 'q_ai' } },
+    });
+    assert.equal(job.status, 'NEEDS_REVIEW');
+    assert.equal(job.tries, 2); // claim increment kept; no deferral decrement
+    assert.equal(job.nextRunAt.getTime(), before.nextRunAt.getTime());
+  });
 });
