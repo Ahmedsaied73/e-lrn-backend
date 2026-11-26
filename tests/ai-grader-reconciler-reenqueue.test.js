@@ -25,7 +25,10 @@ function stub(t, object, name, implementation) {
   });
 }
 
-function baseStubs(t, { expired = [], stale = [], unapplied = [], events = null, captured = null } = {}) {
+function baseStubs(t, {
+  expired = [], stale = [], unapplied = [], events = null, captured = null, executeRawImpl = null,
+  pending = null,
+} = {}) {
   const note = (event) => { if (events) events.push(event); };
 
   stub(t, config.features, 'aiGrader', true);
@@ -38,9 +41,23 @@ function baseStubs(t, { expired = [], stale = [], unapplied = [], events = null,
     }
     if (args.where.verdict !== undefined) {
       note('unapplied:findMany');
+      if (captured) captured.unappliedFindManyArgs = args;
       return unapplied;
     }
+    if (
+      args.where.status === 'PENDING' &&
+      args.where.attemptId !== undefined &&
+      args.where.verdict === undefined &&
+      args.where.updatedAt === undefined
+    ) {
+      note('pending:findMany');
+      if (captured) captured.pendingFindManyArgs = args;
+      return pending === null
+        ? [...new Set([...expired, ...stale].map((r) => r.attemptId))].map((attemptId) => ({ attemptId }))
+        : pending;
+    }
     note('stale:findMany');
+    if (captured) captured.staleFindManyArgs = args;
     return stale;
   });
 
@@ -51,8 +68,20 @@ function baseStubs(t, { expired = [], stale = [], unapplied = [], events = null,
   });
 
   stub(t, prisma.aiGradingJob, 'update', async () => ({}));
-  stub(t, prisma, '$executeRaw', async () => 0);
+  stub(t, prisma, '$executeRaw', async (strings, ...values) => {
+    if (captured) captured.executeRaw = { strings, values };
+    return executeRawImpl ? executeRawImpl(strings, values) : 0;
+  });
   stub(t, prisma, '$queryRaw', async () => []);
+}
+
+function whereScopes(captured) {
+  return [
+    captured.expiredFindManyArgs.where,
+    captured.updateManyArgs.where,
+    captured.staleFindManyArgs.where,
+    captured.unappliedFindManyArgs.where,
+  ];
 }
 
 describe('ai reconciler expired leases', () => {
@@ -120,6 +149,100 @@ describe('ai reconciler expired leases', () => {
     assert.deepEqual(enqueued, [101, 102], 'only collected attempts are re-enqueued');
     assert.equal(summary.expiredLeases, 2);
     assert.equal(summary.reenqueuedLeases, 2);
+  });
+
+  it('does not count an expired lease escalated in the same tick as recovered', async (t) => {
+    const captured = {};
+    const enqueued = [];
+    baseStubs(t, {
+      expired: [{ id: 1, attemptId: 101 }],
+      // Step 2 escalated job 1 to NEEDS_REVIEW, so it is no longer PENDING.
+      pending: [],
+      captured,
+      executeRawImpl: () => 1,
+    });
+    stub(t, queue, 'enqueueAiGrading', async (attemptId) => {
+      enqueued.push(attemptId);
+      return 1;
+    });
+
+    const summary = await reconcileAiGrading();
+
+    assert.deepEqual(enqueued, [], 'an escalated lease must not be enqueued');
+    assert.equal(summary.exhausted, 1);
+    assert.equal(summary.expiredLeases, 1);
+    assert.equal(summary.reenqueued, 0);
+    assert.equal(summary.reenqueuedLeases, 0, 'an escalated lease must not be reported as recovered');
+    assert.deepEqual(captured.pendingFindManyArgs.where, {
+      status: 'PENDING',
+      attemptId: { in: [101] },
+    });
+  });
+});
+
+describe('ai reconciler attempt scoping and budget deferrals', () => {
+  it('scopes every step 1-4 query to attemptIds when provided', async (t) => {
+    const captured = {};
+    baseStubs(t, { captured });
+
+    await reconcileAiGrading({ attemptIds: [101, 202] });
+
+    for (const where of whereScopes(captured)) {
+      assert.deepEqual(where.attemptId, { in: [101, 202] });
+    }
+    const { strings, values } = captured.executeRaw;
+    assert.match(strings.join('?'), /UPDATE "AiGradingJob"/);
+    const attemptSql = values.find((v) => v && typeof v.text === 'string' && v.text.includes('attemptId'));
+    assert.ok(attemptSql, 'step 2 must compose the attempt filter with Prisma.sql');
+    assert.match(attemptSql.text, /"attemptId" IN/);
+    assert.deepEqual(attemptSql.values, [101, 202]);
+  });
+
+  it('keeps the unfiltered shape when attemptIds is omitted', async (t) => {
+    const captured = {};
+    baseStubs(t, { captured });
+
+    await reconcileAiGrading();
+
+    for (const where of whereScopes(captured)) {
+      assert.ok(
+        !Object.prototype.hasOwnProperty.call(where, 'attemptId'),
+        'the cron tick must not add an attemptId filter'
+      );
+    }
+    const { values } = captured.executeRaw;
+    assert.ok(
+      !values.some((v) => v && typeof v.text === 'string' && v.text.includes('attemptId')),
+      'the cron tick must not add an attempt-id SQL filter'
+    );
+  });
+
+  it('leaves a spent-tries job with a future nextRunAt PENDING', async (t) => {
+    const captured = {};
+    const deferred = {
+      status: 'PENDING',
+      tries: 3,
+      maxTries: 3,
+      nextRunAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    };
+    baseStubs(t, {
+      captured,
+      executeRawImpl(strings, values) {
+        const sqlText = `${strings.join(' ')} ${values.map((v) => (v && v.text) || '').join(' ')}`;
+        assert.match(sqlText, /"nextRunAt" IS NULL OR "nextRunAt" <= NOW\(\)/);
+        // Emulate Postgres applying the WHERE clause to the deferred job.
+        const guardPresent = sqlText.includes('"nextRunAt" IS NULL OR "nextRunAt" <= NOW()');
+        const future = deferred.nextRunAt && deferred.nextRunAt.getTime() > Date.now();
+        const matches = deferred.status === 'PENDING'
+          && deferred.tries >= deferred.maxTries
+          && (!guardPresent || !future);
+        return matches ? 1 : 0;
+      },
+    });
+
+    const summary = await reconcileAiGrading();
+
+    assert.equal(summary.exhausted, 0, 'a budget-deferred job must not be escalated to NEEDS_REVIEW');
   });
 });
 
