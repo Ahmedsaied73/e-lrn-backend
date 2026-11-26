@@ -11,6 +11,7 @@
 
 const { buildGradingPrompt, PROMPT_VERSION } = require('./prompts');
 const { validateVerdict, validateStructuredVerdict } = require('./schemas');
+const { toGraderText } = require('../../lib/richContent/grader');
 
 const log = {
   info: (event, ctx = {}) => console.log(`[INFO] ${event}`, JSON.stringify(ctx)),
@@ -78,10 +79,9 @@ async function gradeEssay(input, provider, options = {}) {
     throw new Error('gradeEssay requires a provider with grade()');
   }
 
-  const isStructured = Array.isArray(rubric) && rubric.length > 0
-    && rubric.every((c) => c && c.id && c.description && typeof c.points === 'number');
-
   const prompt = buildGradingPrompt({ questionTitle, modelAnswer, rubric, studentAnswer, maxPoints });
+  const isStructured = prompt.structured === true;
+  const convertedStudent = toGraderText(studentAnswer);
   let lastError = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -91,7 +91,7 @@ async function gradeEssay(input, provider, options = {}) {
       const tokensOut = raw && typeof raw._tokensOut === 'number' ? raw._tokensOut : 0;
 
       const verdict = isStructured
-        ? validateStructuredVerdict(raw, rubric, maxPoints, studentAnswer)
+        ? validateStructuredVerdict(raw, rubric, maxPoints, convertedStudent)
         : validateVerdict(raw, maxPoints);
 
       log.info('ai.grade.completed', {
