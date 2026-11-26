@@ -663,6 +663,20 @@ if (require.main === module) {
       }
     }
 
+    // AI grading reconciler (every 5 minutes). This is the durable backstop for
+    // jobs the in-process worker cannot finish: process crash, expired lease,
+    // budget deferral, or a lost BullMQ delivery. It must run even when the
+    // worker lives on a dedicated instance (AI_WORKER_PROCESS=true).
+    if (!config.features || config.features.aiGrader !== false) {
+      try {
+        const { startAiGradingReconciliationJob } = require('./src/jobs/reconcileAiGrading');
+        aiGradingReconciliationTask = startAiGradingReconciliationJob();
+        console.log('[INFO] ai.reconcile.job_started', JSON.stringify({ schedule: 'every 5 minutes' }));
+      } catch (err) {
+        console.warn('[WARN] AI grading reconciliation job failed to start:', err.message);
+      }
+    }
+
     // Start AI essay-grading worker (in-process BullMQ). No-ops with a warning
     // when GEMINI_API_KEY is missing or Redis is disabled — human grading path
     // is unaffected.
@@ -699,17 +713,20 @@ function shutdown(signal) {
     console.warn('[WARN] Reconciliation cron stop failed:', err.message);
   }
 
-  // Payments cron is only present when the module was enabled at boot.
+  // AI grading reconciler — own try/catch so a teardown failure cannot stop
+  // the other cron handles from draining.
   try {
     if (aiGradingReconciliationTask) {
-    try {
       require('./src/jobs/reconcileAiGrading').stopAiGradingReconciliationJob(aiGradingReconciliationTask);
       aiGradingReconciliationTask = null;
-    } catch (err) {
-      console.warn('[WARN] AI grading reconciliation cron stop failed:', err.message);
     }
+  } catch (err) {
+    console.warn('[WARN] AI grading reconciliation cron stop failed:', err.message);
   }
-  if (paymentReconciliationTask) {
+
+  // Payments cron is only present when the module was enabled at boot.
+  try {
+    if (paymentReconciliationTask) {
       require('./src/jobs/reconcilePayments').stopPaymentReconciliationJob(paymentReconciliationTask);
       paymentReconciliationTask = null;
     }
