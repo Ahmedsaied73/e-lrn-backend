@@ -2,24 +2,12 @@
 
 /**
  * aiGraderAdminController.js
- * Admin-only surface for the durable AiGradingJob audit table (J1/T4.1).
- *
- * The worker writes one AiGradingJob row per (attempt, essay question); a row
- * with status FAILED is the authoritative record of a grading failure. These
- * endpoints give admins visibility (list, filtered/searchable/paginated) plus
- * a retry action that re-enqueues through the SAME idempotent primitive the
- * quiz flow uses (enqueueAiGrading) — resetting FAILED→PENDING and re-adding
- * the BullMQ job (jobId-deduped, so replays are safe).
- *
- * The AiGradingJob model lives in core Prisma (not in the aiGrader module
- * folder), so listing works even when the module/queue is off; retry lazy-
- * requires the queue module and no-ops cleanly if it was deleted at runtime
- * (module-removal test stays green).
+ * Admin-only surface for the 5-state AiGradingJob table (Section 7).
  */
 
 const prisma = require('../config/db');
 
-const JOB_STATUSES = ['PENDING', 'DONE', 'FAILED'];
+const JOB_STATUSES = ['PENDING', 'RUNNING', 'DONE_APPLIED', 'SYSTEM_GRADED', 'NEEDS_REVIEW'];
 
 function parseInteger(value) {
   const parsed = typeof value === 'number' ? value : Number(value);
@@ -27,15 +15,11 @@ function parseInteger(value) {
 }
 
 /**
- * GET /admin/ai-grading/jobs?status=FAILED&page=&limit=&search=
- * Lists AiGradingJob rows with admin-facing context: student, quiz/video/course
- * titles, error, tries. Default status = FAILED (the ops surface); PENDING/DONE
- * allowed for full-audit viewing. Leak-safe serializer — never answerKey,
- * responses, or essayFeedback.
+ * GET /admin/ai-grading/jobs?status=NEEDS_REVIEW&reason=&applied=&page=&limit=&search=
  */
 async function listAiGradingJobs(req, res) {
   try {
-    const status = req.query.status || 'FAILED';
+    const status = req.query.status || 'NEEDS_REVIEW';
     if (!JOB_STATUSES.includes(status)) {
       return res.status(400).json({ success: false, error: 'Invalid status filter' });
     }
@@ -44,8 +28,13 @@ async function listAiGradingJobs(req, res) {
     const take = Math.max(1, Math.min(parseInteger(req.query.limit) || 20, 100));
     const skip = (page - 1) * take;
     const search = (req.query.search || '').trim();
+    const reason = (req.query.reason || '').trim();
 
     const where = { status };
+    if (reason) where.reason = reason;
+    if (req.query.applied === 'true') where.applied = true;
+    if (req.query.applied === 'false') where.applied = false;
+
     if (search) {
       where.OR = [
         { questionName: { contains: search, mode: 'insensitive' } },
@@ -66,12 +55,20 @@ async function listAiGradingJobs(req, res) {
           attemptId: true,
           questionName: true,
           status: true,
+          reason: true,
           tries: true,
           maxTries: true,
           confidence: true,
           applied: true,
+          appliedAt: true,
+          verdict: true,
+          criteriaBreakdown: true,
+          tokensIn: true,
+          tokensOut: true,
           error: true,
           claimedAt: true,
+          leaseUntil: true,
+          nextRunAt: true,
           createdAt: true,
           updatedAt: true,
           attempt: {
@@ -106,12 +103,20 @@ async function listAiGradingJobs(req, res) {
       attemptId: job.attemptId,
       questionName: job.questionName,
       status: job.status,
+      reason: job.reason,
       tries: job.tries,
       maxTries: job.maxTries,
       confidence: job.confidence,
       applied: job.applied,
+      appliedAt: job.appliedAt,
+      verdict: job.status === 'NEEDS_REVIEW' ? job.verdict : undefined,
+      criteriaBreakdown: job.criteriaBreakdown,
+      tokensIn: job.tokensIn,
+      tokensOut: job.tokensOut,
       error: job.error,
       claimedAt: job.claimedAt,
+      leaseUntil: job.leaseUntil,
+      nextRunAt: job.nextRunAt,
       createdAt: job.createdAt,
       updatedAt: job.updatedAt,
       attemptStatus: job.attempt.status,
@@ -139,11 +144,7 @@ async function listAiGradingJobs(req, res) {
 
 /**
  * POST /admin/ai-grading/retry  body: { attemptIds?: number[] }
- * Re-enqueues grading for FAILED jobs. With attemptIds → only those attempts;
- * without → ALL attempts that currently have a FAILED job. Uses the same
- * idempotent enqueue primitive as the quiz flow: qualified questions reset to
- * PENDING + BullMQ job re-added (jobId-deduped). Reports per-attempt how many
- * jobs were (re)queued and how many FAILED rows got cleared.
+ * Re-enqueues stuck jobs: NEEDS_REVIEW(AI_FAILED) and stale PENDING.
  */
 async function retryFailedAiGrading(req, res) {
   try {
@@ -155,14 +156,21 @@ async function retryFailedAiGrading(req, res) {
     }
 
     const uniqueAttemptIds = attemptIds.length > 0 ? [...new Set(attemptIds)] : [];
+    const staleCutoff = new Date(Date.now() - 15 * 60 * 1000);
 
-    const where = { status: 'FAILED' };
+    const where = {
+      OR: [
+        { status: 'NEEDS_REVIEW', reason: 'AI_FAILED' },
+        { status: 'PENDING', updatedAt: { lt: staleCutoff } },
+      ],
+    };
     if (uniqueAttemptIds.length > 0) where.attemptId = { in: uniqueAttemptIds };
-    const failedRows = await prisma.aiGradingJob.findMany({
+
+    const stuckRows = await prisma.aiGradingJob.findMany({
       where,
       select: { attemptId: true },
     });
-    const attempts = [...new Set(failedRows.map((row) => row.attemptId))];
+    const attempts = [...new Set(stuckRows.map((row) => row.attemptId))];
 
     if (attempts.length === 0) {
       return res.json({
@@ -171,7 +179,16 @@ async function retryFailedAiGrading(req, res) {
       });
     }
 
-    // Lazy require — never let a deleted/disabled module break the surface.
+    // Reset NEEDS_REVIEW(AI_FAILED) rows back to PENDING with tries=0 before enqueue
+    await prisma.aiGradingJob.updateMany({
+      where: {
+        attemptId: { in: attempts },
+        status: 'NEEDS_REVIEW',
+        reason: 'AI_FAILED',
+      },
+      data: { status: 'PENDING', reason: null, tries: 0, error: null, nextRunAt: new Date() },
+    });
+
     let enqueueAiGrading = null;
     try {
       const queueModule = require('../services/aiGrader/queue');
@@ -181,27 +198,18 @@ async function retryFailedAiGrading(req, res) {
     }
 
     let jobsEnqueued = 0;
-    let cleared = 0;
     const perAttempt = [];
     for (const attemptId of attempts) {
-      const before = await prisma.aiGradingJob.count({ where: { attemptId, status: 'FAILED' } });
-      let enqueued = 0;
-      if (enqueueAiGrading) {
-        // freshJobIds: re-schedule genuinely (bypasses jobId dedupe while the
-        // previous failed job is still retained by removeOnFail — last 1000,
-        // up to 7 days); the row-level upsert keeps it idempotent and the
-        // worker re-validates every guard, so re-processing is impossible.
-        enqueued = await enqueueAiGrading(attemptId, { freshJobIds: true }).catch(() => 0);
-      }
-      const after = await prisma.aiGradingJob.count({ where: { attemptId, status: 'FAILED' } });
+      const enqueued = enqueueAiGrading
+        ? await enqueueAiGrading(attemptId, { freshJobIds: true }).catch(() => 0)
+        : 0;
       jobsEnqueued += enqueued;
-      cleared += before - after;
-      perAttempt.push({ attemptId, jobsEnqueued: enqueued, cleared: before - after });
+      perAttempt.push({ attemptId, jobsEnqueued: enqueued });
     }
 
     return res.json({
       success: true,
-      data: { attempts: attempts.length, jobsEnqueued, cleared, perAttempt },
+      data: { attempts: attempts.length, jobsEnqueued, perAttempt },
     });
   } catch (error) {
     console.error('[AiGraderAdmin] retryFailedAiGrading error:', error);
@@ -209,7 +217,59 @@ async function retryFailedAiGrading(req, res) {
   }
 }
 
+/**
+ * GET /admin/ai-grading/health
+ * Returns job counts by state, orphan count, and oldest PENDING timestamp.
+ */
+async function getAiGradingHealth(req, res) {
+  try {
+    const staleCutoff = new Date(Date.now() - 15 * 60 * 1000);
+
+    const [grouped, oldestPending, orphanRows] = await Promise.all([
+      prisma.aiGradingJob.groupBy({
+        by: ['status'],
+        _count: { _all: true },
+      }),
+      prisma.aiGradingJob.findFirst({
+        where: { status: 'PENDING' },
+        orderBy: { createdAt: 'asc' },
+        select: { createdAt: true },
+      }),
+      prisma.$queryRaw`
+        SELECT COUNT(*)::int AS count
+        FROM "QuizAttempt" qa
+        WHERE qa.status = 'GRADING'
+          AND qa."submittedAt" < ${staleCutoff}
+          AND NOT EXISTS (
+            SELECT 1 FROM "AiGradingJob" j
+            WHERE j."attemptId" = qa.id
+              AND j.status IN ('PENDING', 'RUNNING', 'NEEDS_REVIEW')
+          )
+      `,
+    ]);
+
+    const byState = { PENDING: 0, RUNNING: 0, DONE_APPLIED: 0, SYSTEM_GRADED: 0, NEEDS_REVIEW: 0 };
+    for (const row of grouped) {
+      byState[row.status] = row._count._all;
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        byState,
+        orphans: orphanRows[0] ? Number(orphanRows[0].count) : 0,
+        oldestPending: oldestPending ? oldestPending.createdAt : null,
+        queueDepth: byState.PENDING + byState.RUNNING,
+      },
+    });
+  } catch (error) {
+    console.error('[AiGraderAdmin] getAiGradingHealth error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
 module.exports = {
   listAiGradingJobs,
   retryFailedAiGrading,
+  getAiGradingHealth,
 };

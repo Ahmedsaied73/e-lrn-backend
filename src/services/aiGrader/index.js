@@ -1,18 +1,16 @@
 'use strict';
 
 /**
- * aiGrader/index.js — the ONLY export the quiz flow touches.
+ * aiGrader/index.js — pure essay evaluation.
  *
- *   gradeEssay(input, provider, options) -> Promise<Verdict>
- *
- * Pure evaluation: no database, no business rules, no totals. The caller
- * (worker.js) decides what a verdict MEANS (finalize vs human review) and
- * persists it through quizService. Retries cover technical failures only —
- * a confident verdict is never re-rolled, a doubtful one is never hidden.
+ * FR-13: Supports optional structured rubric [{id, description, points}].
+ * FR-21: Real AbortController timeout + smart retries (transient errors only
+ * with exponential backoff + jitter + Retry-After; validation errors get 1
+ * repair retry).
  */
 
 const { buildGradingPrompt, PROMPT_VERSION } = require('./prompts');
-const { validateVerdict } = require('./schemas');
+const { validateVerdict, validateStructuredVerdict } = require('./schemas');
 
 const log = {
   info: (event, ctx = {}) => console.log(`[INFO] ${event}`, JSON.stringify(ctx)),
@@ -22,12 +20,35 @@ const log = {
 const DEFAULT_TIMEOUT_MS = 45000;
 const DEFAULT_MAX_ATTEMPTS = 2;
 
-function withTimeout(promise, ms) {
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientError(err) {
+  if (!err) return false;
+  const status = err.status || err.statusCode || (err.response && err.response.status);
+  if (status === 429 || (status >= 500 && status < 600)) return true;
+  const msg = String(err.message || '');
+  return /timed out|timeout|ECONNRESET|ETIMEDOUT|429|503|502|rate limit/i.test(msg);
+}
+
+function parseRetryAfter(err) {
+  const header = err && err.response && err.response.headers && err.response.headers['retry-after'];
+  if (!header) return 0;
+  const sec = Number(header);
+  return Number.isFinite(sec) && sec > 0 ? sec * 1000 : 0;
+}
+
+function withTimeout(fn, ms) {
+  const controller = new AbortController();
   let timer;
   const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`AI grading timed out after ${ms}ms`)), ms);
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`AI grading timed out after ${ms}ms`));
+    }, ms);
   });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  return Promise.race([fn(controller.signal), timeout]).finally(() => clearTimeout(timer));
 }
 
 async function gradeEssay(input, provider, options = {}) {
@@ -57,12 +78,22 @@ async function gradeEssay(input, provider, options = {}) {
     throw new Error('gradeEssay requires a provider with grade()');
   }
 
+  const isStructured = Array.isArray(rubric) && rubric.length > 0
+    && rubric.every((c) => c && c.id && c.description && typeof c.points === 'number');
+
   const prompt = buildGradingPrompt({ questionTitle, modelAnswer, rubric, studentAnswer, maxPoints });
   let lastError = null;
+
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const raw = await withTimeout(provider.grade(prompt), timeoutMs);
-      const verdict = validateVerdict(raw, maxPoints);
+      const raw = await withTimeout((signal) => provider.grade(prompt, { signal }), timeoutMs);
+      const tokensIn = raw && typeof raw._tokensIn === 'number' ? raw._tokensIn : 0;
+      const tokensOut = raw && typeof raw._tokensOut === 'number' ? raw._tokensOut : 0;
+
+      const verdict = isStructured
+        ? validateStructuredVerdict(raw, rubric, maxPoints, studentAnswer)
+        : validateVerdict(raw, maxPoints);
+
       log.info('ai.grade.completed', {
         model,
         promptVersion: prompt.version,
@@ -70,12 +101,24 @@ async function gradeEssay(input, provider, options = {}) {
         score: verdict.score,
         confidence: verdict.confidence,
         attempts: attempt,
-        budgetOverridden: verdict.budgetOverridden,
+        tokensIn,
+        tokensOut,
       });
-      return { ...verdict, model, promptVersion: prompt.version };
+
+      return { ...verdict, model, promptVersion: prompt.version, tokensIn, tokensOut };
     } catch (err) {
       lastError = err;
       log.warn('ai.grade.attempt_failed', { model, attempt, maxAttempts, error: err.message });
+
+      if (attempt >= maxAttempts) break;
+      const isValidation = err.code === 'SCALE_MISMATCH' || err.name === 'ZodError';
+      const transient = isTransientError(err);
+      if (!transient && !isValidation) break;
+      if (isValidation && attempt > 1) break;
+
+      const baseDelay = Math.min(30000, (2 ** attempt) * 1000 + Math.random() * 1000);
+      const retryAfter = parseRetryAfter(err);
+      await sleep(Math.max(baseDelay, retryAfter));
     }
   }
   throw lastError;
@@ -85,5 +128,5 @@ module.exports = {
   gradeEssay,
   PROMPT_VERSION,
   DEFAULT_TIMEOUT_MS,
-  DEFAULT_MAX_ATTEMPTS, // worst-case model calls per gradeEssay invocation
+  DEFAULT_MAX_ATTEMPTS,
 };

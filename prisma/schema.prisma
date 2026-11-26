@@ -241,6 +241,7 @@ model Quiz {
 
   bunnyVideo   BunnyVideo    @relation(fields: [bunnyVideoId], references: [id], onDelete: Cascade)
   attempts     QuizAttempt[]
+  aiReviewMode AiReviewMode  @default(AUTO)
 
   @@index([bunnyVideoId])
 }
@@ -299,30 +300,47 @@ enum QuizAttemptStatus {
 // (@@unique) + human-review surface (confidence/applied). Attempt delete
 // cascades (attempt rows vanish on quiz delete/reset by design).
 model AiGradingJob {
-  id           Int                @id @default(autoincrement())
-  attemptId    Int
-  questionName String             // qName within the quiz's answerKey
-  status       AiGradingJobStatus @default(PENDING)
-  tries        Int                @default(0)
-  maxTries     Int                @default(3)
-  confidence   Float?             // verdict confidence 0..1 (null until graded)
-  applied      Boolean            @default(false) // verdict auto-finalized into the attempt
-  verdict      Json?              // validated verdict {score,maxScore,confidence,feedback,reasoning?,model,promptVersion}
-  error        String?            @db.Text
-  claimedAt    DateTime?
-  createdAt    DateTime           @default(now())
-  updatedAt    DateTime           @updatedAt
+  id                Int                @id @default(autoincrement())
+  attemptId         Int
+  questionName      String             // qName within the quiz's answerKey
+  status            AiGradingJobStatus @default(PENDING)
+  reason            String?            // NEEDS_REVIEW reason code (e.g. LOW_CONFIDENCE, AI_FAILED)
+  tries             Int                @default(0)
+  maxTries          Int                @default(3)
+  confidence        Float?             // verdict confidence 0..1 (null until graded)
+  applied           Boolean            @default(false) // verdict auto-finalized into the attempt
+  verdict           Json?              // validated verdict {score,maxScore,confidence,feedback,reasoning?,model,promptVersion}
+  error             String?            @db.Text
+  claimedAt         DateTime?
+  leaseUntil        DateTime?          // worker lease expiry (RUNNING state)
+  nextRunAt         DateTime?          // earliest time to pick up (PENDING backoff)
+  appliedAt         DateTime?          // when verdict was written to attempt
+  inputHash         String?            // SHA-256 of normalized inputs for verdict cache
+  criteriaBreakdown Json?              // per-criterion {id, awarded, evidence} when structured rubric used
+  tokensIn          Int?               // input tokens consumed
+  tokensOut         Int?               // output tokens consumed
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
 
-  attempt      QuizAttempt        @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  attempt           QuizAttempt        @relation(fields: [attemptId], references: [id], onDelete: Cascade)
 
   @@unique([attemptId, questionName])
   @@index([status])
+  @@index([status, nextRunAt])
+  @@index([inputHash])
 }
 
 enum AiGradingJobStatus {
   PENDING
-  DONE
-  FAILED
+  RUNNING
+  DONE_APPLIED
+  SYSTEM_GRADED
+  NEEDS_REVIEW
+}
+
+enum AiReviewMode {
+  AUTO
+  REVIEW_REQUIRED
 }
 
 // Admin-granted bypass for the sequential quiz gate (force-advance a student past a quiz)

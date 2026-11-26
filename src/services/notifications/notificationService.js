@@ -17,6 +17,7 @@ const NOTIFICATION_TYPES = {
   QUIZ_GRADED: 'QUIZ_GRADED',
   VIDEO_READY: 'VIDEO_READY',
   ADMIN_BROADCAST: 'ADMIN_BROADCAST',
+  AI_GRADING_ALERT: 'AI_GRADING_ALERT',
 };
 
 const TITLE_MAX = 200;
@@ -290,6 +291,36 @@ async function notifyVideoReady(videoId) {
   }
 }
 
+const AI_ALERT_TITLES = {
+  ORPHAN_DETECTED: 'أسئلة عالقة بدون تصحيح',
+  BUDGET_WARNING: 'ميزانية التصحيح قاربت على النفاد',
+  HIGH_FAILURE_RATE: 'نسبة فشل التصحيح مرتفعة',
+  QUEUE_DEPTH_HIGH: 'طابور التصحيح ممتلئ',
+};
+
+async function notifyAiGradingAlert(alertType, details) {
+  try {
+    if (!moduleOn()) return 0;
+    const admins = await prisma.user.findMany({
+      where: { role: 'ADMIN' },
+      select: { id: true },
+    });
+    if (admins.length === 0) return 0;
+    const res = await createForUsers({
+      userIds: admins.map((a) => a.id),
+      type: NOTIFICATION_TYPES.AI_GRADING_ALERT,
+      title: AI_ALERT_TITLES[alertType] || 'تنبيه تصحيح AI',
+      body: String(details || '').slice(0, BODY_MAX),
+      linkUrl: '/admin/ai-grading',
+      metadata: { alertType },
+    });
+    return res.count;
+  } catch (err) {
+    console.warn('[WARN] notifyAiGradingAlert failed', { alertType, error: String((err && err.message) || err).slice(0, 300) });
+    return 0;
+  }
+}
+
 module.exports = {
   NOTIFICATION_TYPES,
   validateLinkUrl,
@@ -301,4 +332,5 @@ module.exports = {
   markAllRead,
   notifyQuizGraded,
   notifyVideoReady,
+  notifyAiGradingAlert,
 };

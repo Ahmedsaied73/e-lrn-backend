@@ -560,6 +560,7 @@ process.on('unhandledRejection', (reason) => {
 let server = null;
 let reconciliationTask = null; // node-cron task handle (stopped on shutdown)
 let paymentReconciliationTask = null; // payments cron handle (only when enabled)
+let aiGradingReconciliationTask = null; // AI grading cron handle (only when enabled)
 let agentRetentionTask = null; // agent transcript retention cron handle
 let agentMemoryRetentionTask = null; // agent memory retention cron handle (Phase 7)
 let softDeletePurgeTask = null; // soft-delete purge cron handle (Phase 8)
@@ -700,7 +701,15 @@ function shutdown(signal) {
 
   // Payments cron is only present when the module was enabled at boot.
   try {
-    if (paymentReconciliationTask) {
+    if (aiGradingReconciliationTask) {
+    try {
+      require('./src/jobs/reconcileAiGrading').stopAiGradingReconciliationJob(aiGradingReconciliationTask);
+      aiGradingReconciliationTask = null;
+    } catch (err) {
+      console.warn('[WARN] AI grading reconciliation cron stop failed:', err.message);
+    }
+  }
+  if (paymentReconciliationTask) {
       require('./src/jobs/reconcilePayments').stopPaymentReconciliationJob(paymentReconciliationTask);
       paymentReconciliationTask = null;
     }

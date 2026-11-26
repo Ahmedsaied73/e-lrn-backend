@@ -665,30 +665,126 @@ async function finalizeStaleAttempt(attempt, quiz, db = prisma) {
   const scorePercent = computeScorePercent(mcqEarned, totalPoints);
   const newStatus = hasEssays ? STATUS.GRADING : STATUS.GRADED;
 
-  const updated = await db.quizAttempt.update({
-    where: { id: attempt.id },
-    data: {
-      status: newStatus,
-      submittedAt: new Date(),
-      autoSubmitted: true,
-      responses,
-      mcqEarned,
-      essayEarned: hasEssays ? 0 : null,
-      totalPoints,
-      earnedPoints,
-      scorePercent,
-    },
+  const updated = await db.$transaction(async (tx) => {
+    const row = await tx.quizAttempt.update({
+      where: { id: attempt.id },
+      data: {
+        status: newStatus,
+        submittedAt: new Date(),
+        autoSubmitted: true,
+        responses,
+        mcqEarned,
+        essayEarned: hasEssays ? 0 : null,
+        totalPoints,
+        earnedPoints,
+        scorePercent,
+      },
+    });
+    if (hasEssays) {
+      const outbox = await createEssayOutboxAndFinalizeIfTerminal(tx, {
+        attemptId: row.id,
+        answerKey,
+        responses,
+        mcqEarned,
+        totalPoints,
+      });
+      if (outbox.finalized) {
+        row.status = STATUS.GRADED;
+      }
+    }
+    return row;
   });
 
   // Fire-and-forget AI grading for AI-enabled essays. Never throws — a queue
-  // failure just leaves the attempt for the human inbox.
-  if (newStatus === STATUS.GRADING) {
+  // failure just leaves the attempt for the human inbox / reconciler.
+  if (updated.status === STATUS.GRADING) {
     enqueueAiGradingSafe(updated.id);
   } else {
     notifyGradedSafe(updated.id);
   }
 
   return updated;
+}
+
+/**
+ * FR-1/FR-2/FR-3: Create durable AiGradingJob outbox rows inside the submit
+ * transaction. Empty answers are SYSTEM_GRADED (0) immediately; non-AI essays
+ * go to NEEDS_REVIEW(NOT_AI_ENABLED); AI-enabled essays start PENDING.
+ * If every essay is SYSTEM_GRADED, finalizes the attempt to GRADED immediately.
+ */
+async function createEssayOutboxAndFinalizeIfTerminal(tx, { attemptId, answerKey, responses, mcqEarned, totalPoints }) {
+  const now = new Date();
+  const jobRows = [];
+  const feedbackRecord = {};
+
+  for (const [qName, entry] of Object.entries(answerKey)) {
+    if (!entry || entry.type !== 'comment') continue;
+    const answer = responses[qName];
+    const isEmpty = typeof answer !== 'string' || !answer.trim();
+    const aiEnabled = Boolean(entry.ai && entry.ai.enabled === true);
+
+    if (isEmpty) {
+      jobRows.push({
+        attemptId,
+        questionName: qName,
+        status: 'SYSTEM_GRADED',
+        reason: null,
+        applied: true,
+        appliedAt: now,
+        verdict: { score: 0, maxScore: entry.points, feedback: null, gradedBy: 'system' },
+      });
+      feedbackRecord[qName] = {
+        awarded: 0,
+        max: entry.points,
+        feedback: null,
+        gradedBy: 'system',
+        gradedAt: now.toISOString(),
+      };
+    } else if (!aiEnabled) {
+      jobRows.push({
+        attemptId,
+        questionName: qName,
+        status: 'NEEDS_REVIEW',
+        reason: 'NOT_AI_ENABLED',
+      });
+    } else {
+      jobRows.push({
+        attemptId,
+        questionName: qName,
+        status: 'PENDING',
+        nextRunAt: now,
+      });
+    }
+  }
+
+  if (jobRows.length > 0) {
+    await tx.aiGradingJob.createMany({ data: jobRows, skipDuplicates: true });
+  }
+
+  const allSystemGraded = jobRows.length > 0 && jobRows.every((r) => r.status === 'SYSTEM_GRADED');
+  if (allSystemGraded) {
+    await tx.quizAttempt.update({
+      where: { id: attemptId },
+      data: {
+        status: STATUS.GRADED,
+        essayEarned: 0,
+        earnedPoints: mcqEarned,
+        scorePercent: computeScorePercent(mcqEarned, totalPoints),
+        essayFeedback: feedbackRecord,
+        essayGradedAt: now,
+      },
+    });
+    return { finalized: true };
+  }
+
+  if (Object.keys(feedbackRecord).length > 0) {
+    await tx.quizAttempt.update({
+      where: { id: attemptId },
+      data: { essayFeedback: feedbackRecord },
+    });
+  }
+
+  return { finalized: false };
 }
 
 /**
@@ -1001,23 +1097,39 @@ async function submitAttempt(userId, attemptId, responses, autoSubmitted = false
 
   // Conditional write: only an IN_PROGRESS attempt may finalize. Concurrent
   // double-submits race here instead of check-then-act — the loser gets 409.
-  const applied = await prisma.quizAttempt.updateMany({
-    where: { id: attemptId, status: STATUS.IN_PROGRESS },
-    data: {
-      status: newStatus,
-      submittedAt: new Date(),
-      autoSubmitted,
-      responses,
-      ...(sanitizedMeta !== undefined ? { essayMeta: sanitizedMeta } : {}),
-      mcqEarned,
-      essayEarned: hasEssays ? 0 : null,
-      totalPoints,
-      earnedPoints,
-      scorePercent,
-    },
+  const txResult = await prisma.$transaction(async (tx) => {
+    const applied = await tx.quizAttempt.updateMany({
+      where: { id: attemptId, status: STATUS.IN_PROGRESS },
+      data: {
+        status: newStatus,
+        submittedAt: new Date(),
+        autoSubmitted,
+        responses,
+        ...(sanitizedMeta !== undefined ? { essayMeta: sanitizedMeta } : {}),
+        mcqEarned,
+        essayEarned: hasEssays ? 0 : null,
+        totalPoints,
+        earnedPoints,
+        scorePercent,
+      },
+    });
+
+    if (applied.count === 0) return { count: 0 };
+
+    if (hasEssays) {
+      await createEssayOutboxAndFinalizeIfTerminal(tx, {
+        attemptId,
+        answerKey,
+        responses,
+        mcqEarned,
+        totalPoints,
+      });
+    }
+
+    return { count: 1 };
   });
 
-  if (applied.count === 0) {
+  if (txResult.count === 0) {
     const current = await prisma.quizAttempt.findUnique({
       where: { id: attemptId },
       select: { status: true },
@@ -1031,11 +1143,11 @@ async function submitAttempt(userId, attemptId, responses, autoSubmitted = false
   const updated = await prisma.quizAttempt.findUnique({ where: { id: attemptId } });
 
   // Fire-and-forget AI grading for AI-enabled essays. Never throws — a queue
-  // failure just leaves the attempt for the human inbox.
-  if (newStatus === STATUS.GRADING) {
+  // failure just leaves the attempt for the human inbox / reconciler.
+  if (updated.status === STATUS.GRADING) {
     enqueueAiGradingSafe(updated.id);
   } else {
-    // MCQ-only submit finalized immediately — tell the student.
+    // MCQ-only or all-empty-essay submit finalized immediately — tell the student.
     notifyGradedSafe(updated.id);
   }
 
@@ -1125,16 +1237,17 @@ async function gradeEssayAttempt(adminId, attemptId, essayScores, essayFeedbackM
 
     // Q-5: essay set comes from the frozen start-time key.
     const answerKey = resolveAttemptKey(attempt);
-    let essayEarned = 0;
-    const feedbackRecord = {};
 
-    // Refuse partial grading: every essay in the key must be scored, otherwise
-    // ungraded essays would silently bank 0 and finalize. (AI verdicts arrive
-    // per-question via applyAiVerdict instead, which finalizes only when whole.)
+    // FR-8: Only require scores for essays that don't already have a grade
+    // (preserves existing AI/system grades and their attribution).
+    const existingFeedback = attempt.essayFeedback || {};
     const essayNames = Object.entries(answerKey)
       .filter(([, e]) => e && e.type === 'comment')
       .map(([n]) => n);
-    const missing = essayNames.filter((n) => essayScores[n] === undefined);
+    const needsGrade = essayNames.filter(
+      (n) => !existingFeedback[n] || typeof existingFeedback[n].awarded !== 'number'
+    );
+    const missing = needsGrade.filter((n) => essayScores[n] === undefined);
     if (missing.length > 0) {
       throw Object.assign(
         new Error(`Missing scores for essay questions: ${missing.join(', ')}`),
@@ -1142,19 +1255,29 @@ async function gradeEssayAttempt(adminId, attemptId, essayScores, essayFeedbackM
       );
     }
 
+    const feedbackRecord = { ...existingFeedback };
     for (const [qName, awardedPts] of Object.entries(essayScores)) {
       const keyEntry = answerKey[qName];
       if (!keyEntry || keyEntry.type !== 'comment') continue;
-      const pts = Math.min(Math.max(0, Number(awardedPts)), keyEntry.points); // clamp 0..max
+      const pts = Math.min(Math.max(0, Number(awardedPts)), keyEntry.points);
       if (!Number.isFinite(pts)) {
         throw Object.assign(new Error(`Score for "${qName}" must be a number`), { statusCode: 422 });
       }
-      essayEarned += pts;
       feedbackRecord[qName] = {
         awarded: pts,
         max: keyEntry.points,
         feedback: essayFeedbackMap[qName] || null,
+        gradedBy: 'human',
+        gradedByAdminId: adminId,
+        gradedAt: new Date().toISOString(),
       };
+    }
+
+    let essayEarned = 0;
+    for (const n of essayNames) {
+      if (feedbackRecord[n] && typeof feedbackRecord[n].awarded === 'number') {
+        essayEarned += feedbackRecord[n].awarded;
+      }
     }
 
     const totalPoints = attempt.totalPoints || 0;
