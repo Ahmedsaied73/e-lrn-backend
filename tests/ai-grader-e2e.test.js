@@ -408,4 +408,48 @@ describe('AI Grader Hardening E2E (real Postgres + Redis)', () => {
     assert.equal(refunded.length, 1);
     assert.ok(refunded[0] > 0);
   });
+
+  it('9. Refunds the full reservation exactly once when the provider fails', async () => {
+    const attempt = await prisma.quizAttempt.create({
+      data: {
+        quizId: quiz.id,
+        userId: user.id,
+        attemptNumber: 9,
+        status: 'GRADING',
+        submittedAt: new Date(),
+        responses: { q_ai: 'Plants use sunlight to make glucose.' },
+        quizSnapshot: { surveyJson: quiz.surveyJson, answerKey: quiz.answerKey },
+      },
+    });
+    createdAttemptIds.push(attempt.id);
+
+    await prisma.aiGradingJob.create({
+      data: {
+        attemptId: attempt.id,
+        questionName: 'q_ai',
+        status: 'PENDING',
+        nextRunAt: new Date(),
+        tries: 3,
+        maxTries: 3,
+      },
+    });
+
+    const refunded = [];
+    const provider = createMockProvider([new Error('provider unavailable')]);
+    const result = await processGradingJob(
+      { data: { attemptId: attempt.id, questionName: 'q_ai' } },
+      () => provider,
+      { budget: { check: async () => true, refund: async (n) => refunded.push(n) } }
+    );
+
+    assert.equal(result.escalated, true);
+    assert.equal(result.reason, 'AI_FAILED');
+    assert.equal(refunded.length, 1);
+    assert.ok(refunded[0] > 0);
+
+    const job = await prisma.aiGradingJob.findUnique({
+      where: { attemptId_questionName: { attemptId: attempt.id, questionName: 'q_ai' } },
+    });
+    assert.equal(job.status, 'NEEDS_REVIEW');
+  });
 });

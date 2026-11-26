@@ -72,6 +72,17 @@ end
 return count
 `;
 
+// Refund at most what is actually reserved: an earlier failed check may not
+// have counted anything, and DECRBY alone could drive the key negative.
+const BUDGET_REFUND_LUA = `
+local current = tonumber(redis.call('get', KEYS[1]) or '0')
+if current <= 0 then
+  return 0
+end
+local amount = math.min(current, tonumber(ARGV[1]))
+return redis.call('decrby', KEYS[1], amount)
+`;
+
 async function checkBudget(tokens = 1000, deps = {}) {
   const n = Number.isSafeInteger(tokens) && tokens > 0 ? tokens : 1000;
   const redis = deps.redis || require('../../integrations/redis/redisClient');
@@ -106,7 +117,7 @@ async function refundBudget(tokens, deps = {}) {
     const redis = deps.redis || require('../../integrations/redis/redisClient');
     const client = redis.getRedis();
     if (!client || client.status !== 'ready') return;
-    await client.decrby(budgetKey(), tokens);
+    await client.eval(BUDGET_REFUND_LUA, 1, budgetKey(), tokens);
   } catch {
     // non-fatal — the reserve has a 24h TTL and the reconciler will defer work
   }
@@ -190,23 +201,11 @@ async function applyOrEscalate({ attempt, attemptId, questionName, entry, verdic
     return { applied: false, reason: reviewPolicy.reason, confidence: verdict.confidence };
   }
 
-  // FR-7: verdict storage, attempt grade and job completion are ONE
-  // transaction — a failure anywhere rolls all three back to RUNNING.
+  // FR-7: attempt lock, grade, verdict storage and job completion are ONE
+  // transaction — a failure anywhere rolls all three back to RUNNING. Lock
+  // order matches the reconciler (QuizAttempt first, then AiGradingJob).
   const quizService = require('../quizService');
   const applied = await prisma.$transaction(async (tx) => {
-    await tx.aiGradingJob.update({
-      where: { attemptId_questionName: { attemptId, questionName } },
-      data: {
-        confidence: verdict.confidence,
-        verdict: { ...verdict },
-        criteriaBreakdown: verdict.criteriaBreakdown || null,
-        inputHash,
-        tokensIn,
-        tokensOut,
-        error: null,
-      },
-    });
-
     const result = await quizService.applyAiVerdictInTx(tx, attemptId, questionName, {
       awarded: verdict.score,
       max: entry.points,
@@ -218,7 +217,19 @@ async function applyOrEscalate({ attempt, attemptId, questionName, entry, verdic
 
     await tx.aiGradingJob.update({
       where: { attemptId_questionName: { attemptId, questionName } },
-      data: { status: 'DONE_APPLIED', applied: true, appliedAt: new Date(), leaseUntil: null },
+      data: {
+        status: 'DONE_APPLIED',
+        applied: true,
+        appliedAt: new Date(),
+        leaseUntil: null,
+        confidence: verdict.confidence,
+        verdict: { ...verdict },
+        criteriaBreakdown: verdict.criteriaBreakdown || null,
+        inputHash,
+        tokensIn,
+        tokensOut,
+        error: null,
+      },
     });
     return result;
   });
@@ -385,6 +396,10 @@ async function processGradingJob(job, providerFactory = defaultProviderFactory, 
       { model: provider.name, timeoutMs: aiCfg.timeoutMs }
     );
   } catch (err) {
+    // Every failure branch below returns or throws before the success-path
+    // refund, so give back the whole reservation exactly once here.
+    await budget.refund(estimatedTokens);
+
     const actualRow = await prisma.aiGradingJob.findUnique({
       where: { attemptId_questionName: { attemptId, questionName } },
       select: { tries: true, maxTries: true },
