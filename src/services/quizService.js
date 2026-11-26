@@ -1314,18 +1314,15 @@ async function gradeEssayAttempt(adminId, attemptId, essayScores, essayFeedbackM
 }
 
 /**
- * Apply one AI essay verdict to a GRADING attempt (called by the AI worker).
- * Merges into essayFeedback with AI attribution; finalizes to GRADED only when
- * EVERY essay question in the answer key now carries a numeric score (human
- * grades, applied via gradeEssayAttempt, always count — human wins ties).
- * Never overwrites an existing numeric score. Returns { finalized }.
- */
-/**
- * Transaction-local seam. Same row lock as gradeEssayAttempt: concurrent AI
- * verdicts (worker concurrency 2) or a racing human grade must not
- * read-modify-write essayFeedback over each other and drop a verdict.
- * The caller owns the transaction so the verdict row, attempt grade, and job
- * state can commit — or roll back — together.
+ * Transaction-local seam. Apply one AI essay verdict to a GRADING attempt:
+ * merge into essayFeedback with AI attribution, never overwrite an existing
+ * numeric score (human grades, applied via gradeEssayAttempt, win ties), and
+ * finalize to GRADED only when EVERY essay has a numeric score.
+ * Same row lock as gradeEssayAttempt: concurrent AI verdicts (worker
+ * concurrency 2) or a racing human grade must not read-modify-write
+ * essayFeedback over each other and drop a verdict. The caller owns the
+ * transaction so the verdict row, attempt grade, and job state commit — or
+ * roll back — together. Returns { finalized, userId? } or a skip reason.
  */
 async function applyAiVerdictInTx(tx, attemptId, qName, verdict) {
   await tx.$queryRaw`SELECT id FROM "QuizAttempt" WHERE id = ${attemptId} FOR UPDATE`;
