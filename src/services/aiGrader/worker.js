@@ -87,27 +87,34 @@ async function checkBudget(tokens = 1000, deps = {}) {
   const n = Number.isSafeInteger(tokens) && tokens > 0 ? tokens : 1000;
   const redis = deps.redis || require('../../integrations/redis/redisClient');
   try {
-    await redis.ensureConnected(3000).catch(() => false);
+    const connected = await redis.ensureConnected(3000).catch(() => false);
     const client = redis.getRedis();
-    if (!client || client.status !== 'ready') {
+    if (connected === false || !client || client.status !== 'ready') {
       logWarn('ai.budget.unavailable', { reason: 'redis-not-ready' });
-      return false;
+      return { allowed: false, reserved: 0 };
     }
     const key = budgetKey();
     const count = Number(await client.eval(BUDGET_RESERVE_LUA, 1, key, n));
+    if (!Number.isSafeInteger(count) || count < n) {
+      // The reply cannot be trusted, so do not claim a reservation the caller
+      // might refund against an unrelated counter. Counts only — no content.
+      logWarn('ai.budget.invalid_reply', { expectedMinimum: n, budget: dailyTokenBudget() });
+      return { allowed: false, reserved: 0 };
+    }
     const used = count - n;
     const limit = dailyTokenBudget();
     if (used >= limit) {
       logWarn('ai.budget.exhausted', { used, budget: limit });
-      return false;
+      // The eval ran and reserved n even though this call is denied.
+      return { allowed: false, reserved: n };
     }
     if (limit > 0 && count / limit >= 0.8) {
       logWarn('ai.budget.warning_80pct', { used: count, budget: limit });
     }
-    return true;
+    return { allowed: true, reserved: n };
   } catch (err) {
     logWarn('ai.budget.check_failed', { error: err.message });
-    return false;
+    return { allowed: false, reserved: 0 };
   }
 }
 
@@ -215,8 +222,8 @@ async function applyOrEscalate({ attempt, attemptId, questionName, entry, verdic
       promptVersion: verdict.promptVersion,
     });
 
-    await tx.aiGradingJob.update({
-      where: { attemptId_questionName: { attemptId, questionName } },
+    const completed = await tx.aiGradingJob.updateMany({
+      where: { attemptId, questionName, status: 'RUNNING' },
       data: {
         status: 'DONE_APPLIED',
         applied: true,
@@ -231,6 +238,11 @@ async function applyOrEscalate({ attempt, attemptId, questionName, entry, verdic
         error: null,
       },
     });
+    if (completed.count !== 1) {
+      // A reset/reclaim worker changed the job; roll the verdict back so the
+      // reclaimed job can be retried instead of being silently overwritten.
+      throw new Error(`AiGradingJob ${attemptId}/${questionName} is no longer RUNNING`);
+    }
     return result;
   });
 
@@ -369,12 +381,16 @@ async function processGradingJob(job, providerFactory = defaultProviderFactory, 
 
   // FR-5: Token budget reserve
   const estimatedTokens = Math.ceil((convertedStudent.length + convertedModel.length) / 2) + 500;
-  if (!(await budget.check(estimatedTokens))) {
-    await budget.refund(estimatedTokens); // deferred before any model call — give the whole reserve back
+  const budgetResult = await budget.check(estimatedTokens);
+  if (!budgetResult.allowed) {
+    // Refund only what was really reserved: a not-ready/throw check consumed
+    // nothing, while the exhausted branch reserved before denying us.
+    if (budgetResult.reserved) await budget.refund(budgetResult.reserved);
     await markJob(attemptId, questionName, {
       status: 'PENDING',
       nextRunAt: nextBudgetReset(),
       leaseUntil: null,
+      tries: { decrement: 1 }, // the deferral is not a grader attempt
     });
     return { skipped: 'budget-deferred' };
   }

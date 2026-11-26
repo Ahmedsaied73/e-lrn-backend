@@ -5,15 +5,15 @@ const assert = require('node:assert/strict');
 const { checkBudget, refundBudget } = require('../src/services/aiGrader/worker');
 
 describe('ai grader token budget', () => {
-  it('fails closed when Redis is not ready', async () => {
+  it('fails closed without reserving when Redis is not ready', async () => {
     const redis = {
       ensureConnected: async () => false,
       getRedis: () => ({ status: 'end' }),
     };
-    assert.equal(await checkBudget(100, { redis }), false);
+    assert.deepEqual(await checkBudget(100, { redis }), { allowed: false, reserved: 0 });
   });
 
-  it('fails closed when the reservation command throws', async () => {
+  it('fails closed without reserving when the reservation command throws', async () => {
     const redis = {
       ensureConnected: async () => false,
       getRedis: () => ({
@@ -21,7 +21,32 @@ describe('ai grader token budget', () => {
         eval: async () => { throw new Error('redis timeout'); },
       }),
     };
-    assert.equal(await checkBudget(100, { redis }), false);
+    assert.deepEqual(await checkBudget(100, { redis }), { allowed: false, reserved: 0 });
+  });
+
+  it('reports a reservation on both allowed and exhausted outcomes', async () => {
+    const previous = process.env.AI_GRADER_DAILY_TOKEN_BUDGET;
+    process.env.AI_GRADER_DAILY_TOKEN_BUDGET = '100';
+    try {
+      for (const [reply, allowed] of [[100, true], [200, false]]) {
+        const redis = {
+          ensureConnected: async () => true,
+          getRedis: () => ({ status: 'ready', eval: async () => reply }),
+        };
+        assert.deepEqual(await checkBudget(100, { redis }), { allowed, reserved: 100 });
+      }
+    } finally {
+      if (previous === undefined) delete process.env.AI_GRADER_DAILY_TOKEN_BUDGET;
+      else process.env.AI_GRADER_DAILY_TOKEN_BUDGET = previous;
+    }
+  });
+
+  it('does not report a reservation on a malformed Redis reply', async () => {
+    const redis = {
+      ensureConnected: async () => true,
+      getRedis: () => ({ status: 'ready', eval: async () => 'not-a-number' }),
+    };
+    assert.deepEqual(await checkBudget(100, { redis }), { allowed: false, reserved: 0 });
   });
 
   it('refunds through the injected store', async () => {
