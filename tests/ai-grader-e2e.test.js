@@ -270,7 +270,7 @@ describe('AI Grader Hardening E2E (real Postgres + Redis)', () => {
       },
     });
 
-    const summary = await reconcileAiGrading();
+    const summary = await reconcileAiGrading({ attemptIds: [attempt3.id] });
     assert.ok(summary.expiredLeases >= 1);
     assert.ok(summary.exhausted >= 1);
 
@@ -401,12 +401,25 @@ describe('AI Grader Hardening E2E (real Postgres + Redis)', () => {
     const result = await processGradingJob(
       { data: { attemptId: attempt.id, questionName: 'q_ai' } },
       () => provider,
-      { budget: { check: async () => false, refund: async (n) => refunded.push(n) } }
+      {
+        budget: {
+          check: async (n) => ({ allowed: false, reserved: n }),
+          refund: async (n) => refunded.push(n),
+        },
+      }
     );
 
     assert.equal(result.skipped, 'budget-deferred');
     assert.equal(refunded.length, 1);
     assert.ok(refunded[0] > 0);
+
+    const job = await prisma.aiGradingJob.findUnique({
+      where: { attemptId_questionName: { attemptId: attempt.id, questionName: 'q_ai' } },
+    });
+    assert.equal(job.status, 'PENDING');
+    assert.equal(job.tries, 0); // a deferral must not consume a retry
+    assert.ok(job.nextRunAt);
+    assert.equal(provider.calls, 0);
   });
 
   it('9. Refunds the full reservation exactly once when the provider fails', async () => {
@@ -439,7 +452,12 @@ describe('AI Grader Hardening E2E (real Postgres + Redis)', () => {
     const result = await processGradingJob(
       { data: { attemptId: attempt.id, questionName: 'q_ai' } },
       () => provider,
-      { budget: { check: async () => true, refund: async (n) => refunded.push(n) } }
+      {
+        budget: {
+          check: async (n) => ({ allowed: true, reserved: n }),
+          refund: async (n) => refunded.push(n),
+        },
+      }
     );
 
     assert.equal(result.escalated, true);
@@ -451,5 +469,53 @@ describe('AI Grader Hardening E2E (real Postgres + Redis)', () => {
       where: { attemptId_questionName: { attemptId: attempt.id, questionName: 'q_ai' } },
     });
     assert.equal(job.status, 'NEEDS_REVIEW');
+  });
+
+  it('10. Rolls back when the job is reclaimed before verdict storage', async () => {
+    const { mock } = require('node:test');
+    const quizService = require('../src/services/quizService');
+
+    const attempt = await prisma.quizAttempt.create({
+      data: {
+        quizId: quiz.id,
+        userId: user.id,
+        attemptNumber: 10,
+        status: 'GRADING',
+        submittedAt: new Date(),
+        responses: { q_ai: 'Plants use sunlight to make glucose.' },
+        quizSnapshot: { surveyJson: quiz.surveyJson, answerKey: quiz.answerKey },
+      },
+    });
+    createdAttemptIds.push(attempt.id);
+
+    await prisma.aiGradingJob.create({
+      data: { attemptId: attempt.id, questionName: 'q_ai', status: 'PENDING', nextRunAt: new Date() },
+    });
+
+    const provider = createMockProvider([
+      { score: 9, maxScore: 10, confidence: 0.95, feedback: 'Clear answer.' },
+    ]);
+    const verdictMock = mock.method(quizService, 'applyAiVerdictInTx', async (tx) => {
+      // Simulate a reset worker reclaiming the job while the verdict is applied.
+      await tx.aiGradingJob.update({
+        where: { attemptId_questionName: { attemptId: attempt.id, questionName: 'q_ai' } },
+        data: { status: 'PENDING' },
+      });
+      return { finalized: false };
+    });
+
+    try {
+      await assert.rejects(
+        () => processGradingJob({ data: { attemptId: attempt.id, questionName: 'q_ai' } }, () => provider)
+      );
+    } finally {
+      verdictMock.mock.restore();
+    }
+
+    const job = await prisma.aiGradingJob.findUnique({
+      where: { attemptId_questionName: { attemptId: attempt.id, questionName: 'q_ai' } },
+    });
+    assert.equal(job.status, 'RUNNING'); // the simulated reset is rolled back too
+    assert.equal(job.verdict, null);
   });
 });
