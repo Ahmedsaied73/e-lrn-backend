@@ -72,7 +72,10 @@ function baseStubs(t, {
     if (captured) captured.executeRaw = { strings, values };
     return executeRawImpl ? executeRawImpl(strings, values) : 0;
   });
-  stub(t, prisma, '$queryRaw', async () => []);
+  stub(t, prisma, '$queryRaw', async () => {
+    if (captured) captured.queryRawCalls = (captured.queryRawCalls || 0) + 1;
+    return [];
+  });
 }
 
 function whereScopes(captured) {
@@ -229,9 +232,10 @@ describe('ai reconciler attempt scoping and budget deferrals', () => {
       captured,
       executeRawImpl(strings, values) {
         const sqlText = `${strings.join(' ')} ${values.map((v) => (v && v.text) || '').join(' ')}`;
-        assert.match(sqlText, /"nextRunAt" IS NULL OR "nextRunAt" <= NOW\(\)/);
+        assert.match(sqlText, /"nextRunAt" IS NULL OR "nextRunAt" <=/);
+        assert.ok(values[0] instanceof Date, 'the deferral guard must use the tick clock, not DB NOW()');
         // Emulate Postgres applying the WHERE clause to the deferred job.
-        const guardPresent = sqlText.includes('"nextRunAt" IS NULL OR "nextRunAt" <= NOW()');
+        const guardPresent = sqlText.includes('"nextRunAt" IS NULL OR "nextRunAt" <=');
         const future = deferred.nextRunAt && deferred.nextRunAt.getTime() > Date.now();
         const matches = deferred.status === 'PENDING'
           && deferred.tries >= deferred.maxTries
@@ -243,6 +247,19 @@ describe('ai reconciler attempt scoping and budget deferrals', () => {
     const summary = await reconcileAiGrading();
 
     assert.equal(summary.exhausted, 0, 'a budget-deferred job must not be escalated to NEEDS_REVIEW');
+  });
+
+  it('skips orphan detection for scoped ticks, keeps it for the cron tick', async (t) => {
+    const captured = {};
+    baseStubs(t, { captured });
+
+    const scopedSummary = await reconcileAiGrading({ attemptIds: [101] });
+    assert.equal(captured.queryRawCalls || 0, 0, 'a scoped tick must not run the global orphan query');
+    assert.equal(scopedSummary.orphans, 0);
+
+    const globalSummary = await reconcileAiGrading();
+    assert.equal(captured.queryRawCalls, 1, 'the cron tick must still detect orphans');
+    assert.equal(globalSummary.orphans, 0);
   });
 });
 

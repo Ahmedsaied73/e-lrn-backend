@@ -8,9 +8,10 @@
  *   1. Reset expired RUNNING leases (leaseUntil < now) back to PENDING
  *   2. Escalate exhausted PENDING jobs (tries >= maxTries) to NEEDS_REVIEW(AI_FAILED)
  *   3. Re-enqueue stale PENDING jobs (nextRunAt < now - 15m) to BullMQ
- *   4. Retry applying stored verdicts that aren't DONE_APPLIED yet (FR-7)
- *   5. Finalize any GRADING attempt whose jobs are all DONE_APPLIED / SYSTEM_GRADED
- *   6. Alert on orphan GRADING attempts (>15m with no live PENDING/RUNNING/NEEDS_REVIEW job)
+ *   4. Retry applying stored verdicts that aren't DONE_APPLIED yet (FR-7);
+ *      finalizing a GRADING attempt happens inside the verdict transaction
+ *   5. Detect orphan GRADING attempts (>15m, no live PENDING/RUNNING/NEEDS_REVIEW
+ *      job) and alert admins — a read-only SELECT, skipped for scoped ticks
  */
 
 const cron = require('node-cron');
@@ -91,7 +92,7 @@ async function reconcileAiGrading({ attemptIds } = {}) {
     UPDATE "AiGradingJob"
     SET status = 'NEEDS_REVIEW', reason = 'AI_FAILED', "leaseUntil" = NULL, "updatedAt" = NOW()
     WHERE status = 'PENDING' AND tries >= "maxTries"
-      AND ("nextRunAt" IS NULL OR "nextRunAt" <= NOW())
+      AND ("nextRunAt" IS NULL OR "nextRunAt" <= ${now})
       ${attemptFilter}
   `;
 
@@ -180,19 +181,24 @@ async function reconcileAiGrading({ attemptIds } = {}) {
     }
   }
 
-  // 5. Orphan detection (FR-9): GRADING attempts >15m old with NO live/review jobs
-  const orphanAttempts = await prisma.$queryRaw`
-    SELECT qa.id
-    FROM "QuizAttempt" qa
-    WHERE qa.status = 'GRADING'
-      AND qa."submittedAt" < ${staleCutoff}
-      AND NOT EXISTS (
-        SELECT 1 FROM "AiGradingJob" j
-        WHERE j."attemptId" = qa.id
-          AND j.status IN ('PENDING', 'RUNNING', 'NEEDS_REVIEW')
-      )
-    LIMIT 50
-  `;
+  // 5. Orphan detection (FR-9): GRADING attempts >15m old with NO live/review jobs.
+  //    The SELECT is global, but the alert is a side effect: a scoped tick must
+  //    not notify admins about unrelated attempts in a shared DB.
+  let orphanAttempts = [];
+  if (!scoped) {
+    orphanAttempts = await prisma.$queryRaw`
+      SELECT qa.id
+      FROM "QuizAttempt" qa
+      WHERE qa.status = 'GRADING'
+        AND qa."submittedAt" < ${staleCutoff}
+        AND NOT EXISTS (
+          SELECT 1 FROM "AiGradingJob" j
+          WHERE j."attemptId" = qa.id
+            AND j.status IN ('PENDING', 'RUNNING', 'NEEDS_REVIEW')
+        )
+      LIMIT 50
+    `;
+  }
 
   if (orphanAttempts.length > 0) {
     const ids = orphanAttempts.map((r) => r.id);
