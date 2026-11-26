@@ -25,7 +25,7 @@ function stub(t, object, name, implementation) {
   });
 }
 
-function baseStubs(t, { expired = [], stale = [], unapplied = [], events = null } = {}) {
+function baseStubs(t, { expired = [], stale = [], unapplied = [], events = null, captured = null } = {}) {
   const note = (event) => { if (events) events.push(event); };
 
   stub(t, config.features, 'aiGrader', true);
@@ -33,6 +33,7 @@ function baseStubs(t, { expired = [], stale = [], unapplied = [], events = null 
   stub(t, prisma.aiGradingJob, 'findMany', async (args) => {
     if (args.where.status === 'RUNNING') {
       note('expired:findMany');
+      if (captured) captured.expiredFindManyArgs = args;
       return expired;
     }
     if (args.where.verdict !== undefined) {
@@ -43,8 +44,9 @@ function baseStubs(t, { expired = [], stale = [], unapplied = [], events = null 
     return stale;
   });
 
-  stub(t, prisma.aiGradingJob, 'updateMany', async () => {
+  stub(t, prisma.aiGradingJob, 'updateMany', async (args) => {
     note('expired:updateMany');
+    if (captured) captured.updateManyArgs = args;
     return { count: expired.length };
   });
 
@@ -58,7 +60,7 @@ describe('ai reconciler expired leases', () => {
     const events = [];
     const enqueued = [];
     baseStubs(t, {
-      expired: [{ attemptId: 101 }, { attemptId: 102 }],
+      expired: [{ id: 1, attemptId: 101 }, { id: 2, attemptId: 102 }],
       stale: [{ attemptId: 102 }, { attemptId: 103 }],
       events,
     });
@@ -83,6 +85,41 @@ describe('ai reconciler expired leases', () => {
       events.indexOf('expired:findMany') < events.indexOf('expired:updateMany'),
       'expired attempt IDs must be collected before resetting the leases'
     );
+  });
+
+  it('does not reset expired rows beyond the collected page', async (t) => {
+    const captured = {};
+    const enqueued = [];
+    // Rows 1 and 2 are returned by the capped findMany; row 51 is also expired
+    // in the DB but beyond the page, so this tick must leave it RUNNING.
+    const firstPage = [{ id: 1, attemptId: 101 }, { id: 2, attemptId: 102 }];
+    baseStubs(t, { expired: firstPage, captured });
+    stub(t, queue, 'enqueueAiGrading', async (attemptId) => {
+      enqueued.push(attemptId);
+      return 1;
+    });
+
+    const summary = await reconcileAiGrading();
+
+    const findArgs = captured.expiredFindManyArgs;
+    assert.equal(findArgs.select.id, true, 'select must include job id');
+    assert.equal(findArgs.select.attemptId, true);
+    assert.deepEqual(findArgs.distinct, ['attemptId']);
+    assert.equal(findArgs.take, 50);
+
+    const updateArgs = captured.updateManyArgs;
+    assert.ok(updateArgs, 'updateMany must be called');
+    assert.deepEqual(updateArgs.where.id.in, [1, 2]);
+    assert.ok(!updateArgs.where.id.in.includes(51), 'unreturned job 51 must stay RUNNING');
+    assert.equal(updateArgs.where.status, 'RUNNING');
+    assert.ok(updateArgs.where.leaseUntil.lt instanceof Date);
+    assert.equal(updateArgs.data.status, 'PENDING');
+    assert.equal(updateArgs.data.leaseUntil, null);
+    assert.ok(updateArgs.data.nextRunAt instanceof Date);
+
+    assert.deepEqual(enqueued, [101, 102], 'only collected attempts are re-enqueued');
+    assert.equal(summary.expiredLeases, 2);
+    assert.equal(summary.reenqueuedLeases, 2);
   });
 });
 
