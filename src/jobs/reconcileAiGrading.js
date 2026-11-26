@@ -40,15 +40,21 @@ async function reconcileAiGrading() {
   const staleCutoff = new Date(now.getTime() - STALE_MINUTES * 60 * 1000);
 
   // 1. Expired leases: RUNNING with leaseUntil < now -> PENDING.
-  //    Collect attempt IDs first — the reset below makes them ineligible.
+  //    Collect the capped page first — the reset below makes them ineligible.
+  //    Scope the reset to that page: rows beyond it stay RUNNING with an
+  //    expired lease, so a later tick can pick them up and re-enqueue them.
   const expiredRows = await prisma.aiGradingJob.findMany({
     where: { status: 'RUNNING', leaseUntil: { lt: now } },
-    select: { attemptId: true },
+    select: { id: true, attemptId: true },
     distinct: ['attemptId'],
     take: MAX_BATCH,
   });
   const expiredLeases = await prisma.aiGradingJob.updateMany({
-    where: { status: 'RUNNING', leaseUntil: { lt: now } },
+    where: {
+      status: 'RUNNING',
+      leaseUntil: { lt: now },
+      id: { in: expiredRows.map((r) => r.id) },
+    },
     data: { status: 'PENDING', nextRunAt: now, leaseUntil: null },
   });
 
