@@ -16,7 +16,7 @@
 const cron = require('node-cron');
 const prisma = require('../config/db');
 const config = require('../config/env');
-const { acquireLock, releaseLock } = require('../integrations/redis/distributedLock');
+const distributedLock = require('../integrations/redis/distributedLock');
 
 const STALE_MINUTES = 15;
 const MAX_BATCH = 50;
@@ -39,7 +39,14 @@ async function reconcileAiGrading() {
   const now = new Date();
   const staleCutoff = new Date(now.getTime() - STALE_MINUTES * 60 * 1000);
 
-  // 1. Expired leases: RUNNING with leaseUntil < now -> PENDING
+  // 1. Expired leases: RUNNING with leaseUntil < now -> PENDING.
+  //    Collect attempt IDs first — the reset below makes them ineligible.
+  const expiredRows = await prisma.aiGradingJob.findMany({
+    where: { status: 'RUNNING', leaseUntil: { lt: now } },
+    select: { attemptId: true },
+    distinct: ['attemptId'],
+    take: MAX_BATCH,
+  });
   const expiredLeases = await prisma.aiGradingJob.updateMany({
     where: { status: 'RUNNING', leaseUntil: { lt: now } },
     data: { status: 'PENDING', nextRunAt: now, leaseUntil: null },
@@ -64,12 +71,19 @@ async function reconcileAiGrading() {
     take: MAX_BATCH,
   });
 
+  // Expired leases and stale PENDING rows both need a fresh enqueue this tick.
+  // One attempt may appear in both lists, so dedupe by attemptId.
+  const reenqueueIds = [...new Set([
+    ...expiredRows.map((r) => r.attemptId),
+    ...stalePending.map((r) => r.attemptId),
+  ])];
+
   let reenqueued = 0;
-  if (stalePending.length > 0) {
+  if (reenqueueIds.length > 0) {
     try {
       const { enqueueAiGrading } = require('../services/aiGrader/queue');
-      for (const row of stalePending) {
-        reenqueued += await enqueueAiGrading(row.attemptId, { freshJobIds: true });
+      for (const attemptId of reenqueueIds) {
+        reenqueued += await enqueueAiGrading(attemptId, { freshJobIds: true });
       }
     } catch (err) {
       log.warn('ai.reconcile.enqueue_failed', { error: err.message });
@@ -87,22 +101,26 @@ async function reconcileAiGrading() {
 
   let retriedApply = 0;
   if (unapplied.length > 0) {
-    const quizService = require('../services/quizService');
     for (const job of unapplied) {
       try {
+        const quizService = require('../services/quizService');
         const v = job.verdict;
-        await quizService.applyAiVerdict(job.attemptId, job.questionName, {
-          awarded: v.score,
-          max: v.maxScore,
-          feedback: v.feedback,
-          confidence: v.confidence,
-          model: v.model,
-          promptVersion: v.promptVersion,
+        const result = await prisma.$transaction(async (tx) => {
+          const applied = await quizService.applyAiVerdictInTx(tx, job.attemptId, job.questionName, {
+            awarded: v.score,
+            max: v.maxScore,
+            feedback: v.feedback,
+            confidence: v.confidence,
+            model: v.model,
+            promptVersion: v.promptVersion,
+          });
+          await tx.aiGradingJob.update({
+            where: { id: job.id },
+            data: { status: 'DONE_APPLIED', applied: true, appliedAt: new Date(), leaseUntil: null },
+          });
+          return applied;
         });
-        await prisma.aiGradingJob.update({
-          where: { id: job.id },
-          data: { status: 'DONE_APPLIED', applied: true, appliedAt: new Date(), leaseUntil: null },
-        });
+        if (result.finalized) await quizService.postFinalize(job.attemptId, result.userId);
         retriedApply += 1;
       } catch (err) {
         log.warn('ai.reconcile.apply_retry_failed', { jobId: job.id, error: err.message });
@@ -139,34 +157,60 @@ async function reconcileAiGrading() {
     expiredLeases: expiredLeases.count,
     exhausted: Number(exhausted),
     reenqueued,
+    reenqueuedLeases: expiredRows.length,
     retriedApply,
     orphans: orphanAttempts.length,
     skipped: false,
   };
 
-  if (summary.expiredLeases || summary.exhausted || summary.reenqueued || summary.retriedApply || summary.orphans) {
+  if (
+    summary.expiredLeases ||
+    summary.exhausted ||
+    summary.reenqueued ||
+    summary.reenqueuedLeases ||
+    summary.retriedApply ||
+    summary.orphans
+  ) {
     log.info('ai.reconcile.completed', summary);
   }
   return summary;
 }
 
+/**
+ * One lock-guarded reconciler tick. Dependencies are injectable so the lock
+ * contract can be unit-tested without Redis or Postgres.
+ *
+ * acquire() returns { acquired, token }:
+ *   { true, token } — we hold the lock; release the exact token afterwards.
+ *   { true, null }  — fail-open (Redis unavailable); reconcile, nothing to release.
+ *   { false, null } — another instance holds it; do not reconcile.
+ * A throwing acquire is treated as "not acquired" (fail closed for this tick,
+ * since the next cron tick will retry).
+ */
+async function runReconciliationTick({
+  acquire = () => distributedLock.acquireLock(LOCK_KEY, LOCK_TTL_SECONDS),
+  release = (token) => distributedLock.releaseLock(LOCK_KEY, token),
+  reconcile = reconcileAiGrading,
+} = {}) {
+  if (isRunning) return { skipped: true, reason: 'in-progress' };
+  isRunning = true;
+  let lock = null;
+  try {
+    lock = await acquire().catch(() => ({ acquired: false, token: null }));
+    if (!lock.acquired) return { skipped: true, reason: 'lock-held' };
+    return await reconcile();
+  } catch (err) {
+    log.warn('ai.reconcile.tick_failed', { error: err.message });
+    return { skipped: true, reason: 'error' };
+  } finally {
+    if (lock && lock.token) await release(lock.token).catch(() => {});
+    isRunning = false;
+  }
+}
+
 function startAiGradingReconciliationJob() {
-  return cron.schedule('*/5 * * * *', async () => {
-    if (isRunning) return;
-    isRunning = true;
-    const token = await acquireLock(LOCK_KEY, LOCK_TTL_SECONDS).catch(() => null);
-    if (token === false) {
-      isRunning = false;
-      return;
-    }
-    try {
-      await reconcileAiGrading();
-    } catch (err) {
-      log.warn('ai.reconcile.tick_failed', { error: err.message });
-    } finally {
-      if (token) await releaseLock(LOCK_KEY, token).catch(() => {});
-      isRunning = false;
-    }
+  return cron.schedule('*/5 * * * *', () => {
+    runReconciliationTick();
   });
 }
 
@@ -178,6 +222,7 @@ function stopAiGradingReconciliationJob(task) {
 
 module.exports = {
   reconcileAiGrading,
+  runReconciliationTick,
   startAiGradingReconciliationJob,
   stopAiGradingReconciliationJob,
 };
