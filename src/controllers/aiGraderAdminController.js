@@ -253,13 +253,30 @@ async function getAiGradingHealth(req, res) {
       byState[row.status] = row._count._all;
     }
 
+    const pendingOrRunning = byState.PENDING + byState.RUNNING;
+    let queueDepth = pendingOrRunning;
+    try {
+      const { getGradingQueue, isAiQueueAvailable } = require('../services/aiGrader/queue');
+      if (isAiQueueAvailable()) {
+        const queue = getGradingQueue();
+        const [waiting, active] = await Promise.all([
+          queue.getWaitingCount(),
+          queue.getActiveCount(),
+        ]);
+        queueDepth = waiting + active;
+      }
+    } catch (err) {
+      console.warn('[AiGraderAdmin] queue depth unavailable', { error: err.message });
+    }
+
     return res.json({
       success: true,
       data: {
         byState,
         orphans: orphanRows[0] ? Number(orphanRows[0].count) : 0,
         oldestPending: oldestPending ? oldestPending.createdAt : null,
-        queueDepth: byState.PENDING + byState.RUNNING,
+        queueDepth,
+        pendingOrRunning,
       },
     });
   } catch (error) {
