@@ -394,9 +394,14 @@ function uploadVideoStream({ bunnyVideoId, fileStream }) {
  */
 function generatePlaybackToken(bunnyVideoId, ttlSeconds) {
   const defaultTtl = Number(process.env.BUNNY_STREAM_TOKEN_TTL_SECONDS) || 21600; // 6 hours
+  const nowSec = Math.floor(Date.now() / 1000);
   const ttl = ttlSeconds || defaultTtl;
   // Quantize to 1-hour boundaries so cached HLS playlists share a stable token window
-  const expiresAt = Math.ceil((Math.floor(Date.now() / 1000) + ttl) / 3600) * 3600;
+  let expiresAt = Math.ceil((nowSec + ttl) / 3600) * 3600;
+  // When a caller explicitly caps TTL (e.g. enrollment expires soon), never mint past now + ttlSeconds
+  if (ttlSeconds && Number.isFinite(ttlSeconds)) {
+    expiresAt = Math.min(expiresAt, nowSec + Math.max(60, Math.floor(ttlSeconds)));
+  }
 
   const token = crypto
     .createHash('sha256')

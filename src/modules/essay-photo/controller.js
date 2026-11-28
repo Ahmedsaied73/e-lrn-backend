@@ -3,6 +3,7 @@
 const busboy = require('busboy');
 const { AppError } = require('../../utils/AppError');
 const { MAX_IMAGE_BYTES } = require('./config');
+const { isAdmin } = require('../../middlewares/index');
 const defaultService = require('./service');
 
 function parseMultipart(req) {
@@ -79,9 +80,10 @@ function createController(service = defaultService) {
   async function extract(req, res) {
     try {
       const { fields, fileBuffer } = await parseMultipart(req);
+      const admin = await isAdmin(req);
       const data = await service.extractEssayPhoto({
         userId: req.user.id,
-        userRole: req.user.role,
+        userRole: admin ? 'ADMIN' : 'STUDENT',
         examId: fields.examId,
         attemptId: fields.attemptId,
         questionId: fields.questionId,

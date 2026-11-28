@@ -537,6 +537,22 @@ async function answerQuestion({
   const turnMetrics =
     typeof built.turnMetrics === 'function' ? built.turnMetrics() : { modelCalls: null, toolSurface: null };
 
+  // Surface unspent KIND_CONFIRM preview tokens so the admin UI can render a
+  // 1-click "تأكيد التنفيذ / إلغاء" bar.
+  let previewPending = null;
+  const payloads = collectToolPayloads(run);
+  for (let i = payloads.length - 1; i >= 0; i--) {
+    const p = payloads[i];
+    if (p && typeof p === 'object' && p.stage === 'PREVIEW' && p.confirmationToken) {
+      previewPending = {
+        confirmationToken: String(p.confirmationToken),
+        toolName: (run.messages && run.messages.find((m) => m && typeof m.getType === 'function' && m.getType() === 'tool' && String(m.content || '').includes(String(p.confirmationToken)))?.name) || null,
+        expiresAt: p.confirmationExpiresAt || null,
+      };
+      break;
+    }
+  }
+
   const detail = {
     provider: run.provider,
     // WHICH model answered, taken from the failover that actually ran rather than
@@ -547,6 +563,7 @@ async function answerQuestion({
     stopReason: run.stopReason,
     approval: used.approvalId,
     approvalRequested,
+    previewPending,
     modelCalls: turnMetrics.modelCalls,
     toolSurface: turnMetrics.toolSurface,
     latencyMs: Date.now() - startedAt,

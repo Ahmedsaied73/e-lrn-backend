@@ -7,6 +7,7 @@ const PROFILES = {
   CHEMISTRY: { defaultFormat: 'RICH', allowChem: true },
   ARABIC: { defaultFormat: 'PLAIN', allowChem: false },
   ENGLISH: { defaultFormat: 'PLAIN', allowChem: false },
+  PLAIN_KNOWN: { defaultFormat: 'PLAIN', allowChem: false },
 };
 
 const warnedSubjects = new Set();
@@ -17,12 +18,28 @@ function normalizeSubjectKey(raw) {
   const upper = s.toUpperCase();
   if (PROFILES[upper]) return upper;
 
-  // Arabic and common aliases
-  if (s === 'رياضة' || s === 'رياضيات' || upper === 'MATHS' || upper === 'MATHEMATICS') return 'MATH';
-  if (s === 'فيزياء' || s === 'الفيزياء') return 'PHYSICS';
-  if (s === 'كيمياء' || s === 'الكيمياء') return 'CHEMISTRY';
-  if (s === 'عربي' || s === 'اللغة العربية' || s === 'لغة عربية') return 'ARABIC';
-  if (s === 'انجليزي' || s === 'إنجليزي' || s === 'اللغة الإنجليزية') return 'ENGLISH';
+  // Arabic & English aliases across all ثانوية عامة subjects
+  if (
+    /^(ال)?رياض(ة|يات)(\s+(بحتة|تطبيقية))?$/i.test(s) ||
+    /^(ال)?(تفاضل|تكامل|جبر|هندسة|استاتيكا|ديناميكا|ميكانيكا|إحصاء|احصاء)(\s+و(ال)?(تكامل|هندسة(\s+فراغية)?))?$/i.test(s) ||
+    upper === 'MATHS' || upper === 'MATHEMATICS' || upper === 'STATISTICS'
+  ) return 'MATH';
+  if (/^(ال)?فيزياء$/i.test(s)) return 'PHYSICS';
+  if (/^(ال)?كيمياء$/i.test(s)) return 'CHEMISTRY';
+  if (/^(اللغة\s+)?(ال)?عربي(ة)?$/i.test(s) || /^عربي$/i.test(s)) return 'ARABIC';
+  if (/^(اللغة\s+)?(ال)?(إ|ا)نجليزي(ة)?$/i.test(s) || /^(إ|ا)نجليزي$/i.test(s)) return 'ENGLISH';
+  if (
+    /^(ال)?(أحياء|احياء)$/i.test(s) || upper === 'BIOLOGY' ||
+    /^(ال)?جيولوجيا(\s+وعلوم\s+بيئية)?$/i.test(s) || upper === 'GEOLOGY' ||
+    /^(اللغة\s+)?(ال)?فرنسي(ة)?$/i.test(s) || /^فرنساوي$/i.test(s) || upper === 'FRENCH' ||
+    /^(اللغة\s+)?(ال)?ألماني(ة)?$/i.test(s) || /^(أ|ا)لماني$/i.test(s) || upper === 'GERMAN' ||
+    /^(اللغة\s+)?(ال)?إيطالي(ة)?$/i.test(s) || /^(إ|ا)يطالي$/i.test(s) || upper === 'ITALIAN' ||
+    /^(اللغة\s+)?(ال)?إسباني(ة)?$/i.test(s) || upper === 'SPANISH' ||
+    /^(ال)?تاريخ$/i.test(s) || upper === 'HISTORY' ||
+    /^(ال)?جغرافيا$/i.test(s) || upper === 'GEOGRAPHY' ||
+    /^(ال)?فلسفة(\s+ومنطق)?$/i.test(s) || upper === 'PHILOSOPHY' ||
+    /^علم\s+(ال)?نفس(\s+و(ال)?اجتماع)?$/i.test(s) || upper === 'PSYCHOLOGY'
+  ) return 'PLAIN_KNOWN';
 
   return null;
 }

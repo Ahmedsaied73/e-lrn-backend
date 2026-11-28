@@ -28,6 +28,50 @@ function approved(prisma) {
   return { prisma, adminId: 1 };
 }
 
+/**
+ * Helper for confirmableActionTool (KIND_CONFIRM) tests:
+ * runs preview (no token) then executes with the issued confirmationToken
+ * on a later turn (`turnStartedAt` after `requestedAt`).
+ */
+async function executeConfirmed(def, args, basePrisma = {}) {
+  const approvals = new Map();
+  let nextId = 500;
+  const prisma = {
+    ...basePrisma,
+    agentApproval: {
+      create: async ({ data }) => {
+        const id = ++nextId;
+        const row = {
+          id,
+          ...data,
+          status: 'PENDING',
+          requestedAt: new Date(Date.now() - 5000),
+          expiresAt: data.expiresAt || new Date(Date.now() + 10 * 60 * 1000),
+        };
+        approvals.set(id, row);
+        return row;
+      },
+      findUnique: async ({ where }) => approvals.get(where.id) || null,
+      updateMany: async ({ where, data }) => {
+        const row = approvals.get(where.id);
+        if (!row || row.status !== where.status) return { count: 0 };
+        Object.assign(row, data);
+        return { count: 1 };
+      },
+    },
+  };
+
+  const previewRes = await execute(def, args, approved(prisma));
+  if (!previewRes.data || previewRes.data.ok === false || !previewRes.data.confirmationToken) {
+    return previewRes;
+  }
+  return execute(
+    def,
+    { ...args, confirmationToken: previewRes.data.confirmationToken },
+    { prisma, adminId: 1, turnStartedAt: new Date() }
+  );
+}
+
 after(async () => {
   await disconnectRedis();
 });
@@ -48,7 +92,7 @@ describe('Phase 7: Agent Rich Tools — upsert_quiz', () => {
       },
     };
 
-    const result = await execute(
+    const result = await executeConfirmed(
       getDefinition('upsert_quiz'),
       {
         videoSlug: 'vid123abc456',
@@ -71,7 +115,7 @@ describe('Phase 7: Agent Rich Tools — upsert_quiz', () => {
           },
         },
       },
-      approved(stubPrisma)
+      stubPrisma
     );
 
     assert.equal(result.data.ok, true);
@@ -107,7 +151,7 @@ describe('Phase 7: Agent Rich Tools — upsert_quiz', () => {
       { t: 'math', v: '\\left[ \\frac{x^3}{3} \\right]_0^1 = \\frac{1}{3}' },
     ];
 
-    const result = await execute(
+    const result = await executeConfirmed(
       getDefinition('upsert_quiz'),
       {
         videoSlug: 'vid123abc456',
@@ -130,7 +174,7 @@ describe('Phase 7: Agent Rich Tools — upsert_quiz', () => {
           },
         },
       },
-      approved(stubPrisma)
+      stubPrisma
     );
 
     assert.equal(result.data.ok, true);
@@ -175,7 +219,7 @@ describe('Phase 7: Agent Rich Tools — upsert_quiz', () => {
       { t: 'chem', v: 'CH4 + 2O2 -> CO2 + 2H2O' },
     ];
 
-    const result = await execute(
+    const result = await executeConfirmed(
       getDefinition('upsert_quiz'),
       {
         videoSlug: 'vid123abc456',
@@ -198,7 +242,7 @@ describe('Phase 7: Agent Rich Tools — upsert_quiz', () => {
           },
         },
       },
-      approved(stubPrisma)
+      stubPrisma
     );
 
     assert.equal(result.data.ok, true);
@@ -214,7 +258,7 @@ describe('Phase 7: Agent Rich Tools — upsert_quiz', () => {
       quiz: { findUnique: async () => null, upsert: async () => ({ id: 1 }) },
     };
 
-    const result = await execute(
+    const result = await executeConfirmed(
       getDefinition('upsert_quiz'),
       {
         videoSlug: 'vid123abc456',
@@ -231,7 +275,7 @@ describe('Phase 7: Agent Rich Tools — upsert_quiz', () => {
         },
         answerKey: { q1: { type: 'comment', points: 10, modelAnswer: 'إجابة' } },
       },
-      approved(stubPrisma)
+      stubPrisma
     );
 
     assert.equal(result.data.ok, false);
@@ -245,7 +289,7 @@ describe('Phase 7: Agent Rich Tools — upsert_quiz', () => {
       quiz: { findUnique: async () => null, upsert: async () => ({ id: 1 }) },
     };
 
-    const result = await execute(
+    const result = await executeConfirmed(
       getDefinition('upsert_quiz'),
       {
         videoSlug: 'vid123abc456',
@@ -268,7 +312,7 @@ describe('Phase 7: Agent Rich Tools — upsert_quiz', () => {
           },
         },
       },
-      approved(stubPrisma)
+      stubPrisma
     );
 
     assert.equal(result.data.ok, false);
@@ -289,7 +333,7 @@ describe('Phase 7: Agent Rich Tools — upsert_quiz', () => {
       },
     };
 
-    const result = await execute(
+    const result = await executeConfirmed(
       getDefinition('upsert_quiz'),
       {
         videoSlug: 'vid123abc456',
@@ -305,7 +349,7 @@ describe('Phase 7: Agent Rich Tools — upsert_quiz', () => {
           },
         ],
       },
-      approved(stubPrisma)
+      stubPrisma
     );
 
     assert.equal(result.data.ok, true);
@@ -335,14 +379,14 @@ describe('Phase 7: Agent Rich Tools — grade_essay', () => {
     };
 
     try {
-      const result = await execute(
+      const result = await executeConfirmed(
         getDefinition('grade_essay'),
         {
           attemptId: 201,
           essayScores: { q1: 10 },
           essayFeedback: { q1: 'إجابة ممتازة وخطوات صحيحة.' },
         },
-        approved({})
+        { quizAttempt: { findUnique: async () => ({ id: 201, status: 'GRADING', user: { name: 'طالب', slug: 's1' }, quiz: { title: 'اختبار' } }) } }
       );
 
       assert.equal(result.data.ok, true);
@@ -372,14 +416,14 @@ describe('Phase 7: Agent Rich Tools — grade_essay', () => {
     ];
 
     try {
-      const result = await execute(
+      const result = await executeConfirmed(
         getDefinition('grade_essay'),
         {
           attemptId: 202,
           essayScores: { q1: 9 },
           essayFeedback: { q1: richFeedbackBlocks },
         },
-        approved({})
+        { quizAttempt: { findUnique: async () => ({ id: 202, status: 'GRADING', user: { name: 'طالب', slug: 's1' }, quiz: { title: 'اختبار' } }) } }
       );
 
       assert.equal(result.data.ok, true);
@@ -396,7 +440,7 @@ describe('Phase 7: Agent Rich Tools — grade_essay', () => {
   });
 
   it('grade_essay rejects invalid LaTeX math in feedback', async () => {
-    const result = await execute(
+    const result = await executeConfirmed(
       getDefinition('grade_essay'),
       {
         attemptId: 203,
@@ -405,7 +449,7 @@ describe('Phase 7: Agent Rich Tools — grade_essay', () => {
           q1: [{ t: 'math', v: '\\sqrt{' }], // invalid unclosed brace
         },
       },
-      approved({})
+      { quizAttempt: { findUnique: async () => ({ id: 203, status: 'GRADING', user: { name: 'طالب', slug: 's1' }, quiz: { title: 'اختبار' } }) } }
     );
 
     assert.equal(result.data.ok, false);
@@ -428,7 +472,7 @@ describe('Phase 7: Agent Rich Tools — grade_essay', () => {
     };
 
     try {
-      const result = await execute(
+      const result = await executeConfirmed(
         getDefinition('grade_essay'),
         {
           attemptId: 204,
@@ -441,7 +485,7 @@ describe('Phase 7: Agent Rich Tools — grade_essay', () => {
             q1: [{ t: 'text', v: 'ما هي معادلة أينشتاين؟' }],
           },
         },
-        approved({})
+        { quizAttempt: { findUnique: async () => ({ id: 204, status: 'GRADING', user: { name: 'طالب', slug: 's1' }, quiz: { title: 'اختبار' } }) } }
       );
 
       assert.equal(result.data.ok, true);

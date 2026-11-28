@@ -131,10 +131,9 @@ Create an account on **[bunny.net](https://bunny.net)**:
    - **`BUNNY_STREAM_API_KEY`**: Click the eye icon next to **API Key** and copy it.
    - Scroll down to **Security** -> Enable **URL Token Authentication** (or Token Authentication). Copy the key into: **`BUNNY_STREAM_TOKEN_KEY`**.
 4. In the left sub-menu, click **Delivery & CDN**:
-   - **`BUNNY_STREAM_HOSTNAME`**: Copy the Pull Zone hostname (e.g. `vz-b819f2a0-8e1.b-cdn.net`).
-5. In the left sub-menu, click **Webhooks**:
-   - Click **Add Webhook** -> Set URL to `https://api.teacherdomain.com/webhooks/bunny/stream`.
-   - Copy the secret key into: **`BUNNY_STREAM_WEBHOOK_KEY`**.
+   - **`BUNNY_STREAM_CDN_HOSTNAME`**: Copy the Pull Zone hostname (e.g. `vz-b819f2a0-8e1.b-cdn.net`).
+5. In the left sub-menu, click **API & Security** (Read-Only API Key):
+   - **`BUNNY_STREAM_READ_ONLY_API_KEY`**: Copy the Read-Only API Key (also used by the app to verify Bunny Stream webhooks at `https://api.teacherdomain.com/webhooks/bunny/stream`).
 
 ---
 
@@ -203,10 +202,10 @@ ssh deploy@<HOSTINGER_VPS_IP> "chmod 644 /opt/teacher-app/deploy/nginx/ssl/origi
 ---
 
 ### 2.3 Copy Project Deployment Files to the VPS
-Copy only `docker-compose.yml` and the `deploy/` template directory to `/opt/teacher-app/` on the VPS (excluding `.git`, logs, and source files):
+Copy the `deploy/` directory to `/opt/teacher-app/deploy/` on the VPS (preserving directory structure; `deploy/docker-compose.yml` is the production compose file):
 
 ```bash
-rsync -avz --exclude '.git' --exclude '*.log' --exclude '.env*' deploy/ docker-compose.yml deploy@<HOSTINGER_VPS_IP>:/opt/teacher-app/
+rsync -avz --exclude '.git' --exclude '*.log' --exclude '.env*' deploy/ deploy@<HOSTINGER_VPS_IP>:/opt/teacher-app/deploy/
 ```
 
 ---
@@ -258,9 +257,9 @@ ADMIN_PHONE="01012345678"
 # ── Bunny.net Stream (Video) ──
 BUNNY_STREAM_API_KEY=your-bunny-stream-full-api-key
 BUNNY_STREAM_LIBRARY_ID=123456
+BUNNY_STREAM_READ_ONLY_API_KEY=your-bunny-read-only-api-key
 BUNNY_STREAM_TOKEN_KEY=your-bunny-token-authentication-key
-BUNNY_STREAM_HOSTNAME=vz-xxxxxx.b-cdn.net
-BUNNY_STREAM_WEBHOOK_KEY=your-bunny-webhook-signing-key
+BUNNY_STREAM_CDN_HOSTNAME=vz-xxxxxx.b-cdn.net
 
 # ── AI Essay Grader ──
 GEMINI_API_KEY=AIzaSy...your-gemini-api-key
@@ -303,19 +302,20 @@ Launch all containers in detached mode:
 
 ```bash
 cd /opt/teacher-app
-docker compose up -d
+docker compose -f deploy/docker-compose.yml --env-file .env up -d
 ```
 
 Check container status:
 ```bash
-docker compose ps
+docker compose -f deploy/docker-compose.yml --env-file .env ps
 ```
 **Expected output:**
 ```
 NAME                           IMAGE                         STATUS
+teacher-app-migrate-1          e-learning-platform           Exited (0)
 teacher-app-api-1              e-learning-platform           Up (healthy)
 teacher-app-worker-1           e-learning-platform           Up
-teacher-app-postgres-1         postgres:16-alpine            Up (healthy)
+teacher-app-postgres-1         pgvector/pgvector:pg16        Up (healthy)
 teacher-app-redis-1            redis:7-alpine                Up (healthy)
 teacher-app-nginx-1            nginx:1.25-alpine             Up (healthy)
 teacher-app-backup-1           alpine:3.19                   Up

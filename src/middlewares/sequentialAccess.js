@@ -1,4 +1,5 @@
 const prismaClient = require('../config/db');
+const { isAdmin } = require('./index');
 
 /**
  * Middleware to ensure sequential access to course content
@@ -9,8 +10,8 @@ const ensureSequentialAccess = async (req, res, next) => {
     const { videoId } = req.params;
     const userId = req.user.id;
     
-    // Skip check for admin users - they can access any content
-    if (req.user.role === 'ADMIN') {
+    // Skip check for DB-verified admin users - they can access any content
+    if (await isAdmin(req)) {
       return next();
     }
 

@@ -18,7 +18,7 @@ const markVideoCompleted = async (req, res) => {
 
     const video = await prisma.bunnyVideo.findUnique({
       where: { slug: videoSlug },
-      select: { id: true, slug: true },
+      select: { id: true, slug: true, title: true, courseId: true },
     });
     if (!video) return res.status(404).json({ error: 'Video not found', code: 'VIDEO_NOT_FOUND' });
     const videoId = video.id;
@@ -109,10 +109,28 @@ const markVideoCompleted = async (req, res) => {
       invalidateAchievementsForUser(req.user.id),
     ]);
 
+    let gamificationAward = null;
+    try {
+      const gamificationService = require('../modules/gamification/gamification.service');
+      const courseIdForAward = (gate._video && gate._video.courseId) || video.courseId;
+      const lessonTitle = (gate._video && gate._video.title) || video.title;
+      gamificationAward = await gamificationService.awardForLessonComplete({
+        tenantId: gamificationService.getTenantId(req),
+        studentId: req.user.id,
+        lessonId: videoId,
+        courseId: courseIdForAward,
+        lessonTitle,
+        videoSlug: video.slug,
+      });
+    } catch (gamErr) {
+      console.error('[Gamification] awardForLessonComplete failed:', gamErr.message);
+    }
+
     return res.json({
       message: 'Video marked as completed',
       videoSlug,
-      videoProgress: (({ userId: _u, bunnyVideoId: _b, ...rest }) => rest)(videoProgress)
+      videoProgress: (({ userId: _u, bunnyVideoId: _b, ...rest }) => rest)(videoProgress),
+      ...(gamificationAward ? { gamificationAward } : {}),
     });
   } catch (error) {
     console.error('Error marking video as completed:', error);

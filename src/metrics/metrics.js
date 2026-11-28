@@ -7,8 +7,12 @@
  * limitation; aggregates arrive when a scraper is wired (Task 5).
  */
 const DURATION_BUCKETS = [50, 100, 250, 500, 1000, 2500, 5000, 10000];
-const counters = { requests: new Map(), errors: new Map(), buckets: new Map(), sum: 0, count: 0 };
+const counters = { requests: new Map(), errors: new Map(), buckets: new Map(), sum: 0, count: 0, bullmqFailed: 0 };
 const startedAt = Date.now();
+
+function recordBullMqFailure() {
+  counters.bullmqFailed += 1;
+}
 
 function recordRequest(status, durationMs) {
   const s = String(status);
@@ -37,9 +41,18 @@ function renderPrometheus() {
   lines.push(`http_request_duration_ms_bucket{le="+Inf"} ${counters.count}`);
   lines.push(`http_request_duration_ms_sum ${counters.sum}`);
   lines.push(`http_request_duration_ms_count ${counters.count}`);
+  lines.push('# TYPE http_request_duration_seconds histogram');
+  for (const b of DURATION_BUCKETS) {
+    lines.push(`http_request_duration_seconds_bucket{le="${b / 1000}"} ${counters.buckets.get(b) || 0}`);
+  }
+  lines.push(`http_request_duration_seconds_bucket{le="+Inf"} ${counters.count}`);
+  lines.push(`http_request_duration_seconds_sum ${(counters.sum / 1000).toFixed(6)}`);
+  lines.push(`http_request_duration_seconds_count ${counters.count}`);
+  lines.push('# TYPE bullmq_jobs_failed_total counter');
+  lines.push(`bullmq_jobs_failed_total ${counters.bullmqFailed}`);
   lines.push('# TYPE process_uptime_seconds gauge');
   lines.push(`process_uptime_seconds ${Math.floor((Date.now() - startedAt) / 1000)}`);
   return lines.join('\n') + '\n';
 }
 
-module.exports = { recordRequest, renderPrometheus, DURATION_BUCKETS };
+module.exports = { recordRequest, recordBullMqFailure, renderPrometheus, DURATION_BUCKETS };

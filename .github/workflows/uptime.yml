@@ -16,7 +16,7 @@ jobs:
       - name: Metrics scrape + 5xx-rate guard
         id: metrics
         run: |
-          metrics=$(curl -sf --max-time 20 "${{ secrets.PROD_BASE_URL }}/metrics") || { echo "METRICS SCRAPE FAILED"; exit 1; }
+          metrics=$(curl -sf --max-time 20 -H "Authorization: Bearer ${{ secrets.METRICS_TOKEN }}" "${{ secrets.PROD_BASE_URL }}/metrics") || { echo "METRICS SCRAPE FAILED"; exit 1; }
           echo "$metrics" > metrics.txt
           total=$(echo "$metrics" | grep '^http_requests_total' | awk -F'} ' '{s+=$2} END {print s+0}')
           errs=$(echo "$metrics" | grep '^http_errors_5xx_total ' | awk '{print $2+0}')

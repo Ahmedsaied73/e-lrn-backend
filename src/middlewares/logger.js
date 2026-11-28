@@ -14,12 +14,35 @@
  * - `/health` and `/metrics` are excluded so probes stay quiet.
  */
 
+const SENSITIVE_QUERY_KEYS = new Set([
+  'search', 'q', 'email', 'phone', 'phonenumber', 'token', 'code', 'password', 'secret',
+]);
+const EMAIL_VALUE_RE = /[^\s@]+@[^\s@]+\.[^\s@]+/;
+
+const sanitizeQuery = (query) => {
+  if (!query || typeof query !== 'object') return undefined;
+  const keys = Object.keys(query);
+  if (keys.length === 0) return undefined;
+  const out = {};
+  for (const key of keys) {
+    const val = query[key];
+    if (SENSITIVE_QUERY_KEYS.has(key.toLowerCase())) {
+      out[key] = '[REDACTED]';
+    } else if (typeof val === 'string' && EMAIL_VALUE_RE.test(val)) {
+      out[key] = val.replace(EMAIL_VALUE_RE, '[REDACTED_EMAIL]');
+    } else {
+      out[key] = val;
+    }
+  }
+  return out;
+};
+
 const logger = (options = {}) => {
   const config = {
     logHeaders: options.logHeaders || false,
     logBody: options.logBody || false,
     sensitiveFields: options.sensitiveFields || ['password', 'token', 'authorization', 'cookie'],
-    excludePaths: options.excludePaths || ['/health', '/metrics'],
+    excludePaths: options.excludePaths || ['/health', '/healthz', '/readyz', '/metrics', '/webhooks/'],
   };
 
   /**
@@ -56,10 +79,12 @@ const logger = (options = {}) => {
     // undefined while this handler runs — reading it here made every log line
     // report userId:null (verified: 0/1067 lines in a load-test log had a
     // user). It is resolved in the finish handler instead, below.
+    const safeQuery = sanitizeQuery(req.query);
     const base = {
       timestamp,
       method: req.method,
-      path: req.originalUrl || req.url,
+      path: req.path || req.url,
+      ...(safeQuery ? { query: safeQuery } : {}),
       ip: req.ip || req.connection.remoteAddress,
       requestId: req.headers['x-request-id'] || null,
     };

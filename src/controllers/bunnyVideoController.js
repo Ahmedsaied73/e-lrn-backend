@@ -284,10 +284,10 @@ const getBunnyVideoPlayback = async (req, res, next) => {
     }
 
     const userId = req.user.id;     // Always from JWT — never from params/body
-    const userRole = req.user.role;
+    const { isAdmin } = require('../middlewares');
 
-    // ADMIN bypass: can access any video without enrollment check
-    if (userRole === 'ADMIN') {
+    // ADMIN bypass (DB-verified): can access any video without enrollment check
+    if (await isAdmin(req)) {
       const video = await bunnyVideoService.findBySlug(videoSlug);
       if (!video) {
         return next(new AppError('Video not found', 404, ErrorCodes.VIDEO_NOT_FOUND));
@@ -333,7 +333,8 @@ const getBunnyVideoPlayback = async (req, res, next) => {
           ErrorCodes.VIDEO_NOT_READY
         );
       }
-      const { token, expiresAt } = bunnyClient.generatePlaybackToken(v.bunnyVideoId);
+      const clampedTtl = bunnyVideoService.computeClampedTokenTtl(req.gateEnrollmentExpiresAt);
+      const { token, expiresAt } = bunnyClient.generatePlaybackToken(v.bunnyVideoId, clampedTtl);
       const playbackUrl = `https://iframe.mediadelivery.net/embed/${v.bunnyLibraryId}/${v.bunnyVideoId}?token=${token}&expires=${expiresAt}`;
       const { hlsUrl, hlsExpiresAt } = await bunnyVideoService.resolveHlsUrl(v.bunnyLibraryId, v.bunnyVideoId, token, expiresAt);
       return res.json({

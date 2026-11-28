@@ -21,23 +21,28 @@
  */
 
 const { z } = require('zod');
-const { actionTool, readTool } = require('./_kit');
+const { confirmableActionTool, readTool } = require('./_kit');
 
 /**
  * remember_fact — store one fact the agent believes it learned (Phase 7, §3.9).
  *
- * Action-kind, audited, and immediately effective: the row is tagged with the current
- * conversationId for traceability, and nothing about it is a decision — the audit row
- * records exactly what was stored, so a wrong memory is always attributable.
+ * Confirm-gated (Audit #6): prompt injection in student text cannot poison
+ * persistent cross-conversation memory without explicit admin confirmation.
  */
-const rememberFact = actionTool({
+const rememberFact = confirmableActionTool({
   name: 'remember_fact',
   description:
-    'حفظ معلومة واحدة عن المشرف أو المنصة لاستخدامها في المحادثات القادمة (تفضيل، قرار عمل، حقيقة). يُستخدم عندما تلاحظ شيئاً يستحق التذكّر، وليس لكل ما يُقال. يُنفّذ فوراً عند استدعاء الأداة.',
+    'حفظ معلومة واحدة عن المشرف أو المنصة لاستخدامها في المحادثات القادمة (تفضيل، قرار عمل، حقيقة). يتم على خطوتين: معاينة أولاً ثم تنفيذ بعد تأكيد المشرف الصريح بتوكن المعاينة.',
   schema: z.object({
     content: z.string().min(3).max(500).describe('المعلومة المراد حفظها بصياغتك أنت (٣ إلى ٥٠٠ حرف)'),
   }),
   audit: { action: 'MEMORY_CREATE', targetType: 'agentMemory' },
+  preview: async (args) => ({
+    ok: true,
+    action: 'REMEMBER_FACT',
+    content: args.content,
+    warning: 'سيتم حفظ هذه المعلومة في ذاكرة المساعد الدائمة بعد تأكيدك.',
+  }),
   run: async (args, ctx) => {
     const row = await ctx.prisma.agentMemory.create({
       data: {
@@ -58,20 +63,29 @@ const rememberFact = actionTool({
 
 /**
  * forget_fact — delete one stored fact by its id (Phase 7, §3.9).
- *
- * The one deliberate scope addition the handoff flags: a memory system that cannot
- * retract a wrong or stale row is a liability the moment it stores something wrong.
- * The deletion is itself audited, and a forgotten id reports NOT_FOUND rather than
- * silently no-op'ing, so the model learns the correction did not happen.
  */
-const forgetFact = actionTool({
+const forgetFact = confirmableActionTool({
   name: 'forget_fact',
   description:
-    'حذف معلومة محفوظة خاطئة أو قديمة برقمها (تراه في أداة عرض الذكريات). يُستخدم عند طلب «انسى المعلومة دي» أو عند اكتشاف أن معلومة مخزّنة غير صحيحة. يُنفّذ فوراً عند استدعاء الأداة.',
+    'حذف معلومة محفوظة خاطئة أو قديمة برقمها (تراه في أداة عرض الذكريات). يتم على خطوتين: معاينة أولاً ثم حذف بعد تأكيد المشرف الصريح بتوكن المعاينة.',
   schema: z.object({
     memoryId: z.number().int().positive().describe('رقم المعلومة المراد حذفها'),
   }),
   audit: { action: 'MEMORY_DELETE', targetType: 'agentMemory' },
+  preview: async (args, ctx) => {
+    const existing = await ctx.prisma.agentMemory.findFirst({
+      where: { id: args.memoryId, adminId: ctx.adminId },
+      select: { id: true, content: true },
+    });
+    if (!existing) return { ok: false, reason: 'MEMORY_NOT_FOUND', memoryId: args.memoryId };
+    return {
+      ok: true,
+      action: 'FORGET_FACT',
+      memoryId: existing.id,
+      content: existing.content,
+      warning: 'سيتم حذف هذه المعلومة من الذاكرة الدائمة بعد تأكيدك.',
+    };
+  },
   run: async (args, ctx) => {
     const existing = await ctx.prisma.agentMemory.findFirst({
       where: { id: args.memoryId, adminId: ctx.adminId },

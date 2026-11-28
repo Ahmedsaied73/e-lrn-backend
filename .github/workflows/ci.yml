@@ -13,6 +13,19 @@ jobs:
     # (it falls back to a per-instance MemoryStore, which would make the
     # bucket-separation assertions moot). Service container provides one.
     services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci_postgres_password
+          POSTGRES_DB: elearning_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d elearning_ci"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
       redis:
         image: redis:7-alpine
         ports:
@@ -29,20 +42,19 @@ jobs:
       REDIS_ENABLED: "true"
       REDIS_URL: redis://127.0.0.1:6379
 
-      # Secrets → env (required by src/config/env.js fail-fast guards)
-      DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      DIRECT_URL: ${{ secrets.DIRECT_URL }}
-      JWTSECRET: ${{ secrets.JWTSECRET }}
-      ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
-      ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
-      BUNNY_STREAM_LIBRARY_ID: ${{ secrets.BUNNY_STREAM_LIBRARY_ID }}
-      BUNNY_STREAM_API_KEY: ${{ secrets.BUNNY_STREAM_API_KEY }}
-      BUNNY_STREAM_READ_ONLY_API_KEY: ${{ secrets.BUNNY_STREAM_READ_ONLY_API_KEY }}
-      BUNNY_STREAM_TOKEN_KEY: ${{ secrets.BUNNY_STREAM_TOKEN_KEY }}
-      # resolveSupabase() fatals on boot in production without these (quiz image
-      # upload bucket), even though the suite never touches them.
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      # Ephemeral CI database (never depends on shared staging Supabase)
+      DATABASE_URL: postgresql://postgres:ci_postgres_password@127.0.0.1:5432/elearning_ci?schema=public&sslmode=disable
+      DIRECT_URL: postgresql://postgres:ci_postgres_password@127.0.0.1:5432/elearning_ci?schema=public&sslmode=disable
+      JWTSECRET: ci_test_jwt_secret_value_0123456789abcdef0123456789abcdef
+      REFRESH_TOKEN_SECRET: ci_test_refresh_secret_value_fedcba9876543210fedcba9876543210
+      ADMIN_EMAIL: admin@elearning.com
+      ADMIN_PASSWORD: CiTestAdminPassword#2026
+      BUNNY_STREAM_LIBRARY_ID: "123456"
+      BUNNY_STREAM_API_KEY: ci-bunny-api-key
+      BUNNY_STREAM_READ_ONLY_API_KEY: ci-bunny-ro-key
+      BUNNY_STREAM_TOKEN_KEY: ci-bunny-token-key
+      SUPABASE_URL: https://ci-placeholder.supabase.co
+      SUPABASE_SERVICE_KEY: ci_supabase_service_key_1234567890
 
     steps:
       - uses: actions/checkout@v4
@@ -59,14 +71,15 @@ jobs:
       - name: Generate Prisma client
         run: npx prisma generate
 
+      - name: Deploy migrations to empty pgvector DB
+        run: npx prisma migrate deploy
+
+      - name: Seed deterministic CI fixtures
+        run: node scripts/seedTestDb.js
+
       - name: Lint
         run: npm run lint
 
-      # npm test self-hosts the server on PORT (env above) and tears it down.
-      # The suite is net-zero against the shared DB (scratch users deleted,
-      # quiz keys restored, exemptions revoked) — safe to run on the staging
-      # Supabase the tests already require for fixtures (course 1, quiz video 1/2,
-      # seqaccess/grader demo users).
       - name: Run test suite (self-hosted server)
         run: npm test
 

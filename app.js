@@ -250,6 +250,26 @@ const dbPing = async () => {
   ]);
 };
 
+const dbReadinessCheck = async () => {
+  const prisma = require('./src/config/db');
+  await Promise.race([
+    (async () => {
+      const migrated = await prisma.$queryRaw`SELECT 1 AS ok FROM "_prisma_migrations" WHERE "finished_at" IS NOT NULL LIMIT 1`;
+      if (!Array.isArray(migrated) || migrated.length === 0) {
+        throw new Error('schema_not_migrated');
+      }
+      const admin = await prisma.user.findFirst({
+        where: { role: 'ADMIN', deletedAt: null },
+        select: { id: true },
+      });
+      if (!admin) {
+        throw new Error('admin_not_seeded');
+      }
+    })(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('db readiness timeout')), 3000)),
+  ]);
+};
+
 app.get('/healthz', (req, res) => {
   res.status(200).json({ status: 'ok', uptime: Math.round(process.uptime()) });
 });
@@ -258,7 +278,7 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { renderPrometheus } = require('./src/metrics/metrics');
 
-function isMetricsAuthorized(req) {
+async function isMetricsAuthorized(req) {
   const configuredToken = process.env.METRICS_TOKEN ? String(process.env.METRICS_TOKEN).trim() : null;
 
   // 1. Dedicated METRICS_TOKEN via Bearer header, Basic auth, X-Metrics-Token, or query param (?token=)
@@ -319,11 +339,12 @@ function isMetricsAuthorized(req) {
     if (req.cookies.token) candidateJwts.push(String(req.cookies.token).trim());
   }
 
+  const { isAdmin } = require('./src/middlewares');
   for (const jwtToken of candidateJwts) {
     try {
       const decoded = jwt.verify(jwtToken, config.jwt.secret);
       if (decoded && decoded.type === 'access' && decoded.role === 'ADMIN') {
-        return true;
+        if (await isAdmin({ user: decoded })) return true;
       }
     } catch {
       // try next candidate
@@ -335,8 +356,8 @@ function isMetricsAuthorized(req) {
 
 app.isMetricsAuthorized = isMetricsAuthorized;
 
-app.get('/metrics', (req, res) => {
-  if (!isMetricsAuthorized(req)) {
+app.get('/metrics', async (req, res) => {
+  if (!(await isMetricsAuthorized(req))) {
     res.setHeader('WWW-Authenticate', 'Bearer realm="metrics"');
     return res.status(401).json({
       success: false,
@@ -352,10 +373,10 @@ app.get('/metrics', (req, res) => {
 app.get('/readyz', async (req, res) => {
   const started = Date.now();
   try {
-    await dbPing();
-    res.status(200).json({ status: 'ok', db: 'up', uptime: Math.round(process.uptime()), ms: Date.now() - started });
-  } catch {
-    res.status(503).json({ status: 'error', db: 'down', ms: Date.now() - started });
+    await dbReadinessCheck();
+    res.status(200).json({ status: 'ok', db: 'up', schema: 'ready', uptime: Math.round(process.uptime()), ms: Date.now() - started });
+  } catch (err) {
+    res.status(503).json({ status: 'error', db: 'down_or_unready', reason: err.message, ms: Date.now() - started });
   }
 });
 
@@ -381,6 +402,17 @@ app.use(limiter);
 app.use('/auth/login', loginLimiter);
 app.use('/auth/register', registerLimiter);
 app.use('/auth/refresh-token', refreshLimiter);
+
+// ── Gamification routes (HUD, Summary, Course Challenges) ──────────────────
+try {
+  const { gamificationRouter, challengeRouter } = require('./src/modules/gamification/gamification.routes');
+  app.use('/api/gamification', gamificationRouter);
+  app.use('/gamification', gamificationRouter);
+  app.use('/api', challengeRouter);
+  app.use('/', challengeRouter);
+} catch (err) {
+  console.warn('[WARN] Gamification router failed to mount:', err.message);
+}
 
 // Existing routes
 app.use("/user", Userrouter);

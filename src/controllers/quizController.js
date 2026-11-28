@@ -16,6 +16,7 @@ const busboy = require('busboy');
 const crypto = require('crypto');
 const audit = require('../services/auditLog');
 const { isValidSlug, randomBase36Slug } = require('../utils/slugs');
+const { isAdmin } = require('../middlewares/index');
 
 function parseInteger(value) {
   const parsed = typeof value === 'number' ? value : Number(value);
@@ -39,7 +40,7 @@ async function getQuizMeta(req, res) {
   try {
     const { videoSlug } = req.params;
     const userId = req.user.id;
-    const userRole = req.user.role;
+    const userRole = (await isAdmin(req)) ? 'ADMIN' : 'STUDENT';
 
     const video = await resolveVideoBySlug(videoSlug);
     if (!video) {
@@ -54,6 +55,18 @@ async function getQuizMeta(req, res) {
     const metaKey = cache.buildKey('quiz', 'meta', videoId, userId);
     const cachedMeta = await cache.get(metaKey);
     if (cachedMeta) {
+      if (
+        userRole !== 'ADMIN' &&
+        cachedMeta.enrollmentExpiresAt &&
+        Boolean(config && config.features && config.features.payments && config.paymob && config.paymob.enabled) &&
+        Date.parse(cachedMeta.enrollmentExpiresAt) <= Date.now()
+      ) {
+        return res.status(403).json({
+          success: false,
+          error: 'Your access to this course has expired — purchase again to continue',
+          code: 'ACCESS_EXPIRED',
+        });
+      }
       return res.status(200).json({ success: true, data: cachedMeta });
     }
 
@@ -74,7 +87,10 @@ async function getQuizMeta(req, res) {
     const [enrollment, progress, attempts] = await Promise.all([
       userRole === 'ADMIN'
         ? null
-        : prisma.enrollment.findFirst({ where: { userId, courseId: videoRow.courseId } }),
+        : prisma.enrollment.findFirst({
+            where: { userId, courseId: videoRow.courseId },
+            select: { id: true, isPaid: true, expiresAt: true },
+          }),
       userRole === 'ADMIN' || !videoRow.quiz
         ? null
         : prisma.bunnyVideoProgress.findFirst({ where: { userId, bunnyVideoId: videoId, completed: true } }),
@@ -97,13 +113,18 @@ async function getQuizMeta(req, res) {
         : [],
     ]);
 
-    // Check enrollment if student
-    if (userRole !== 'ADMIN' && !enrollment) {
-      return res.status(403).json({ success: false, error: 'You are not enrolled in this course' });
+    // Check enrollment + paid/unexpired policy if student
+    if (userRole !== 'ADMIN') {
+      const access = quizService.checkEnrollmentAccess(enrollment);
+      if (!access.ok) {
+        return res.status(403).json({ success: false, error: access.reason, code: access.code });
+      }
     }
 
+    const enrollmentExpiresAt = enrollment && enrollment.expiresAt ? enrollment.expiresAt.toISOString() : null;
+
     if (!videoRow.quiz) {
-      const data = { exists: false, videoSlug: videoRow.slug, videoTitle: videoRow.title };
+      const data = { exists: false, videoSlug: videoRow.slug, videoTitle: videoRow.title, enrollmentExpiresAt };
       await cache.set(metaKey, data, 30);
       return res.status(200).json({ success: true, data });
     }
@@ -145,6 +166,7 @@ async function getQuizMeta(req, res) {
       bestScore,
       totalQuestions,
       totalPoints,
+      enrollmentExpiresAt,
       inProgressAttempt: inProgressAttempt ? {
         id: inProgressAttempt.id,
         attemptNumber: inProgressAttempt.attemptNumber,
@@ -172,7 +194,7 @@ async function startQuiz(req, res) {
   try {
     const { videoSlug } = req.params;
     const userId = req.user.id;
-    const userRole = req.user.role;
+    const userRole = (await isAdmin(req)) ? 'ADMIN' : 'STUDENT';
 
     const video = await resolveVideoBySlug(videoSlug);
     if (!video) {
@@ -201,11 +223,15 @@ async function startQuiz(req, res) {
     // (enrollment before completion) is preserved below.
     if (userRole !== 'ADMIN') {
       const [enrollment, progress] = await Promise.all([
-        prisma.enrollment.findFirst({ where: { userId, courseId: videoRow.courseId } }),
+        prisma.enrollment.findFirst({
+          where: { userId, courseId: videoRow.courseId },
+          select: { id: true, isPaid: true, expiresAt: true },
+        }),
         prisma.bunnyVideoProgress.findFirst({ where: { userId, bunnyVideoId: videoId, completed: true } }),
       ]);
-      if (!enrollment) {
-        return res.status(403).json({ success: false, error: 'You are not enrolled in this course' });
+      const access = quizService.checkEnrollmentAccess(enrollment);
+      if (!access.ok) {
+        return res.status(403).json({ success: false, error: access.reason, code: access.code });
       }
 
       if (!progress) {
@@ -310,7 +336,23 @@ async function submitQuiz(req, res) {
       return res.status(400).json({ success: false, error: 'answers must be an object map of question responses' });
     }
 
-    const result = await quizService.submitAttempt(userId, attemptId, answers, !!autoSubmitted, essayMeta);
+    const result = await quizService.submitAttempt(userId, attemptId, answers, !!autoSubmitted, essayMeta, {
+      isAdmin: await isAdmin(req),
+    });
+
+    let gamificationAward = null;
+    if (result.attempt.status === STATUS.GRADED) {
+      try {
+        const gamificationService = require('../modules/gamification/gamification.service');
+        gamificationAward = await gamificationService.awardForQuizSubmit({
+          tenantId: gamificationService.getTenantId(req),
+          studentId: userId,
+          attemptId: result.attempt.id,
+        });
+      } catch (gamErr) {
+        console.error('[Gamification] awardForQuizSubmit failed:', gamErr.message);
+      }
+    }
 
     return res.status(200).json({
       success: true,
@@ -322,6 +364,7 @@ async function submitQuiz(req, res) {
         scorePercent: result.attempt.scorePercent,
         hasEssays: result.hasEssays,
         perQuestion: result.perQuestion,
+        ...(gamificationAward ? { gamificationAward } : {}),
       },
     });
   } catch (error) {
@@ -344,7 +387,7 @@ async function getQuizResult(req, res) {
   try {
     const attemptId = parseInteger(req.params.id);
     const userId = req.user.id;
-    const userRole = req.user.role;
+    const userRole = (await isAdmin(req)) ? 'ADMIN' : 'STUDENT';
 
     if (attemptId === null || attemptId <= 0) {
       return res.status(400).json({ success: false, error: 'Invalid attempt ID' });
@@ -423,10 +466,29 @@ async function getQuizResult(req, res) {
       }
     }
 
+    let gamificationAward = null;
+    if (attempt.status === STATUS.GRADED) {
+      try {
+        const gamificationService = require('../modules/gamification/gamification.service');
+        gamificationAward = await gamificationService.getAttemptGamificationAward({
+          tenantId: gamificationService.getTenantId(req),
+          studentId: attempt.userId,
+          attemptId: attempt.id,
+          quizId: attempt.quizId,
+          quizSlug: attempt.quiz.slug,
+          title: attempt.quiz.title,
+          attempt,
+        });
+      } catch (gamErr) {
+        console.error('[Gamification] getAttemptGamificationAward failed:', gamErr.message);
+      }
+    }
+
     return res.status(200).json({
       success: true,
       data: {
         attemptId: attempt.id,
+        quizSlug: attempt.quiz.slug,
         attemptNumber: attempt.attemptNumber,
         status: attempt.status,
         startedAt: attempt.startedAt,
@@ -438,6 +500,7 @@ async function getQuizResult(req, res) {
         passed,
         passingScore: attempt.quiz.passingScore,
         questions: questionsBreakdown,
+        ...(gamificationAward ? { gamificationAward } : {}),
       },
     });
   } catch (error) {
@@ -454,7 +517,7 @@ async function getStudentAttempts(req, res) {
   try {
     const { videoSlug } = req.params;
     const userId = req.user.id;
-    const userRole = req.user.role;
+    const userRole = (await isAdmin(req)) ? 'ADMIN' : 'STUDENT';
 
     const video = await resolveVideoBySlug(videoSlug);
     if (!video) {
@@ -477,13 +540,15 @@ async function getStudentAttempts(req, res) {
       return res.status(404).json({ success: false, error: 'Quiz not found' });
     }
 
-    // Same enrollment rule as quiz meta: students see only their own courses.
+    // Same enrollment rule as quiz meta: students see only their own active courses.
     if (userRole !== 'ADMIN') {
       const enrollment = await prisma.enrollment.findFirst({
         where: { userId, courseId: quiz.bunnyVideo.courseId },
+        select: { id: true, isPaid: true, expiresAt: true },
       });
-      if (!enrollment) {
-        return res.status(403).json({ success: false, error: 'You are not enrolled in this course' });
+      const access = quizService.checkEnrollmentAccess(enrollment);
+      if (!access.ok) {
+        return res.status(403).json({ success: false, error: access.reason, code: access.code });
       }
     }
 

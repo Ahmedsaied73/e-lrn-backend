@@ -26,7 +26,7 @@ r2:teacher-backups/<tenant-slug>/
    ```
 2. **Stop Application Containers (Prevents In-Flight Writes):**
    ```bash
-   docker compose stop api worker
+   docker compose -f deploy/docker-compose.yml --env-file .env stop api worker
    ```
 3. **Restore Latest Daily Backup:**
    ```bash
@@ -42,8 +42,8 @@ r2:teacher-backups/<tenant-slug>/
    ```
 5. **Restart Application Services:**
    ```bash
-   docker compose start api worker
-   docker compose logs --tail=50 -f api
+   docker compose -f deploy/docker-compose.yml --env-file .env start api worker
+   docker compose -f deploy/docker-compose.yml --env-file .env logs --tail=50 -f api
    ```
 
 ---
@@ -51,11 +51,11 @@ r2:teacher-backups/<tenant-slug>/
 ## 3. Catastrophic Disaster Recovery (Rebuilding on a Fresh VPS)
 
 If the entire VPS is destroyed:
-1. Spin up a new VPS on Hetzner Cloud.
+1. Spin up a new VPS on Hostinger/Hetzner.
 2. Follow `docs/runbooks/add-tenant.md` to run `provision-vps.sh` and set up `.env` with the same `BACKUP_ENCRYPTION_PASSPHRASE`.
 3. Start the Postgres service only:
    ```bash
-   docker compose up -d postgres
+   docker compose -f deploy/docker-compose.yml --env-file .env up -d postgres
    ```
 4. Restore the latest backup:
    ```bash
@@ -63,11 +63,11 @@ If the entire VPS is destroyed:
    ```
 5. Run Prisma migrate to verify schema integrity:
    ```bash
-   docker compose run --rm api npx prisma migrate deploy
+   docker compose -f deploy/docker-compose.yml --env-file .env run --rm --no-deps api npx prisma migrate deploy
    ```
 6. Start the full stack:
    ```bash
-   docker compose up -d
+   docker compose -f deploy/docker-compose.yml --env-file .env up -d
    ```
 7. Update DNS in Cloudflare to point to the new VPS IP.
 

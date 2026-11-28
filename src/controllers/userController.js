@@ -4,7 +4,7 @@ const config = require('../config/env');
 const quizService = require('../services/quizService');
 const audit = require('../services/auditLog');
 const cache = require('../integrations/redis/cache');
-const { isAdmin: checkIsAdmin } = require('../middlewares/index');
+const { isAdmin: checkIsAdmin, invalidateRoleCache } = require('../middlewares/index');
 const { isValidSlug } = require('../utils/slugs');
 
 const selectWithoutPassword = {
@@ -68,8 +68,21 @@ const getUser = async (req, res) => {
     if (!user) {
       return res.status(404).json({ success: false, error: 'User not found.' });
     }
+    let gamificationEnabled = Boolean(config.features && config.features.gamification);
+    try {
+      const gamificationService = require('../modules/gamification/gamification.service');
+      gamificationEnabled = await gamificationService.isGamificationEnabled(gamificationService.getTenantId(req));
+    } catch {
+      // Fall back to env flag
+    }
     // Server-truth feature flags (clients must never decide enablement).
-    res.json({ success: true, data: { ...user, features: { ...(config.features || {}) } } });
+    res.json({
+      success: true,
+      data: {
+        ...user,
+        features: { ...(config.features || {}), gamification: gamificationEnabled },
+      },
+    });
   } catch (error) {
     handleError(res, error, 'Error fetching user data:');
   }
@@ -118,6 +131,9 @@ const deleteUser = async (req, res) => {
     // Restrict — a raw user.delete would throw a P2003 FK failure for any user
     // with rows in those tables. Explicitly remove children first, then the user.
     await prisma.$transaction([
+      prisma.xpEvent.deleteMany({ where: { studentId: userIdNum } }),
+      prisma.studentBadge.deleteMany({ where: { studentId: userIdNum } }),
+      prisma.studentGamification.deleteMany({ where: { studentId: userIdNum } }),
       prisma.quizAttempt.deleteMany({ where: { userId: userIdNum } }),
       prisma.gateExemption.deleteMany({ where: { userId: userIdNum } }),
       prisma.assignmentAnswer.deleteMany({ where: { userId: userIdNum } }),
@@ -136,6 +152,7 @@ const deleteUser = async (req, res) => {
     // never-throw by contract (invalidateGateForUser swallows cache errors).
     await quizService.invalidateGateForUser(userIdNum);
     await invalidateMeCache(userIdNum);
+    invalidateRoleCache(userIdNum);
 
     await audit.record(req, {
       action: 'USER_DELETE',
@@ -227,6 +244,7 @@ const updateUser = async (req, res) => {
 
     // The cached /user/me payload (v1:me:{id}) now holds pre-write fields.
     await invalidateMeCache(parsedUserId);
+    invalidateRoleCache(parsedUserId);
 
     await audit.record(req, {
       action: 'USER_UPDATE',

@@ -198,8 +198,8 @@ describe('AI Admin Agent â€” config + kill switch', () => {
     // models/gemini-3.6-flash are present) — handoff 3.5 makes that check a condition
     // of becoming a default, so it is pinned here rather than left to a README.
     assert.equal(cfg.aiAgent.providerOrder[0], 'gemini', 'gemini is the only vendor');
-    assert.equal(cfg.aiAgent.primaryModel, 'gemini-3.7-flash', 'primary default is the current Flash tier');
-    assert.equal(cfg.aiAgent.fallbackModel, 'gemini-3.6-flash', 'fallback default is the older Flash tier');
+    assert.equal(cfg.aiAgent.primaryModel, 'gemini-3.5-flash-lite', 'primary default matches env.js');
+    assert.equal(cfg.aiAgent.fallbackModel, 'gemini-flash-lite-latest', 'fallback default matches env.js');
     assert.notEqual(
       cfg.aiAgent.primaryModel,
       cfg.aiAgent.fallbackModel,

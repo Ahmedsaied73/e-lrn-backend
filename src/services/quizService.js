@@ -387,7 +387,7 @@ async function evaluateGate(userId, videoId, userRole) {
   const cache = require('../integrations/redis/cache');
   const gateKey = cache.buildKey('gate', String(userId), String(videoId));
 
-  return cache.withCache(gateKey, 300, async () => {
+  const verdict = await cache.withCache(gateKey, 300, async () => {
     // ── Phase 1: video lookup (serial — needed for courseId + playback fields) ──
     const video = await prisma.bunnyVideo.findUnique({
       where: { id: videoId },
@@ -440,9 +440,11 @@ async function evaluateGate(userId, videoId, userRole) {
       return { allowed: false, reason: access.reason, code: access.code };
     }
 
+    const enrollmentExpiresAt = enrollment.expiresAt ? enrollment.expiresAt.toISOString() : null;
+
     const currentIndex = courseVideos.findIndex(v => v.id === video.id);
     if (currentIndex === -1) return { allowed: false, reason: 'Video not found', code: 'VIDEO_NOT_FOUND' };
-    if (currentIndex <= 0) return { allowed: true, _video: video }; // First video always accessible
+    if (currentIndex <= 0) return { allowed: true, _video: video, enrollmentExpiresAt }; // First video always accessible
 
     const previousVideoId = courseVideos[currentIndex - 1].id;
     const previousVideoSlug = courseVideos[currentIndex - 1].slug;
@@ -469,7 +471,7 @@ async function evaluateGate(userId, videoId, userRole) {
         : Promise.resolve(null),
     ]);
 
-    if (exemption) return { allowed: true, _video: video };
+    if (exemption) return { allowed: true, _video: video, enrollmentExpiresAt };
 
     if (!progress) {
       return {
@@ -482,7 +484,7 @@ async function evaluateGate(userId, videoId, userRole) {
     }
 
     // No quiz on previous video → gate passed
-    if (!prevQuiz) return { allowed: true, _video: video };
+    if (!prevQuiz) return { allowed: true, _video: video, enrollmentExpiresAt };
 
     if (!bestAttempt) {
       return {
@@ -512,8 +514,25 @@ async function evaluateGate(userId, videoId, userRole) {
       };
     }
 
-    return { allowed: true, _video: video };
+    return { allowed: true, _video: video, enrollmentExpiresAt };
   }); // end withCache
+
+  // Audit #16: A cached allowed:true verdict must never outlive enrollment.expiresAt
+  if (
+    verdict &&
+    verdict.allowed &&
+    verdict.enrollmentExpiresAt &&
+    Boolean(config && config.features && config.features.payments && config.paymob && config.paymob.enabled) &&
+    Date.parse(verdict.enrollmentExpiresAt) <= Date.now()
+  ) {
+    return {
+      allowed: false,
+      code: 'ACCESS_EXPIRED',
+      reason: 'Your access to this course has expired — purchase again to continue',
+    };
+  }
+
+  return verdict;
 }
 
 // ─── Attempt Operations ───────────────────────────────────────────────────────
@@ -539,6 +558,8 @@ async function startAttempt(userId, quizId, options = {}) {
   // attemptNumber read atomic. Released automatically at commit/rollback.
   // Invalidation happens after commit (below), never inside: invalidating
   // before commit would let a concurrent read re-cache pre-commit state.
+  let staleFinalized = null;
+
   const out = await prisma.$transaction(async (tx) => {
     // Two-int advisory-lock form takes INTEGER (not bigint) — cast explicitly.
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(${userId}::int, ${quizId}::int)`;
@@ -581,7 +602,7 @@ async function startAttempt(userId, quizId, options = {}) {
         // Fall through to create a new attempt
       } else if (deadline === null && Date.now() - new Date(inProgress.startedAt).getTime() >= STALE_ATTEMPT_MS) {
         // Abandoned untimed attempt → auto-submit its saved responses, then start fresh.
-        await finalizeStaleAttempt(inProgress, quiz, tx);
+        staleFinalized = await finalizeStaleAttempt(inProgress, quiz, tx, { deferSideEffects: true });
         // Fall through to create a new attempt
       } else {
         return { attempt: inProgress, quiz, resumed: true };
@@ -630,6 +651,15 @@ async function startAttempt(userId, quizId, options = {}) {
     return { attempt, quiz, resumed: false };
   });
 
+  // Fire deferred stale-attempt side effects AFTER outer transaction commits.
+  if (staleFinalized) {
+    if (staleFinalized.status === STATUS.GRADING) {
+      enqueueAiGradingSafe(staleFinalized.id);
+    } else {
+      notifyGradedSafe(staleFinalized.id);
+    }
+  }
+
   // New attempt changes attemptsUsed/atMaxAttempts/inProgressAttempt in meta.
   // (Resume path changes nothing — no invalidation.)
   if (!out.resumed) {
@@ -653,7 +683,7 @@ async function startAttempt(userId, quizId, options = {}) {
  * @param {object} [db]    - Prisma client or transaction client (defaults to prisma)
  * @returns {Promise<object>} Updated attempt
  */
-async function finalizeStaleAttempt(attempt, quiz, db = prisma) {
+async function finalizeStaleAttempt(attempt, quiz, db = prisma, options = {}) {
   // Q-5: the attempt row carries its frozen key; the live quiz is fallback only.
   const answerKey = resolveAttemptKey({ quizSnapshot: attempt.quizSnapshot, quiz });
   const responses = attempt.responses || {};
@@ -665,7 +695,13 @@ async function finalizeStaleAttempt(attempt, quiz, db = prisma) {
   const scorePercent = computeScorePercent(mcqEarned, totalPoints);
   const newStatus = hasEssays ? STATUS.GRADING : STATUS.GRADED;
 
-  const updated = await db.$transaction(async (tx) => {
+  // Audit #1: `db` may already be an interactive Prisma transaction client (`tx`),
+  // which has no `$transaction` method. Reuse it directly when so.
+  const runWithTx = typeof db.$transaction === 'function'
+    ? (fn) => db.$transaction(fn)
+    : (fn) => fn(db);
+
+  const updated = await runWithTx(async (tx) => {
     const row = await tx.quizAttempt.update({
       where: { id: attempt.id },
       data: {
@@ -697,10 +733,12 @@ async function finalizeStaleAttempt(attempt, quiz, db = prisma) {
 
   // Fire-and-forget AI grading for AI-enabled essays. Never throws — a queue
   // failure just leaves the attempt for the human inbox / reconciler.
-  if (updated.status === STATUS.GRADING) {
-    enqueueAiGradingSafe(updated.id);
-  } else {
-    notifyGradedSafe(updated.id);
+  if (!options.deferSideEffects) {
+    if (updated.status === STATUS.GRADING) {
+      enqueueAiGradingSafe(updated.id);
+    } else {
+      notifyGradedSafe(updated.id);
+    }
   }
 
   return updated;
@@ -1045,7 +1083,7 @@ function sanitizeEssayMeta(essayMeta) {
  * @param {object} [essayMeta]
  * @returns {Promise<object>} Updated attempt
  */
-async function submitAttempt(userId, attemptId, responses, autoSubmitted = false, essayMeta) {
+async function submitAttempt(userId, attemptId, responses, autoSubmitted = false, essayMeta, options = {}) {
   const serialized = JSON.stringify(responses);
   if (Buffer.byteLength(serialized, 'utf8') > MAX_SURVEY_JSON_BYTES) {
     throw Object.assign(new Error('Responses exceed the maximum allowed size.'), { statusCode: 413 });
@@ -1053,13 +1091,25 @@ async function submitAttempt(userId, attemptId, responses, autoSubmitted = false
 
   const attempt = await prisma.quizAttempt.findUnique({
     where: { id: attemptId },
-    include: { quiz: true },
+    include: { quiz: { include: { bunnyVideo: { select: { courseId: true } } } } },
   });
 
   if (!attempt) throw Object.assign(new Error('Attempt not found'), { statusCode: 404 });
   if (attempt.userId !== userId) throw Object.assign(new Error('Forbidden'), { statusCode: 403 });
   if (attempt.status !== STATUS.IN_PROGRESS) {
     throw Object.assign(new Error(`Attempt is already ${attempt.status}`), { statusCode: 409 });
+  }
+
+  // Audit #7: Enforce paid & unexpired enrollment at submit time as well
+  if (!options.isAdmin && attempt.quiz && attempt.quiz.bunnyVideo && attempt.quiz.bunnyVideo.courseId) {
+    const enrollment = await prisma.enrollment.findFirst({
+      where: { userId, courseId: attempt.quiz.bunnyVideo.courseId },
+      select: { id: true, isPaid: true, expiresAt: true },
+    });
+    const access = checkEnrollmentAccess(enrollment);
+    if (!access.ok) {
+      throw Object.assign(new Error(access.reason), { statusCode: 403, code: access.code });
+    }
   }
 
   // Enforce deadline + grace
@@ -1305,6 +1355,17 @@ async function gradeEssayAttempt(adminId, attemptId, essayScores, essayFeedbackM
   // never be rolled back with the grade, nor block the transaction.
   notifyGradedSafe(updated.id);
 
+  try {
+    const gamificationService = require('../modules/gamification/gamification.service');
+    await gamificationService.awardForQuizSubmit({
+      tenantId: gamificationService.getTenantId(),
+      studentId: updated.userId,
+      attemptId: updated.id,
+    });
+  } catch (gamErr) {
+    console.error('[Gamification] awardForQuizSubmit (gradeEssayAttempt) failed:', gamErr.message);
+  }
+
   await invalidateQuizMetaForAttempt(updated.id);
   // Essay grade changes the scorePercent that gates downstream videos.
   await invalidateGateForUser(updated.userId);
@@ -1398,6 +1459,16 @@ async function applyAiVerdictInTx(tx, attemptId, qName, verdict) {
 async function postFinalize(attemptId, userId) {
   if (!userId) return;
   notifyGradedSafe(attemptId);
+  try {
+    const gamificationService = require('../modules/gamification/gamification.service');
+    await gamificationService.awardForQuizSubmit({
+      tenantId: gamificationService.getTenantId(),
+      studentId: userId,
+      attemptId,
+    });
+  } catch (gamErr) {
+    console.error('[Gamification] awardForQuizSubmit (postFinalize) failed:', gamErr.message);
+  }
   await invalidateQuizMetaForAttempt(attemptId);
   await invalidateGateForUser(userId);
   await invalidateAchievementsForUser(userId);
@@ -1441,6 +1512,7 @@ module.exports = {
   evaluateGate,
   checkEnrollmentAccess,
   startAttempt,
+  finalizeStaleAttempt,
   submitAttempt,
   saveAttempt,
   gradeEssayAttempt,

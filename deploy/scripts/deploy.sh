@@ -49,6 +49,7 @@ if [ -n "$PRESET" ] && [ -f "deploy/presets/${PRESET}.env" ]; then
 fi
 
 export APP_IMAGE="${APP_IMAGE_BASE:-ghcr.io/osamasaeed/e-learning-platform}:${IMAGE_TAG}"
+COMPOSE="docker compose -f deploy/docker-compose.yml --env-file .env"
 
 send_telegram() {
   local msg="$1"
@@ -71,7 +72,7 @@ echo "=== [2/6] Pulling new container image (${APP_IMAGE}) ==="
 docker pull "$APP_IMAGE"
 
 echo "=== [3/6] Running Prisma database migrations ==="
-docker compose run --rm --no-deps api npx prisma migrate deploy || {
+$COMPOSE run --rm --no-deps api npx prisma migrate deploy || {
   echo "[FATAL] Prisma migration failed! Deployment aborted. Running container untouched."
   send_telegram "🚨 <b>DEPLOY FAILED:</b> Prisma migration failed for <code>${DOMAIN_NAME:-tenant}</code> on image tag <code>${IMAGE_TAG}</code>."
   exit 1
@@ -81,14 +82,24 @@ echo "=== [4/6] Starting Standby Health Gate Verification ==="
 # Launch temporary standby container to verify readiness before replacing active API
 STANDBY_NAME="api_standby_$(date +%s)"
 # shellcheck disable=SC2016
-TARGET_NET=$(docker compose ps -q api 2>/dev/null | xargs -r docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}' 2>/dev/null || true)
-TARGET_NET="${TARGET_NET:-deploy_internal}"
+TARGET_NET=$($COMPOSE ps -q api 2>/dev/null | xargs -r docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}' 2>/dev/null | head -n 1 || true)
+TARGET_NET="${TARGET_NET:-teacher_internal}"
+
+DB_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public&sslmode=disable"
+RDS_URL="redis://:${REDIS_PASSWORD}@redis:6379/0"
 
 docker run -d \
   --name "$STANDBY_NAME" \
   --network "$TARGET_NET" \
   --env-file .env \
   -e APP_MODE=api \
+  -e NODE_ENV=production \
+  -e PORT=3005 \
+  -e TRUST_PROXY=1 \
+  -e DATABASE_URL="$DB_URL" \
+  -e DIRECT_URL="$DB_URL" \
+  -e REDIS_ENABLED=true \
+  -e REDIS_URL="$RDS_URL" \
   "$APP_IMAGE"
 
 HEALTHY=0
@@ -120,10 +131,10 @@ echo "$PREVIOUS_TAG" > .previous_tag
 echo "$IMAGE_TAG" > .current_tag
 
 # Recreate API and Worker with the new image tag
-docker compose up -d --no-deps api worker
+$COMPOSE up -d --no-deps api worker
 
 # Reload Nginx upstream connections smoothly
-docker compose exec -T nginx nginx -s reload || true
+$COMPOSE exec -T nginx nginx -s reload || true
 
 echo "=== [6/6] Pruning dangling images ==="
 docker image prune -f

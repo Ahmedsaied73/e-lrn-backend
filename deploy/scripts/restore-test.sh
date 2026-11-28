@@ -44,7 +44,7 @@ docker run -d \
   -e POSTGRES_PASSWORD=test_pass \
   -e POSTGRES_DB=test_restore_db \
   -p "${TEST_PORT}:5432" \
-  postgres:16-alpine
+  pgvector/pgvector:pg16
 
 echo "Waiting for test PostgreSQL to be ready..."
 for i in {1..20}; do

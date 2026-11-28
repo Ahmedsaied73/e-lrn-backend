@@ -48,14 +48,14 @@ bash deploy/scripts/restore.sh "${BACKUP_STORAGE_DEST}/pre-deploy/<SNAPSHOT_NAME
 
 1. Verify process health:
    ```bash
-   docker compose ps
+   docker compose -f deploy/docker-compose.yml --env-file .env ps
    curl -s http://127.0.0.1:3005/readyz
    ```
 2. Verify Nginx response:
    ```bash
-   curl -I https://api.<teacherdomain.com>/healthz
+   curl -I https://api.<teacherdomain.com>/readyz
    ```
 3. Check application logs for lingering errors:
    ```bash
-   docker compose logs --tail=100 -f api
+   docker compose -f deploy/docker-compose.yml --env-file .env logs --tail=100 -f api
    ```

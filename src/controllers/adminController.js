@@ -156,7 +156,21 @@ async function getDashboardStats(req, res) {
       };
     });
 
-    return res.status(200).json({ success: true, data });
+    let gamificationEnabled = Boolean(config.features && config.features.gamification);
+    try {
+      const gamificationService = require('../modules/gamification/gamification.service');
+      gamificationEnabled = await gamificationService.isGamificationEnabled(gamificationService.getTenantId(req));
+    } catch {
+      // Fall back to env flag
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        ...data,
+        features: { ...(data.features || {}), gamification: gamificationEnabled },
+      },
+    });
   } catch (error) {
     console.error('[AdminController] getDashboardStats error:', error);
     return res.status(500).json({ success: false, error: 'Internal server error.' });

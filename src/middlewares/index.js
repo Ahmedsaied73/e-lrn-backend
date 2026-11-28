@@ -163,17 +163,22 @@ const authorizeAdmin = (arg1, arg2, arg3) => {
  * Returns the authoritative boolean, never throws.
  */
 const isAdmin = async (req) => {
-  if (!req.user || req.user.role !== 'ADMIN') return false;
+  if (!req || !req.user || req.user.role !== 'ADMIN') return false;
+  if (typeof req._isAdminVerified === 'boolean') return req._isAdminVerified;
   try {
     const cachedRole = getCachedRole(req.user.id);
-    if (cachedRole !== undefined) return cachedRole === 'ADMIN';
+    if (cachedRole !== undefined) {
+      req._isAdminVerified = cachedRole === 'ADMIN';
+      return req._isAdminVerified;
+    }
     const dbUser = await prisma.user.findUnique({
       where: { id: req.user.id, deletedAt: null },
       select: { role: true },
     });
     const role = dbUser ? dbUser.role : null;
     cacheRole(req.user.id, role);
-    return role === 'ADMIN';
+    req._isAdminVerified = role === 'ADMIN';
+    return req._isAdminVerified;
   } catch {
     return false;
   }

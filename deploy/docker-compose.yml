@@ -2,6 +2,7 @@ networks:
   web:
     driver: bridge
   internal:
+    name: teacher_internal
     driver: bridge
     internal: false
 
@@ -12,6 +13,26 @@ volumes:
   backup_logs:
 
 services:
+  # ── One-Shot Migration Service (runs prisma migrate deploy before api/worker) ─
+  migrate:
+    image: ${APP_IMAGE:-ghcr.io/osamasaeed/e-learning-platform:latest}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: "no"
+    command: ["npx", "prisma", "migrate", "deploy"]
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public&sslmode=disable
+      - DIRECT_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public&sslmode=disable
+    env_file:
+      - ../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
+
   # ── API Service (Active HTTP / WS Server) ─────────────────────────────────
   api:
     image: ${APP_IMAGE:-ghcr.io/osamasaeed/e-learning-platform:latest}
@@ -35,6 +56,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:3005/readyz"]
       interval: 10s
@@ -76,7 +99,7 @@ services:
 
   # ── PostgreSQL Database ──────────────────────────────────────────────────
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
@@ -155,6 +178,7 @@ services:
       - postgres_data:/var/lib/postgresql/data:ro
       - ./scripts/backup.sh:/usr/local/bin/backup.sh:ro
       - /root/.config/rclone/rclone.conf:/root/.config/rclone/rclone.conf:ro
+      - ../backups:/backups
       - backup_logs:/var/log/backup
     environment:
       - PGHOST=postgres
@@ -187,8 +211,10 @@ services:
     command:
       - '--path.rootfs=/host'
       - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+      - '--collector.textfile.directory=/var/log/backup'
     volumes:
       - /:/host:ro,rslave
+      - backup_logs:/var/log/backup:ro
     ports:
       - "${TAILSCALE_IP:-127.0.0.1}:9100:9100"
     networks:
@@ -246,7 +272,7 @@ services:
       - nginx_logs:/var/log/nginx:ro
       - ./monitoring/promtail/promtail-config.yml:/etc/promtail/config.yml:ro
     environment:
-      - MONITORING_LOKI_HOST=${MONITORING_LOKI_HOST:-127.0.0.1}
+      - MONITORING_LOKI_HOST=${MONITORING_LOKI_HOST:-loki}
       - TENANT_NAME=${TENANT_NAME:-teacher-default}
     command: -config.file=/etc/promtail/config.yml -config.expand-env=true
     networks:

@@ -441,6 +441,7 @@ async function processGradingJob(job, providerFactory = defaultProviderFactory, 
     const reason = err.code === 'SCALE_MISMATCH' ? 'SCALE_MISMATCH' : (err.name === 'ZodError' ? 'INVALID_OUTPUT' : 'AI_FAILED');
 
     if (exhausted || err.code === 'SCALE_MISMATCH') {
+      try { require('../../metrics/metrics').recordBullMqFailure(); } catch { /* metrics optional */ }
       await markJob(attemptId, questionName, {
         status: 'NEEDS_REVIEW',
         reason,

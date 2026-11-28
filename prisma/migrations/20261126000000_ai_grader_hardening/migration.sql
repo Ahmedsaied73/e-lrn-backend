@@ -1,4 +1,4 @@
--- AI Grader Production Hardening: 5-state machine + outbox + metrics + review mode
+-- AI Grader Production Hardening (Part 1/2): enum + columns + enum value additions
 
 -- 1. Create AiReviewMode enum & add to Quiz
 DO $$ BEGIN
@@ -19,28 +19,8 @@ ALTER TABLE "AiGradingJob" ADD COLUMN IF NOT EXISTS "criteriaBreakdown" JSONB;
 ALTER TABLE "AiGradingJob" ADD COLUMN IF NOT EXISTS "tokensIn" INTEGER;
 ALTER TABLE "AiGradingJob" ADD COLUMN IF NOT EXISTS "tokensOut" INTEGER;
 
--- 3. Extend AiGradingJobStatus enum & backfill
+-- 3. Extend AiGradingJobStatus enum (committed at end of this migration before backfill in Part 2)
 ALTER TYPE "AiGradingJobStatus" ADD VALUE IF NOT EXISTS 'RUNNING';
 ALTER TYPE "AiGradingJobStatus" ADD VALUE IF NOT EXISTS 'DONE_APPLIED';
 ALTER TYPE "AiGradingJobStatus" ADD VALUE IF NOT EXISTS 'SYSTEM_GRADED';
 ALTER TYPE "AiGradingJobStatus" ADD VALUE IF NOT EXISTS 'NEEDS_REVIEW';
-
--- Commit enum value additions before using them in UPDATE (Postgres requirement)
-COMMIT;
-BEGIN;
-
-UPDATE "AiGradingJob"
-  SET status = 'DONE_APPLIED', "appliedAt" = COALESCE("appliedAt", "updatedAt")
-  WHERE status::text = 'DONE' AND applied = true;
-
-UPDATE "AiGradingJob"
-  SET status = 'NEEDS_REVIEW', reason = COALESCE(reason, 'LOW_CONFIDENCE')
-  WHERE status::text = 'DONE' AND applied = false;
-
-UPDATE "AiGradingJob"
-  SET status = 'NEEDS_REVIEW', reason = COALESCE(reason, 'AI_FAILED')
-  WHERE status::text = 'FAILED';
-
--- 4. Indexes
-CREATE INDEX IF NOT EXISTS "AiGradingJob_status_nextRunAt_idx" ON "AiGradingJob"("status", "nextRunAt");
-CREATE INDEX IF NOT EXISTS "AiGradingJob_inputHash_idx" ON "AiGradingJob"("inputHash");

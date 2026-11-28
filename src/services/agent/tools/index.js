@@ -74,14 +74,7 @@ function validate(defs, seen) {
     if (typeof def.run !== 'function') throw new Error(`[agent/tools] ${where}: run must be a function`);
 
     if (def.kind === KIND_ACTION) {
-      // Phase 3 (Decision #1): actions execute on call. Asserting requiresApproval
-      // is FALSE is the structural pin — a tool claiming a human approval gate
-      // could only mean the removed flag is sneaking back in.
-      if (def.requiresApproval !== false) throw new Error(`[agent/tools] ${where}: actions execute immediately — requiresApproval must be false`);
-      if (!def.audit || typeof def.audit.action !== 'string') {
-        throw new Error(`[agent/tools] ${where}: actions must declare an audit action`);
-      }
-      if (def.cacheTtlSeconds !== 0) throw new Error(`[agent/tools] ${where}: actions must never be cached`);
+      throw new Error(`[agent/tools] ${where}: unconfirmed KIND_ACTION tools are forbidden — use confirmableActionTool`);
     } else if (def.kind === KIND_CONFIRM) {
       // Two-step tools (handoff 3.3): the preview is as mandatory as the audit —
       // a confirm tool you cannot preview is a delete you must take on faith.

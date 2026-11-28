@@ -22,7 +22,7 @@ This manual provides the step-by-step procedure to rotate all credentials secure
    ```
 3. Restart API container to reload configuration:
    ```bash
-   docker compose restart api
+   docker compose -f deploy/docker-compose.yml --env-file .env restart api
    ```
 
 ---
@@ -35,12 +35,12 @@ This manual provides the step-by-step procedure to rotate all credentials secure
    ```
 2. Update PostgreSQL internal role:
    ```bash
-   docker compose exec postgres psql -U postgres -c "ALTER USER app_user WITH PASSWORD '${NEW_PG_PASS}';"
+   docker compose -f deploy/docker-compose.yml --env-file .env exec postgres psql -U postgres -c "ALTER USER app_user WITH PASSWORD '${NEW_PG_PASS}';"
    ```
 3. Update `POSTGRES_PASSWORD` and `DATABASE_URL` in `/opt/teacher-app/.env`.
 4. Restart dependent containers:
    ```bash
-   docker compose up -d --no-deps api worker backup postgres-exporter
+   docker compose -f deploy/docker-compose.yml --env-file .env up -d --no-deps api worker backup postgres-exporter
    ```
 
 ---
@@ -54,11 +54,11 @@ This manual provides the step-by-step procedure to rotate all credentials secure
 2. Update `.env` on the VPS with new `REDIS_PASSWORD`.
 3. Recreate the Redis container with the new command line password:
    ```bash
-   docker compose up -d --no-deps --force-recreate redis
+   docker compose -f deploy/docker-compose.yml --env-file .env up -d --no-deps --force-recreate redis
    ```
 4. Restart API, Worker, and Redis-exporter:
    ```bash
-   docker compose up -d --no-deps api worker redis-exporter
+   docker compose -f deploy/docker-compose.yml --env-file .env up -d --no-deps api worker redis-exporter
    ```
 
 ---
@@ -70,7 +70,7 @@ This manual provides the step-by-step procedure to rotate all credentials secure
 3. Upload to VPS replacing `/etc/ssl/cloudflare/origin.pem` and `origin.key`.
 4. Reload Nginx without downtime:
    ```bash
-   docker compose exec nginx nginx -s reload
+   docker compose -f deploy/docker-compose.yml --env-file .env exec -T nginx nginx -s reload
    ```
 5. Revoke the old certificate in the Cloudflare dashboard.
 

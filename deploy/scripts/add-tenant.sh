@@ -31,9 +31,13 @@ if [ ! -f "deploy/presets/${PRESET}.env" ]; then
   exit 1
 fi
 
-# Ensure SSL directory exists
-mkdir -p deploy/nginx/ssl
+# Ensure SSL, backup & rclone config exist (prevents Docker creating rclone.conf as a directory)
+mkdir -p deploy/nginx/ssl backups/pre-deploy /root/.config/rclone
 chmod 700 deploy/nginx/ssl
+if [ ! -f /root/.config/rclone/rclone.conf ]; then
+  touch /root/.config/rclone/rclone.conf
+  chmod 600 /root/.config/rclone/rclone.conf
+fi
 
 # 1. Prepare Nginx configuration from template
 export DOMAIN_NAME
@@ -58,6 +62,7 @@ if [ ! -f .env ]; then
   REFRESH_SEC=$(openssl rand -hex 32)
   METRICS_TOK=$(openssl rand -hex 24)
   BACKUP_PASS=$(openssl rand -hex 24)
+  ADMIN_PASS="$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)!A1"
 
   sed -i "s/CHANGE_ME_SECURE_PG_PASSWORD_32_CHARS/${PG_PASS}/g" .env
   sed -i "s/CHANGE_ME_SECURE_REDIS_PASSWORD_32_CHARS/${REDIS_PASS}/g" .env
@@ -65,12 +70,14 @@ if [ ! -f .env ]; then
   sed -i "s/CHANGE_ME_DIFFERENT_RANDOM_HEX_64_CHARACTERS/${REFRESH_SEC}/g" .env
   sed -i "s/CHANGE_ME_RANDOM_METRICS_BEARER_TOKEN/${METRICS_TOK}/g" .env
   sed -i "s/CHANGE_ME_SECURE_PASSPHRASE_FOR_GPG/${BACKUP_PASS}/g" .env
+  sed -i "s/CHANGE_ME_INITIAL_STRONG_ADMIN_PASSWORD/${ADMIN_PASS}/g" .env
   sed -i "s/teacher-slug-name/${TENANT_NAME}/g" .env
   sed -i "s/api.teacherdomain.com/${DOMAIN_NAME}/g" .env
 
   chmod 600 .env
   chown deploy:deploy .env
-  echo "Generated unique secrets in .env."
+  echo "Generated unique secrets and initial admin password in .env."
+  echo "Initial Admin Password (save this now): ${ADMIN_PASS}"
 fi
 
 # Read the generated or existing backup passphrase
@@ -82,8 +89,8 @@ echo "Next steps:"
 echo "1. Place Cloudflare Origin CA certificates in:"
 echo "   - ${APP_DIR}/deploy/nginx/ssl/origin.pem"
 echo "   - ${APP_DIR}/deploy/nginx/ssl/origin.key"
-echo "2. Edit ${APP_DIR}/.env to configure Bunny, Gemini, and Telegram keys."
-echo "3. Run: docker compose up -d"
+echo "2. Edit ${APP_DIR}/.env to configure Bunny, Gemini, Paymob, Supabase Storage, and R2 keys."
+echo "3. Run: docker compose -f deploy/docker-compose.yml --env-file .env up -d"
 echo "==================================================================="
 echo ""
 echo "==================================================================="

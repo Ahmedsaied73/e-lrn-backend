@@ -51,6 +51,9 @@ certificates      Certificate[]
   agentApprovals     AgentApproval[]     @relation("AgentApprovalAdmin") // HITL approvals this admin requested
   agentDecisions     AgentApproval[]     @relation("AgentApprovalDecider") // HITL approvals this admin decided on
   aiStudentMessages  AiStudentMessage[]
+  gamification       StudentGamification[]
+  xpEvents           XpEvent[]
+  badges             StudentBadge[]
   maxDevices         Int?                       // null = platform default (3); integer = custom admin grant
   devices            UserDevice[]               // Relation to registered devices
   refreshToken      String?            @db.Text
@@ -90,6 +93,7 @@ model Course {
   accessCodes   AccessCode[]
   learningPaths LearningPath[] @relation("CoursesInPath")
   prerequisite  LearningPath[] @relation("Prerequisites")
+  challenge     CourseChallenge?
   createdAt     DateTime       @default(now())
   category      String?
   grade         Grade // Required field for Egyptian secondary school year
@@ -241,6 +245,7 @@ model Quiz {
 
   bunnyVideo   BunnyVideo    @relation(fields: [bunnyVideoId], references: [id], onDelete: Cascade)
   attempts     QuizAttempt[]
+  challenges   CourseChallenge[]
   aiReviewMode AiReviewMode  @default(AUTO)
 
   @@index([bunnyVideoId])
@@ -739,4 +744,106 @@ model EssayPhotoExtraction {
   @@index([teacherId, createdAt])
   @@index([imageSha256])
   @@map("essay_photo_extractions")
+}
+
+// ─── Gamification System ─────────────────────────────────────────────────────
+
+enum XpEventType {
+  LESSON_COMPLETE
+  QUIZ_CORRECT_DELTA
+  QUIZ_PERFECT
+  QUIZ_IMPROVEMENT
+  STREAK_DAILY
+  TEACHER_CHALLENGE
+}
+
+enum TeacherChallengeKind {
+  MASTERY
+  STREAK_ANSWERS
+  IMPROVE
+  MISTAKES
+  NO_SKIP
+  AI_ESSAY
+}
+
+model TeacherSettings {
+  id                  Int      @id @default(autoincrement())
+  tenantId            String   @unique @default("default")
+  gamificationEnabled Boolean  @default(false)
+  updatedAt           DateTime @updatedAt
+}
+
+model StudentGamification {
+  id                  String   @id @default(cuid())
+  tenantId            String   @default("default")
+  studentId           Int
+  totalXp             Int      @default(0)
+  currentStreak       Int      @default(0)
+  longestStreak       Int      @default(0)
+  lastActiveDayKey    String?
+  completedLessonsCnt Int      @default(0)
+  completedQuizzesCnt Int      @default(0)
+  perfectQuizzesCnt   Int      @default(0)
+  improvedQuizzesCnt  Int      @default(0)
+  passedChallengesCnt Int      @default(0)
+  completedCoursesCnt Int      @default(0)
+  updatedAt           DateTime @updatedAt
+
+  student User @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, studentId])
+  @@index([tenantId, updatedAt])
+  @@index([studentId])
+}
+
+model XpEvent {
+  id             String      @id @default(cuid())
+  tenantId       String      @default("default")
+  studentId      Int
+  type           XpEventType
+  amount         Int
+  label          String
+  idempotencyKey String
+  meta           Json?
+  createdAt      DateTime    @default(now())
+
+  student User @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, studentId, idempotencyKey])
+  @@index([tenantId, studentId, createdAt(sort: Desc)])
+  @@index([studentId])
+}
+
+model StudentBadge {
+  id         String   @id @default(cuid())
+  tenantId   String   @default("default")
+  studentId  Int
+  badgeCode  String
+  unlockedAt DateTime @default(now())
+
+  student User @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, studentId, badgeCode])
+  @@index([tenantId, studentId])
+  @@index([studentId])
+}
+
+model CourseChallenge {
+  id             String               @id @default(cuid())
+  tenantId       String               @default("default")
+  courseId       Int                  @unique
+  kind           TeacherChallengeKind @default(MASTERY)
+  quizId         Int?
+  title          String
+  rule           String
+  masteryPercent Int                  @default(80)
+  rewardXp       Int                  @default(120)
+  enabled        Boolean              @default(true)
+  updatedAt      DateTime             @updatedAt
+
+  course Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  quiz   Quiz?  @relation(fields: [quizId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, courseId])
+  @@index([quizId])
 }

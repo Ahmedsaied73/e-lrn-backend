@@ -5,7 +5,7 @@ global:
     monitor: 'elearning-fleet-monitor'
 
 rule_files:
-  - 'alert.rules.yml'
+  - '/etc/prometheus/alert.rules.yml'
 
 alerting:
   alertmanagers:

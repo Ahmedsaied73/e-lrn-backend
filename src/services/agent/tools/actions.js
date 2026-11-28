@@ -22,7 +22,8 @@
 const { z } = require('zod');
 const bcrypt = require('bcrypt');
 const cache = require('../../../integrations/redis/cache');
-const { actionTool, confirmableActionTool } = require('./_kit');
+const { confirmableActionTool } = require('./_kit');
+const { invalidateRoleCache } = require('../../../middlewares/index');
 const { isValidSlug, randomBase36Slug } = require('../../../utils/slugs');
 const { SOFT_DELETE_RETENTION_DAYS, softDeleteTombstoneEmail } = require('../../softDelete');
 const { serializeRich, validateRich, looksRich } = require('../../../lib/richContent');
@@ -119,12 +120,27 @@ async function invalidateEnrollmentCaches(userId, courseId) {
   await cache.del(cache.buildKey('courses', 'byid', courseId, `u${userId}`));
 }
 
-const enrollStudent = actionTool({
+const enrollStudent = confirmableActionTool({
   name: 'enroll_student',
   description:
-    'تسجيل طالب في دورة بصلاحية إدارية (بدون دفع). يُستخدم عند طلب «سجّل الطالب في الدورة». ينفّذ فوراً عند استدعاء الأداة، ويعيد حالة التسجيل بعد التنفيذ.',
+    'تسجيل طالب في دورة بصلاحية إدارية (بدون دفع). يتم على خطوتين: استدعاء بلا توكن يعيد معاينة، ثم تنفيذ بعد تأكيد المشرف الصريح بتوكن المعاينة.',
   schema: z.object({ userSlug: slugArg('الطالب'), courseSlug: slugArg('الدورة') }),
   audit: { action: 'ENROLL_CREATE', targetType: 'enrollment' },
+  preview: async (args, ctx) => {
+    const prisma = ctx.prisma;
+    if (!isValidSlug(args.userSlug) || !isValidSlug(args.courseSlug)) return { ok: false, reason: 'INVALID_SLUG' };
+    const [student, course] = await Promise.all([findStudent(prisma, args.userSlug), findCourse(prisma, args.courseSlug)]);
+    if (!student) return { ok: false, reason: 'STUDENT_NOT_FOUND' };
+    if (!course) return { ok: false, reason: 'COURSE_NOT_FOUND' };
+    const existing = await prisma.enrollment.findUnique({
+      where: { userId_courseId: { userId: student.id, courseId: course.id } },
+      select: { id: true, isPaid: true },
+    });
+    if (existing) {
+      return { ok: false, reason: 'ALREADY_ENROLLED', enrollmentId: existing.id, isPaid: existing.isPaid };
+    }
+    return { ok: true, action: 'ENROLL_STUDENT', student: { slug: student.slug, name: student.name }, course: { slug: course.slug, title: course.title } };
+  },
   run: async (args, ctx) => {
     const prisma = ctx.prisma;
     if (!isValidSlug(args.userSlug) || !isValidSlug(args.courseSlug)) {
@@ -181,12 +197,32 @@ const enrollStudent = actionTool({
   },
 });
 
-const unenrollStudent = actionTool({
+const unenrollStudent = confirmableActionTool({
   name: 'unenroll_student',
   description:
-    'إلغاء تسجيل طالب من دورة (حذف سجل الاشتراك) بصلاحية إدارية. يُستخدم عند طلب «الغِ تسجيل الطالب» أو «اشِل الطالب من الدورة». ينفّذ فوراً عند استدعاء الأداة بالمعرّفات الدقيقة.',
+    'إلغاء تسجيل طالب من دورة (حذف سجل الاشتراك) بصلاحية إدارية. يتم على خطوتين: استدعاء بلا توكن يعيد معاينة، ثم تنفيذ بعد تأكيد المشرف الصريح بتوكن المعاينة.',
   schema: z.object({ userSlug: slugArg('الطالب'), courseSlug: slugArg('الدورة') }),
   audit: { action: 'ENROLL_DELETE', targetType: 'enrollment' },
+  preview: async (args, ctx) => {
+    const prisma = ctx.prisma;
+    if (!isValidSlug(args.userSlug) || !isValidSlug(args.courseSlug)) return { ok: false, reason: 'INVALID_SLUG' };
+    const [student, course] = await Promise.all([findStudent(prisma, args.userSlug), findCourse(prisma, args.courseSlug)]);
+    if (!student) return { ok: false, reason: 'STUDENT_NOT_FOUND' };
+    if (!course) return { ok: false, reason: 'COURSE_NOT_FOUND' };
+    const enrollment = await prisma.enrollment.findUnique({
+      where: { userId_courseId: { userId: student.id, courseId: course.id } },
+      select: { id: true, progress: true, isPaid: true },
+    });
+    if (!enrollment) return { ok: false, reason: 'NOT_ENROLLED' };
+    return {
+      ok: true,
+      action: 'UNENROLL_STUDENT',
+      student: { slug: student.slug, name: student.name },
+      course: { slug: course.slug, title: course.title },
+      progressAtRemoval: enrollment.progress,
+      wasPaid: enrollment.isPaid,
+    };
+  },
   run: async (args, ctx) => {
     const prisma = ctx.prisma;
     if (!isValidSlug(args.userSlug) || !isValidSlug(args.courseSlug)) {
@@ -228,16 +264,35 @@ const unenrollStudent = actionTool({
   },
 });
 
-const markEnrollmentPaid = actionTool({
+const markEnrollmentPaid = confirmableActionTool({
   name: 'mark_enrollment_paid',
   description:
-    'تحويل اشتراك طالب إلى «مدفوع» يدوياً مع تحديد مدة الصلاحية بالأيام (افتراضياً 365 يوماً). يُستخدم عند طلب «خلّي اشتراك الطالب مدفوع». لا ينشئ سجل دفع مالي وينفّذ فوراً عند استدعاء الأداة بالمعرّفات الدقيقة.',
+    'تحويل اشتراك طالب إلى «مدفوع» يدوياً مع تحديد مدة الصلاحية بالأيام (افتراضياً 365 يوماً). يتم على خطوتين: استدعاء بلا توكن يعيد معاينة، ثم تنفيذ بعد تأكيد المشرف الصريح بتوكن المعاينة.',
   schema: z.object({
     userSlug: slugArg('الطالب'),
     courseSlug: slugArg('الدورة'),
     expiresInDays: z.number().int().min(1).max(3650).optional().describe('مدة الصلاحية بالأيام، افتراضياً 365'),
   }),
   audit: { action: 'ENROLL_MARK_PAID', targetType: 'enrollment' },
+  preview: async (args, ctx) => {
+    const prisma = ctx.prisma;
+    if (!isValidSlug(args.userSlug) || !isValidSlug(args.courseSlug)) return { ok: false, reason: 'INVALID_SLUG' };
+    const [student, course] = await Promise.all([findStudent(prisma, args.userSlug), findCourse(prisma, args.courseSlug)]);
+    if (!student) return { ok: false, reason: 'STUDENT_NOT_FOUND' };
+    if (!course) return { ok: false, reason: 'COURSE_NOT_FOUND' };
+    const enrollment = await prisma.enrollment.findUnique({
+      where: { userId_courseId: { userId: student.id, courseId: course.id } },
+      select: { id: true, isPaid: true, expiresAt: true },
+    });
+    if (!enrollment) return { ok: false, reason: 'NOT_ENROLLED' };
+    return {
+      ok: true,
+      action: 'MARK_ENROLLMENT_PAID',
+      student: { slug: student.slug, name: student.name },
+      course: { slug: course.slug, title: course.title },
+      expiresInDays: Number.isSafeInteger(args.expiresInDays) ? args.expiresInDays : 365,
+    };
+  },
   run: async (args, ctx) => {
     const prisma = ctx.prisma;
     if (!isValidSlug(args.userSlug) || !isValidSlug(args.courseSlug)) {
@@ -297,16 +352,31 @@ const markEnrollmentPaid = actionTool({
   },
 });
 
-const grantGateExemption = actionTool({
+const grantGateExemption = confirmableActionTool({
   name: 'grant_gate_exemption',
   description:
-    'منح استثناء من بوابة الاختبار المتسلسل: يسمح لطالب بتخطي شرط النجاح في اختبار فيديو محدد. يُستخدم عند طلب «اعمل استثناء للطالب من الاختبار» أو «عدّيه من الفيديو». ينفّذ فوراً عند استدعاء الأداة بالمعرّفات الدقيقة.',
+    'منح استثناء من بوابة الاختبار المتسلسل: يسمح لطالب بتخطي شرط النجاح في اختبار فيديو محدد. يتم على خطوتين: معاينة أولاً ثم تنفيذ بعد تأكيد المشرف الصريح بتوكن المعاينة.',
   schema: z.object({
     userSlug: slugArg('الطالب'),
     videoSlug: slugArg('الفيديو'),
     reason: z.string().min(3).max(300).optional().describe('سبب الاستثناء (يُحفظ في سجل التدقيق)'),
   }),
   audit: { action: 'GATE_EXEMPTION_GRANT', targetType: 'gateExemption' },
+  preview: async (args, ctx) => {
+    const [student, video] = await Promise.all([
+      findStudent(ctx.prisma, args.userSlug),
+      ctx.prisma.bunnyVideo.findUnique({ where: { slug: args.videoSlug }, select: { id: true, slug: true, title: true } }),
+    ]);
+    if (!student) return { ok: false, reason: 'STUDENT_NOT_FOUND' };
+    if (!video) return { ok: false, reason: 'VIDEO_NOT_FOUND' };
+    return {
+      ok: true,
+      action: 'GRANT_GATE_EXEMPTION',
+      student: { slug: student.slug, name: student.name },
+      video: { slug: video.slug, title: video.title },
+      reason: args.reason || null,
+    };
+  },
   run: async (args, ctx) => {
     const prisma = ctx.prisma;
     const [student, video] = await Promise.all([
@@ -353,10 +423,10 @@ const grantGateExemption = actionTool({
   },
 });
 
-const revokeGateExemption = actionTool({
+const revokeGateExemption = confirmableActionTool({
   name: 'revoke_gate_exemption',
   description:
-    'إلغاء استثناء بوابة اختبار سابق (برقم الاستثناء أو بمعرّفي الطالب والفيديو). يُستخدم عند طلب «الغِ الاستثناء». ينفّذ فوراً عند استدعاء الأداة بالمعرّفات الدقيقة.',
+    'إلغاء استثناء بوابة اختبار سابق (برقم الاستثناء أو بمعرّفي الطالب والفيديو). يتم على خطوتين: معاينة أولاً ثم تنفيذ بعد تأكيد المشرف الصريح بتوكن المعاينة.',
   schema: z
     .object({
       exemptionId: z.number().int().positive().optional().describe('رقم الاستثناء'),
@@ -367,6 +437,26 @@ const revokeGateExemption = actionTool({
       message: 'حدّد exemptionId أو كلاً من userSlug و videoSlug',
     }),
   audit: { action: 'GATE_EXEMPTION_REVOKE', targetType: 'gateExemption' },
+  preview: async (args, ctx) => {
+    const prisma = ctx.prisma;
+    let exemption = null;
+    if (Number.isSafeInteger(args.exemptionId)) {
+      exemption = await prisma.gateExemption.findUnique({ where: { id: args.exemptionId }, select: { id: true, userId: true, bunnyVideoId: true, reason: true } });
+    } else {
+      const [student, video] = await Promise.all([
+        findStudent(prisma, args.userSlug),
+        prisma.bunnyVideo.findUnique({ where: { slug: args.videoSlug }, select: { id: true } }),
+      ]);
+      if (!student) return { ok: false, reason: 'STUDENT_NOT_FOUND' };
+      if (!video) return { ok: false, reason: 'VIDEO_NOT_FOUND' };
+      exemption = await prisma.gateExemption.findUnique({
+        where: { userId_bunnyVideoId: { userId: student.id, bunnyVideoId: video.id } },
+        select: { id: true, userId: true, bunnyVideoId: true, reason: true },
+      });
+    }
+    if (!exemption) return { ok: false, reason: 'EXEMPTION_NOT_FOUND' };
+    return { ok: true, action: 'REVOKE_GATE_EXEMPTION', exemptionId: exemption.id, previousReason: exemption.reason };
+  },
   run: async (args, ctx) => {
     const prisma = ctx.prisma;
 
@@ -408,12 +498,29 @@ const revokeGateExemption = actionTool({
   },
 });
 
-const resetQuizAttempt = actionTool({
+const resetQuizAttempt = confirmableActionTool({
   name: 'reset_quiz_attempt',
   description:
-    'حذف محاولة اختبار لطالب لإتاحة إعادة المحاولة (تُحذف الإجابات والنتيجة معها). يُستخدم عند طلب «صفّر محاولة الطالب» أو «خلّيه يعيد الاختبار». ينفّذ فوراً عند استدعاء الأداة بالمعرّفات الدقيقة.',
+    'حذف محاولة اختبار لطالب لإتاحة إعادة المحاولة (تُحذف الإجابات والنتيجة معها). يتم على خطوتين: معاينة أولاً ثم تنفيذ بعد تأكيد المشرف الصريح بتوكن المعاينة.',
   schema: z.object({ attemptId: z.number().int().positive().describe('رقم المحاولة') }),
   audit: { action: 'QUIZ_ATTEMPT_RESET', targetType: 'attempt' },
+  preview: async (args, ctx) => {
+    const attempt = await ctx.prisma.quizAttempt.findUnique({
+      where: { id: args.attemptId },
+      select: { id: true, attemptNumber: true, status: true, scorePercent: true, quiz: { select: { title: true } } },
+    });
+    if (!attempt) return { ok: false, reason: 'ATTEMPT_NOT_FOUND' };
+    return {
+      ok: true,
+      action: 'RESET_QUIZ_ATTEMPT',
+      attemptId: attempt.id,
+      attemptNumber: attempt.attemptNumber,
+      status: attempt.status,
+      scorePercent: attempt.scorePercent,
+      quizTitle: attempt.quiz ? attempt.quiz.title : null,
+      warning: 'سيتم حذف المحاولة وإجاباتها نهائياً بعد تأكيدك.',
+    };
+  },
   run: async (args, ctx) => {
     const prisma = ctx.prisma;
 
@@ -452,10 +559,10 @@ const resetQuizAttempt = actionTool({
   },
 });
 
-const gradeEssay = actionTool({
+const gradeEssay = confirmableActionTool({
   name: 'grade_essay',
   description:
-    'تصحيح الأسئلة المقالية في محاولة اختبار: يحدّد درجة كل سؤال وملاحظة التصحيح ثم يعيد حساب النتيجة الإجمالية. يُستخدم عند طلب «صحّح مقالي الطالب». ينفّذ فوراً عند استدعاء الأداة بالمعرّفات الدقيقة.',
+    'تصحيح الأسئلة المقالية في محاولة اختبار: يحدّد درجة كل سؤال وملاحظة التصحيح ثم يعيد حساب النتيجة الإجمالية. يتم على خطوتين: معاينة أولاً ثم تنفيذ بعد تأكيد المشرف الصريح بتوكن المعاينة.',
   schema: z.object({
     attemptId: z.number().int().positive().describe('رقم المحاولة'),
     essayScores: z.record(z.string(), z.number().min(0)).describe('خريطة اسم السؤال إلى الدرجة'),
@@ -473,6 +580,45 @@ const gradeEssay = actionTool({
       .describe('خريطة اسم السؤال إلى نص السؤال (نص عادي أو مصفوفة مقاطع math/chem/text)'),
   }),
   audit: { action: 'QUIZ_GRADE', targetType: 'attempt' },
+  preview: async (args, ctx) => {
+    if (args.essayFeedback) {
+      for (const [qName, fb] of Object.entries(args.essayFeedback)) {
+        const processed = processRichInput(fb, `essayFeedback for ${qName}`);
+        if (!processed.ok) {
+          return { ok: false, reason: 'INVALID_ESSAY_FEEDBACK', details: [processed.error], code: processed.code };
+        }
+      }
+    }
+    if (args.referenceAnswers) {
+      for (const [qName, ref] of Object.entries(args.referenceAnswers)) {
+        const processed = processRichInput(ref, `referenceAnswer for ${qName}`);
+        if (!processed.ok) {
+          return { ok: false, reason: 'INVALID_REFERENCE_ANSWER', details: [processed.error], code: processed.code };
+        }
+      }
+    }
+    if (args.questionText) {
+      for (const [qName, qt] of Object.entries(args.questionText)) {
+        const processed = processRichInput(qt, `questionText for ${qName}`);
+        if (!processed.ok) {
+          return { ok: false, reason: 'INVALID_QUESTION_TEXT', details: [processed.error], code: processed.code };
+        }
+      }
+    }
+    const attempt = await ctx.prisma.quizAttempt.findUnique({
+      where: { id: args.attemptId },
+      select: { id: true, status: true, user: { select: { name: true, slug: true } }, quiz: { select: { title: true } } },
+    });
+    if (!attempt) return { ok: false, reason: 'ATTEMPT_NOT_FOUND' };
+    return {
+      ok: true,
+      action: 'GRADE_ESSAY',
+      attemptId: attempt.id,
+      student: attempt.user,
+      quizTitle: attempt.quiz ? attempt.quiz.title : null,
+      essayScores: args.essayScores,
+    };
+  },
   run: async (args, ctx) => {
     const quizService = require('../../quizService');
 
@@ -546,10 +692,10 @@ const gradeEssay = actionTool({
 });
 
 
-const retryAiGrading = actionTool({
+const retryAiGrading = confirmableActionTool({
   name: 'retry_ai_grading',
   description:
-    'إعادة إرسال محاولات فشل تصحيحها الآلي إلى طابور التصحيح الذكي (الأسئلة المقالية). يمكن تحديد محاولات بعينها أو تركها فارغة لإعادة كل الفاشلة (بحد أقصى 10 محاولات في الطلب). ينفّذ فوراً عند استدعاء الأداة بالمعرّفات الدقيقة.',
+    'إعادة إرسال محاولات فشل تصحيحها الآلي إلى طابور التصحيح الذكي (الأسئلة المقالية). يتم على خطوتين: معاينة أولاً ثم تنفيذ بعد تأكيد المشرف الصريح بتوكن المعاينة.',
   schema: z.object({
     attemptIds: z
       .array(z.number().int().positive())
@@ -559,6 +705,14 @@ const retryAiGrading = actionTool({
     maxAttempts: z.number().int().min(1).max(20).optional().describe('أقصى عدد محاولات في الطلب، افتراضياً 10'),
   }),
   audit: { action: 'AI_GRADING_RETRY', targetType: 'aiGradingJob' },
+  preview: async (args, ctx) => {
+    const where = { status: 'FAILED' };
+    if (Array.isArray(args.attemptIds) && args.attemptIds.length > 0) where.attemptId = { in: args.attemptIds };
+    const failedRows = await ctx.prisma.aiGradingJob.findMany({ where, select: { attemptId: true }, take: 200 });
+    const limit = Number.isSafeInteger(args.maxAttempts) ? args.maxAttempts : 10;
+    const attempts = [...new Set(failedRows.map((row) => row.attemptId))].slice(0, limit);
+    return { ok: true, action: 'RETRY_AI_GRADING', attemptCount: attempts.length, attemptIds: attempts };
+  },
   run: async (args, ctx) => {
     const prisma = ctx.prisma;
 
@@ -730,15 +884,24 @@ const broadcastNotification = confirmableActionTool({
   },
 });
 
-const markVideoFailed = actionTool({
+const markVideoFailed = confirmableActionTool({
   name: 'mark_video_failed',
   description:
-    'تعليم فيديو عالق في المعالجة كـ«فاشل» مع ذكر السبب، ليظهر في قائمة الفيديوهات الفاشلة وتتاح إعادة رفعه من لوحة التحكم. يُستخدم عند طلب «علّم الفيديو ده فاشل» أو لإنهاء حالة معالجة عالقة. ينفّذ فوراً عند استدعاء الأداة بالمعرّفات الدقيقة.',
+    'تعليم فيديو عالق في المعالجة كـ«فاشل» مع ذكر السبب، ليظهر في قائمة الفيديوهات الفاشلة وتتاح إعادة رفعه من لوحة التحكم. يتم على خطوتين: معاينة أولاً ثم تنفيذ بعد تأكيد المشرف الصريح بتوكن المعاينة.',
   schema: z.object({
     videoSlug: slugArg('الفيديو'),
     reason: z.string().min(3).max(300).describe('سبب التعليم كفاشل (يُحفظ للمراجعة)'),
   }),
   audit: { action: 'VIDEO_MARK_FAILED', targetType: 'bunnyvideo' },
+  preview: async (args, ctx) => {
+    const video = await ctx.prisma.bunnyVideo.findUnique({
+      where: { slug: args.videoSlug },
+      select: { id: true, slug: true, title: true, status: true },
+    });
+    if (!video) return { ok: false, reason: 'VIDEO_NOT_FOUND' };
+    if (video.status === 'READY') return { ok: false, reason: 'VIDEO_ALREADY_READY' };
+    return { ok: true, action: 'MARK_VIDEO_FAILED', video: { slug: video.slug, title: video.title, currentStatus: video.status }, reason: args.reason };
+  },
   run: async (args, ctx) => {
     const prisma = ctx.prisma;
     const video = await prisma.bunnyVideo.findUnique({
@@ -773,10 +936,10 @@ const markVideoFailed = actionTool({
   },
 });
 
-const reorderCourseVideos = actionTool({
+const reorderCourseVideos = confirmableActionTool({
   name: 'reorder_course_videos',
   description:
-    'إعادة ترتيب فيديوهات دورة بالكامل: يجب تمرير معرّفات كل فيديوهات الدورة بالترتيب المطلوب (بدون نقص أو تكرار). يُستخدم عند طلب «رتّب الفيديوهات» أو «خلّي الفيديو ده الأول». ينفّذ فوراً عند استدعاء الأداة بالمعرّفات الدقيقة.',
+    'إعادة ترتيب فيديوهات دورة بالكامل: يجب تمرير معرّفات كل فيديوهات الدورة بالترتيب المطلوب (بدون نقص أو تكرار). يتم على خطوتين: معاينة أولاً ثم تنفيذ بعد تأكيد المشرف الصريح بتوكن المعاينة.',
   schema: z.object({
     courseSlug: slugArg('الدورة'),
     videoSlugs: z
@@ -786,6 +949,11 @@ const reorderCourseVideos = actionTool({
       .describe('معرّفات كل فيديوهات الدورة بالترتيب المطلوب من الأول للأخير'),
   }),
   audit: { action: 'VIDEO_REORDER', targetType: 'course' },
+  preview: async (args, ctx) => {
+    const course = await findCourse(ctx.prisma, args.courseSlug);
+    if (!course) return { ok: false, reason: 'COURSE_NOT_FOUND' };
+    return { ok: true, action: 'REORDER_COURSE_VIDEOS', course: { slug: course.slug, title: course.title }, videoCount: args.videoSlugs.length, videoSlugs: args.videoSlugs };
+  },
   run: async (args, ctx) => {
     const bunnyVideoService = require('../../bunnyVideoService');
     try {
@@ -811,15 +979,29 @@ const reorderCourseVideos = actionTool({
   },
 });
 
-const updateCoursePrice = actionTool({
+const updateCoursePrice = confirmableActionTool({
   name: 'update_course_price',
   description:
-    'تحديث سعر دورة بالجنيه المصري (رقم صحيح بدون كسور، و0 تعني مجانية). يُستخدم عند طلب «غيّر سعر الدورة». الاشتراكات الحالية لا تتأثر. ينفّذ فوراً عند استدعاء الأداة بالمعرّفات الدقيقة.',
+    'تحديث سعر دورة بالجنيه المصري (رقم صحيح بدون كسور، و0 تعني مجانية). الاشتراكات الحالية لا تتأثر. يتم على خطوتين: معاينة أولاً ثم تنفيذ بعد تأكيد المشرف الصريح بتوكن المعاينة.',
   schema: z.object({
     courseSlug: slugArg('الدورة'),
     priceEgp: z.number().int().min(0).max(1000000).describe('السعر بالجنيه المصري كرقم صحيح'),
   }),
   audit: { action: 'COURSE_UPDATE', targetType: 'course' },
+  preview: async (args, ctx) => {
+    const course = await ctx.prisma.course.findFirst({
+      where: { slug: args.courseSlug, deletedAt: null },
+      select: { id: true, slug: true, title: true, price: true },
+    });
+    if (!course) return { ok: false, reason: 'COURSE_NOT_FOUND' };
+    return {
+      ok: true,
+      action: 'UPDATE_COURSE_PRICE',
+      course: { slug: course.slug, title: course.title },
+      beforePriceEgp: course.price,
+      afterPriceEgp: args.priceEgp,
+    };
+  },
   run: async (args, ctx) => {
     const prisma = ctx.prisma;
     const course = await prisma.course.findFirst({
@@ -854,10 +1036,10 @@ const updateCoursePrice = actionTool({
   },
 });
 
-const createStudent = actionTool({
+const createStudent = confirmableActionTool({
   name: 'create_student',
   description:
-    'إنشاء حساب طالب جديد بالاسم والبريد الإلكتروني وكلمة المرور (٨ أحرف على الأقل) ورقم الهاتف والصف الدراسي. يُستخدم عند طلب «أضف طالباً» أو «أنشئ حساب طالب». يفشل إذا كان البريد أو الهاتف مستخدماً من قبل، وينفّذ فوراً عند استدعاء الأداة، ويعيد معرّف الطالب (slug) وبياناته دون أي بيانات دخول.',
+    'إنشاء حساب طالب جديد بالاسم والبريد الإلكتروني وكلمة المرور (٨ أحرف على الأقل) ورقم الهاتف والصف الدراسي. يتم على خطوتين: معاينة أولاً ثم تنفيذ بعد تأكيد المشرف الصريح بتوكن المعاينة.',
   schema: z.object({
     name: z.string().min(2).max(120).describe('اسم الطالب كاملاً'),
     email: z.string().email().max(190).describe('البريد الإلكتروني للطالب (فريد)'),
@@ -868,6 +1050,21 @@ const createStudent = actionTool({
       .describe('الصف الدراسي: FIRST_SECONDARY أو SECOND_SECONDARY أو THIRD_SECONDARY'),
   }),
   audit: { action: 'USER_CREATE', targetType: 'user' },
+  preview: async (args, ctx) => {
+    const email = args.email.trim().toLowerCase();
+    const phoneNumber = args.phoneNumber.trim();
+    const [existingEmail, existingPhone] = await Promise.all([
+      ctx.prisma.user.findUnique({ where: { email }, select: { id: true } }),
+      ctx.prisma.user.findUnique({ where: { phoneNumber }, select: { id: true } }),
+    ]);
+    if (existingEmail) return { ok: false, reason: 'EMAIL_TAKEN' };
+    if (existingPhone) return { ok: false, reason: 'PHONE_TAKEN' };
+    return {
+      ok: true,
+      action: 'CREATE_STUDENT',
+      student: { name: args.name.trim(), email, phoneNumber, grade: args.grade },
+    };
+  },
   run: async (args, ctx) => {
     const prisma = ctx.prisma;
     const email = args.email.trim().toLowerCase();
@@ -927,10 +1124,10 @@ const createStudent = actionTool({
   },
 });
 
-const updateStudent = actionTool({
+const updateStudent = confirmableActionTool({
   name: 'update_student',
   description:
-    'تعديل بيانات طالب: الاسم أو الصف الدراسي أو رقم الهاتف (حقل واحد على الأقل). يُستخدم عند طلب «عدّل بيانات الطالب» أو «انقل الطالب للصف الثالث». لا يغيّر البريد أو كلمة المرور، وينفّذ فوراً عند استدعاء الأداة، ويعيد الحقول المتغيّرة.',
+    'تعديل بيانات طالب: الاسم أو الصف الدراسي أو رقم الهاتف (حقل واحد على الأقل). لا يغيّر البريد أو كلمة المرور. يتم على خطوتين: معاينة أولاً ثم تنفيذ بعد تأكيد المشرف الصريح بتوكن المعاينة.',
   schema: z
     .object({
       userSlug: slugArg('الطالب'),
@@ -943,6 +1140,20 @@ const updateStudent = actionTool({
       message: 'حدّد حقلاً واحداً على الأقل: name أو grade أو phoneNumber',
     }),
   audit: { action: 'USER_UPDATE', targetType: 'user' },
+  preview: async (args, ctx) => {
+    const student = await findStudent(ctx.prisma, args.userSlug);
+    if (!student) return { ok: false, reason: 'STUDENT_NOT_FOUND' };
+    return {
+      ok: true,
+      action: 'UPDATE_STUDENT',
+      student: { slug: student.slug, name: student.name, grade: student.grade },
+      updates: {
+        ...(args.name ? { name: args.name.trim() } : {}),
+        ...(args.grade ? { grade: args.grade } : {}),
+        ...(args.phoneNumber ? { phoneNumber: args.phoneNumber.trim() } : {}),
+      },
+    };
+  },
   run: async (args, ctx) => {
     const prisma = ctx.prisma;
     const student = await findStudent(prisma, args.userSlug);
@@ -985,10 +1196,10 @@ const updateStudent = actionTool({
   },
 });
 
-const createCourse = actionTool({
+const createCourse = confirmableActionTool({
   name: 'create_course',
   description:
-    'إنشاء دورة جديدة بالعنوان والوصف والسعر بالجنيه المصري والصف الدراسي (والتصنيف والصورة اختياريان). تُنسب الدورة إلى المشرف الذي وافق عليها. ينفّذ فوراً عند استدعاء الأداة، ويعيد معرّف الدورة (slug) وسعرها وصفّها.',
+    'إنشاء دورة جديدة بالعنوان والوصف والسعر بالجنيه المصري والصف الدراسي (والتصنيف والصورة اختياريان). يتم على خطوتين: معاينة أولاً ثم تنفيذ بعد تأكيد المشرف الصريح بتوكن المعاينة.',
   schema: z.object({
     title: z.string().min(3).max(200).describe('عنوان الدورة'),
     description: z.string().min(10).max(5000).describe('وصف الدورة'),
@@ -1005,6 +1216,16 @@ const createCourse = actionTool({
     thumbnail: z.string().url().max(500).optional().describe('رابط صورة الدورة (اختياري)'),
   }),
   audit: { action: 'COURSE_CREATE', targetType: 'course' },
+  preview: async (args) => ({
+    ok: true,
+    action: 'CREATE_COURSE',
+    course: {
+      title: args.title.trim(),
+      priceEgp: args.priceEgp,
+      grade: args.grade,
+      category: args.category || null,
+    },
+  }),
   run: async (args, ctx) => {
     const prisma = ctx.prisma;
 
@@ -1051,10 +1272,10 @@ const createCourse = actionTool({
   },
 });
 
-const updateCourse = actionTool({
+const updateCourse = confirmableActionTool({
   name: 'update_course',
   description:
-    'تعديل بيانات دورة: العنوان أو الوصف أو السعر بالجنيه المصري أو الصف الدراسي أو التصنيف أو الصورة (حقل واحد على الأقل). يُستخدم عند طلب «عدّل بيانات الدورة». ينفّذ فوراً عند استدعاء الأداة، ويعيد الحقول المتغيّرة.',
+    'تعديل بيانات دورة: العنوان أو الوصف أو السعر بالجنيه المصري أو الصف الدراسي أو التصنيف أو الصورة (حقل واحد على الأقل). يتم على خطوتين: معاينة أولاً ثم تنفيذ بعد تأكيد المشرف الصريح بتوكن المعاينة.',
   schema: z
     .object({
       courseSlug: slugArg('الدورة'),
@@ -1078,6 +1299,21 @@ const updateCourse = actionTool({
       { message: 'حدّد حقلاً واحداً على الأقل للتعديل' }
     ),
   audit: { action: 'COURSE_UPDATE', targetType: 'course' },
+  preview: async (args, ctx) => {
+    const course = await findCourse(ctx.prisma, args.courseSlug);
+    if (!course) return { ok: false, reason: 'COURSE_NOT_FOUND' };
+    return {
+      ok: true,
+      action: 'UPDATE_COURSE',
+      course: { slug: course.slug, title: course.title, currentPriceEgp: course.price },
+      updates: {
+        ...(args.title ? { title: args.title.trim() } : {}),
+        ...(args.priceEgp !== undefined ? { priceEgp: args.priceEgp } : {}),
+        ...(args.grade ? { grade: args.grade } : {}),
+        ...(args.category ? { category: args.category.trim() } : {}),
+      },
+    };
+  },
   run: async (args, ctx) => {
     const prisma = ctx.prisma;
     const course = await findCourse(prisma, args.courseSlug);
@@ -1218,10 +1454,169 @@ async function invalidateQuizCaches(bunnyVideoId) {
   await cache.delPrefix(`v1:quiz:meta:${bunnyVideoId}:`);
 }
 
-const upsertQuiz = actionTool({
+async function prepareUpsertQuizPayload(args, ctx) {
+  const prisma = ctx.prisma;
+  const quizService = require('../../quizService');
+
+  let surveyJson = args.surveyJson;
+  let answerKey = args.answerKey ? { ...args.answerKey } : {};
+
+  if (Array.isArray(args.questions) && args.questions.length > 0 && (!surveyJson || Object.keys(surveyJson).length === 0)) {
+    const elements = [];
+    for (let idx = 0; idx < args.questions.length; idx++) {
+      const q = args.questions[idx];
+      const qName = q.name || `q${idx + 1}`;
+      const qType = q.type || 'comment';
+      const titleRes = processRichInput(q.title, `Question "${qName}" title`);
+      if (!titleRes.ok) {
+        return { ok: false, reason: 'INVALID_SURVEY_JSON', details: [titleRes.error], code: titleRes.code };
+      }
+      const el = { type: qType, name: qName, title: titleRes.value };
+      if (q.answerFormat) el.answerFormat = q.answerFormat;
+      if (qType === 'radiogroup' && Array.isArray(q.options)) {
+        el.choices = q.options.map((opt) => ({ value: opt, text: opt }));
+      }
+      elements.push(el);
+
+      const refAns = q.referenceAnswer !== undefined ? q.referenceAnswer : q.modelAnswer;
+      if (qType === 'comment') {
+        const modelRes = processRichInput(refAns, `Question "${qName}" modelAnswer`);
+        if (!modelRes.ok) {
+          return { ok: false, reason: 'INVALID_ANSWER_KEY', details: [modelRes.error], code: modelRes.code };
+        }
+        answerKey[qName] = {
+          type: 'comment',
+          points: q.points || 10,
+          modelAnswer: modelRes.value || '',
+          ...(q.answerFormat ? { answerFormat: q.answerFormat } : {}),
+        };
+      } else if (qType === 'radiogroup') {
+        answerKey[qName] = {
+          type: 'radiogroup',
+          points: q.points || 10,
+          correctValue: q.correctOption || (Array.isArray(q.options) ? q.options[0] : ''),
+        };
+      }
+    }
+    surveyJson = { pages: [{ name: 'page1', elements }] };
+  }
+
+  if (!surveyJson) surveyJson = {};
+
+  if (surveyJson && Array.isArray(surveyJson.pages)) {
+    for (const page of surveyJson.pages) {
+      if (!Array.isArray(page.elements)) continue;
+      for (const el of page.elements) {
+        if (Array.isArray(el.title)) {
+          const processed = processRichInput(el.title, `Question "${el.name}" title`);
+          if (!processed.ok) {
+            return { ok: false, reason: 'INVALID_SURVEY_JSON', details: [processed.error], code: processed.code };
+          }
+          el.title = processed.value;
+        } else if (typeof el.title === 'string' && looksRich(el.title)) {
+          const val = validateRich(el.title);
+          if (!val.ok) {
+            return { ok: false, reason: 'INVALID_SURVEY_JSON', details: [`Question "${el.name}" title has invalid rich content: ${val.code}`], code: val.code };
+          }
+        }
+        if (el.questionText !== undefined) {
+          const processed = processRichInput(el.questionText, `Question "${el.name}" questionText`);
+          if (!processed.ok) {
+            return { ok: false, reason: 'INVALID_SURVEY_JSON', details: [processed.error], code: processed.code };
+          }
+          el.title = processed.value;
+          delete el.questionText;
+        }
+      }
+    }
+  }
+
+  if (args.referenceAnswers && typeof args.referenceAnswers === 'object') {
+    for (const [qName, ref] of Object.entries(args.referenceAnswers)) {
+      const processed = processRichInput(ref, `Question "${qName}" referenceAnswer`);
+      if (!processed.ok) {
+        return { ok: false, reason: 'INVALID_ANSWER_KEY', details: [processed.error], code: processed.code };
+      }
+      if (answerKey[qName] && typeof answerKey[qName] === 'object') {
+        answerKey[qName].modelAnswer = processed.value;
+      } else {
+        answerKey[qName] = { type: 'comment', points: 10, modelAnswer: processed.value };
+      }
+    }
+  }
+
+  if (answerKey && typeof answerKey === 'object') {
+    for (const [qName, entry] of Object.entries(answerKey)) {
+      if (Array.isArray(entry)) {
+        const processed = processRichInput(entry, `Question "${qName}" reference answer`);
+        if (!processed.ok) {
+          return { ok: false, reason: 'INVALID_ANSWER_KEY', details: [processed.error], code: processed.code };
+        }
+        answerKey[qName] = { type: 'comment', points: 10, modelAnswer: processed.value };
+      } else if (entry && typeof entry === 'object') {
+        if (Array.isArray(entry.modelAnswer)) {
+          const processed = processRichInput(entry.modelAnswer, `Question "${qName}" modelAnswer`);
+          if (!processed.ok) {
+            return { ok: false, reason: 'INVALID_ANSWER_KEY', details: [processed.error], code: processed.code };
+          }
+          entry.modelAnswer = processed.value;
+        } else if (typeof entry.modelAnswer === 'string' && looksRich(entry.modelAnswer)) {
+          const val = validateRich(entry.modelAnswer);
+          if (!val.ok) {
+            return { ok: false, reason: 'INVALID_ANSWER_KEY', details: [`Question "${qName}" modelAnswer invalid: ${val.code}`], code: val.code };
+          }
+        }
+        if (entry.referenceAnswer !== undefined) {
+          const processed = processRichInput(entry.referenceAnswer, `Question "${qName}" referenceAnswer`);
+          if (!processed.ok) {
+            return { ok: false, reason: 'INVALID_ANSWER_KEY', details: [processed.error], code: processed.code };
+          }
+          entry.modelAnswer = processed.value;
+          delete entry.referenceAnswer;
+        }
+      }
+    }
+  }
+
+  const video = await prisma.bunnyVideo.findUnique({
+    where: { slug: args.videoSlug },
+    select: { id: true, title: true, course: { select: { title: true } } },
+  });
+  if (!video) return { ok: false, reason: 'VIDEO_NOT_FOUND' };
+
+  const surveyValidation = quizService.validateSurveyJson(surveyJson);
+  if (!surveyValidation.ok) {
+    return { ok: false, reason: 'INVALID_SURVEY_JSON', details: surveyValidation.errors };
+  }
+  const keyValidation = quizService.buildAnswerKey(surveyJson, answerKey);
+  if (!keyValidation.ok) {
+    return { ok: false, reason: 'INVALID_ANSWER_KEY', details: keyValidation.errors };
+  }
+
+  const existing = await prisma.quiz.findUnique({
+    where: { bunnyVideoId: video.id },
+    select: { id: true, surveyJson: true },
+  });
+
+  const keyEntries = Object.values(keyValidation.answerKey);
+  const mcqCount = keyEntries.filter((e) => e && e.type === 'radiogroup').length;
+  const essayCount = keyEntries.filter((e) => e && e.type === 'comment').length;
+  const { totalPoints } = quizService.computeTotalPoints(keyValidation.answerKey);
+
+  return {
+    ok: true,
+    video,
+    existing,
+    surveyJson,
+    answerKey: keyValidation.answerKey,
+    stats: { totalQuestions: mcqCount + essayCount, mcqCount, essayCount, totalPoints },
+  };
+}
+
+const upsertQuiz = confirmableActionTool({
   name: 'upsert_quiz',
   description:
-    'إنشاء أو تحديث اختبار فيديو: العنوان وتعريف أسئلة SurveyJS ومفتاح الإجابات ودرجة النجاح وعدد المحاولات والحد الزمني. يُستخدم عند طلب «أضف اختباراً للفيديو» أو «عدّل اختبار الفيديو». يُرفض أي تعريف أسئلة أو مفتاح إجابات غير صالح. ينفّذ فوراً عند استدعاء الأداة بالمعرّفات الدقيقة.',
+    'إنشاء أو تحديث اختبار فيديو: العنوان وتعريف أسئلة SurveyJS ومفتاح الإجابات ودرجة النجاح وعدد المحاولات والحد الزمني. يتم على خطوتين: استدعاء بلا توكن يتحقق من الأسئلة والمعادلات ويعيد معاينة ملخصة، ثم تنفيذ بعد تأكيد المشرف الصريح بتوكن المعاينة.',
   schema: z.object({
     videoSlug: slugArg('الفيديو'),
     title: z.string().min(2).max(200).describe('عنوان الاختبار'),
@@ -1258,161 +1653,31 @@ const upsertQuiz = actionTool({
   // single tool performs both, and a label that depends on whether a row happened
   // to exist already is a label no report can group by.
   audit: { action: 'QUIZ_UPSERT', targetType: 'quiz' },
+  preview: async (args, ctx) => {
+    const prep = await prepareUpsertQuizPayload(args, ctx);
+    if (!prep.ok) return prep;
+    return {
+      ok: true,
+      operation: prep.existing ? 'UPDATE_QUIZ' : 'CREATE_QUIZ',
+      video: {
+        slug: args.videoSlug,
+        title: prep.video.title,
+        courseTitle: prep.video.course ? prep.video.course.title : null,
+      },
+      quizSummary: {
+        title: args.title.trim(),
+        passingScore: args.passingScore ?? 50,
+        maxAttempts: args.maxAttempts ?? 3,
+        timeLimitSec: args.timeLimitSec ?? null,
+        ...prep.stats,
+      },
+    };
+  },
   run: async (args, ctx) => {
     const prisma = ctx.prisma;
-    const quizService = require('../../quizService');
-
-    let surveyJson = args.surveyJson;
-    let answerKey = args.answerKey ? { ...args.answerKey } : {};
-
-    // Build surveyJson & answerKey from questions array if provided
-    if (Array.isArray(args.questions) && args.questions.length > 0 && (!surveyJson || Object.keys(surveyJson).length === 0)) {
-      const elements = [];
-      for (let idx = 0; idx < args.questions.length; idx++) {
-        const q = args.questions[idx];
-        const qName = q.name || `q${idx + 1}`;
-        const qType = q.type || 'comment';
-        const titleRes = processRichInput(q.title, `Question "${qName}" title`);
-        if (!titleRes.ok) {
-          return { ok: false, reason: 'INVALID_SURVEY_JSON', details: [titleRes.error], code: titleRes.code };
-        }
-        const el = {
-          type: qType,
-          name: qName,
-          title: titleRes.value,
-        };
-        if (q.answerFormat) el.answerFormat = q.answerFormat;
-        if (qType === 'radiogroup' && Array.isArray(q.options)) {
-          el.choices = q.options.map((opt) => ({ value: opt, text: opt }));
-        }
-        elements.push(el);
-
-        const refAns = q.referenceAnswer !== undefined ? q.referenceAnswer : q.modelAnswer;
-        if (qType === 'comment') {
-          const modelRes = processRichInput(refAns, `Question "${qName}" modelAnswer`);
-          if (!modelRes.ok) {
-            return { ok: false, reason: 'INVALID_ANSWER_KEY', details: [modelRes.error], code: modelRes.code };
-          }
-          answerKey[qName] = {
-            type: 'comment',
-            points: q.points || 10,
-            modelAnswer: modelRes.value || '',
-            ...(q.answerFormat ? { answerFormat: q.answerFormat } : {}),
-          };
-        } else if (qType === 'radiogroup') {
-          answerKey[qName] = {
-            type: 'radiogroup',
-            points: q.points || 10,
-            correctValue: q.correctOption || (Array.isArray(q.options) ? q.options[0] : ''),
-          };
-        }
-      }
-      surveyJson = { pages: [{ name: 'page1', elements }] };
-    }
-
-    if (!surveyJson) surveyJson = {};
-
-    // Process rich titles in surveyJson
-    if (surveyJson && Array.isArray(surveyJson.pages)) {
-      for (const page of surveyJson.pages) {
-        if (!Array.isArray(page.elements)) continue;
-        for (const el of page.elements) {
-          if (Array.isArray(el.title)) {
-            const processed = processRichInput(el.title, `Question "${el.name}" title`);
-            if (!processed.ok) {
-              return { ok: false, reason: 'INVALID_SURVEY_JSON', details: [processed.error], code: processed.code };
-            }
-            el.title = processed.value;
-          } else if (typeof el.title === 'string' && looksRich(el.title)) {
-            const val = validateRich(el.title);
-            if (!val.ok) {
-              return { ok: false, reason: 'INVALID_SURVEY_JSON', details: [`Question "${el.name}" title has invalid rich content: ${val.code}`], code: val.code };
-            }
-          }
-          if (el.questionText !== undefined) {
-            const processed = processRichInput(el.questionText, `Question "${el.name}" questionText`);
-            if (!processed.ok) {
-              return { ok: false, reason: 'INVALID_SURVEY_JSON', details: [processed.error], code: processed.code };
-            }
-            el.title = processed.value;
-            delete el.questionText;
-          }
-        }
-      }
-    }
-
-    // Process referenceAnswers from args.referenceAnswers if passed
-    if (args.referenceAnswers && typeof args.referenceAnswers === 'object') {
-      for (const [qName, ref] of Object.entries(args.referenceAnswers)) {
-        const processed = processRichInput(ref, `Question "${qName}" referenceAnswer`);
-        if (!processed.ok) {
-          return { ok: false, reason: 'INVALID_ANSWER_KEY', details: [processed.error], code: processed.code };
-        }
-        if (answerKey[qName] && typeof answerKey[qName] === 'object') {
-          answerKey[qName].modelAnswer = processed.value;
-        } else {
-          answerKey[qName] = { type: 'comment', points: 10, modelAnswer: processed.value };
-        }
-      }
-    }
-
-    // Process answerKey entries
-    if (answerKey && typeof answerKey === 'object') {
-      for (const [qName, entry] of Object.entries(answerKey)) {
-        if (Array.isArray(entry)) {
-          const processed = processRichInput(entry, `Question "${qName}" reference answer`);
-          if (!processed.ok) {
-            return { ok: false, reason: 'INVALID_ANSWER_KEY', details: [processed.error], code: processed.code };
-          }
-          answerKey[qName] = {
-            type: 'comment',
-            points: 10,
-            modelAnswer: processed.value,
-          };
-        } else if (entry && typeof entry === 'object') {
-          if (Array.isArray(entry.modelAnswer)) {
-            const processed = processRichInput(entry.modelAnswer, `Question "${qName}" modelAnswer`);
-            if (!processed.ok) {
-              return { ok: false, reason: 'INVALID_ANSWER_KEY', details: [processed.error], code: processed.code };
-            }
-            entry.modelAnswer = processed.value;
-          } else if (typeof entry.modelAnswer === 'string' && looksRich(entry.modelAnswer)) {
-            const val = validateRich(entry.modelAnswer);
-            if (!val.ok) {
-              return { ok: false, reason: 'INVALID_ANSWER_KEY', details: [`Question "${qName}" modelAnswer invalid: ${val.code}`], code: val.code };
-            }
-          }
-          if (entry.referenceAnswer !== undefined) {
-            const processed = processRichInput(entry.referenceAnswer, `Question "${qName}" referenceAnswer`);
-            if (!processed.ok) {
-              return { ok: false, reason: 'INVALID_ANSWER_KEY', details: [processed.error], code: processed.code };
-            }
-            entry.modelAnswer = processed.value;
-            delete entry.referenceAnswer;
-          }
-        }
-      }
-    }
-
-    const video = await prisma.bunnyVideo.findUnique({
-      where: { slug: args.videoSlug },
-      select: { id: true, title: true },
-    });
-    if (!video) return { ok: false, reason: 'VIDEO_NOT_FOUND' };
-
-    const surveyValidation = quizService.validateSurveyJson(surveyJson);
-    if (!surveyValidation.ok) {
-      return { ok: false, reason: 'INVALID_SURVEY_JSON', details: surveyValidation.errors };
-    }
-    const keyValidation = quizService.buildAnswerKey(surveyJson, answerKey);
-    if (!keyValidation.ok) {
-      return { ok: false, reason: 'INVALID_ANSWER_KEY', details: keyValidation.errors };
-    }
-
-    const existing = await prisma.quiz.findUnique({
-      where: { bunnyVideoId: video.id },
-      select: { id: true, surveyJson: true },
-    });
+    const prep = await prepareUpsertQuizPayload(args, ctx);
+    if (!prep.ok) return prep;
+    const { video, existing, surveyJson, answerKey } = prep;
 
     const quiz = await prisma.quiz.upsert({
       where: { bunnyVideoId: video.id },
@@ -1423,16 +1688,16 @@ const upsertQuiz = actionTool({
         timeLimitSec: args.timeLimitSec ?? null,
         passingScore: args.passingScore ?? 50,
         maxAttempts: args.maxAttempts ?? 3,
-        surveyJson: surveyJson,
-        answerKey: keyValidation.answerKey,
+        surveyJson,
+        answerKey,
       },
       update: {
         title: args.title.trim(),
         timeLimitSec: args.timeLimitSec ?? null,
         passingScore: args.passingScore ?? 50,
         maxAttempts: args.maxAttempts ?? 3,
-        surveyJson: surveyJson,
-        answerKey: keyValidation.answerKey,
+        surveyJson,
+        answerKey,
       },
       select: { id: true, slug: true, title: true, passingScore: true, maxAttempts: true, timeLimitSec: true },
     });
@@ -1742,6 +2007,7 @@ const deleteUser = confirmableActionTool({
         deletedAt,
       },
     });
+    invalidateRoleCache(user.id);
 
     // Their access token stays valid until it expires (~15 min, accepted residual),
     // but every cached gate verdict and the cached /user/me profile must go now —

@@ -1,11 +1,12 @@
 const prisma = require('../config/db');
 const quizService = require('../services/quizService');
 const { isValidSlug } = require('../utils/slugs');
+const { isAdmin } = require('./index');
 
 async function ensureBunnySequentialAccess(req, res, next) {
-  if (req.user.role === 'ADMIN') return next();
-
   try {
+    if (await isAdmin(req)) return next();
+
     const { videoSlug } = req.params;
     if (!isValidSlug(videoSlug)) {
       return res.status(400).json({ message: 'Invalid video slug', code: 'INVALID_SLUG' });
@@ -19,12 +20,13 @@ async function ensureBunnySequentialAccess(req, res, next) {
       return res.status(404).json({ message: 'Video not found', code: 'VIDEO_NOT_FOUND' });
     }
 
-    const gate = await quizService.evaluateGate(req.user.id, video.id, req.user.role);
+    const gate = await quizService.evaluateGate(req.user.id, video.id, 'STUDENT');
     if (gate.allowed) {
       // Gate already fetched the video (and verified enrollment + READY status
       // ordering). Attach its slim row so the playback handler can skip the
       // redundant video re-fetch + enrollment re-check in getPlaybackAccess.
       if (gate._video) req.gateVideo = gate._video;
+      if (gate.enrollmentExpiresAt) req.gateEnrollmentExpiresAt = gate.enrollmentExpiresAt;
       return next();
     }
 

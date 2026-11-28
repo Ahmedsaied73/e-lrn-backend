@@ -1,6 +1,9 @@
 networks:
   monitoring:
     driver: bridge
+  teacher_internal:
+    name: teacher_internal
+    external: true
 
 volumes:
   prometheus_data:
@@ -12,20 +15,19 @@ services:
   prometheus:
     image: prom/prometheus:v2.50.0
     restart: unless-stopped
+    entrypoint: /entrypoint.sh
+    environment:
+      - METRICS_TOKEN=${METRICS_TOKEN:-}
     volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml.template:ro
       - ./prometheus/alert.rules.yml:/etc/prometheus/alert.rules.yml:ro
+      - ./prometheus/entrypoint.sh:/entrypoint.sh:ro
       - prometheus_data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
-      - '--web.console.templates=/usr/share/prometheus/consoles'
-      - '--storage.tsdb.retention.time=30d'
     ports:
       - "${PROMETHEUS_BIND_IP:-127.0.0.1}:9090:9090"
     networks:
       - monitoring
+      - teacher_internal
 
   alertmanager:
     image: prom/alertmanager:v0.27.0
@@ -55,6 +57,7 @@ services:
       - "${LOKI_BIND_IP:-127.0.0.1}:3100:3100"
     networks:
       - monitoring
+      - teacher_internal
 
   grafana:
     image: grafana/grafana:10.3.3

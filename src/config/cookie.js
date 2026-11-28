@@ -7,12 +7,14 @@ const isProduction = process.env.NODE_ENV === 'production';
 //   cookie cross-site → every request 401s. 'none' + Secure is mandatory.
 // - Override with COOKIE_SAMESITE if both are ever served same-site in prod.
 const sameSite = process.env.COOKIE_SAMESITE || (isProduction ? 'none' : 'lax');
+const cookieDomain = process.env.COOKIE_DOMAIN ? { domain: process.env.COOKIE_DOMAIN.trim() } : {};
 
 // Short-lived Access Token cookie options (15 Minutes)
 const accessTokenCookieOptions = {
   httpOnly: true,
   secure: isProduction,
   sameSite,
+  ...cookieDomain,
   maxAge: 15 * 60 * 1000,
   path: '/',
 };
@@ -22,6 +24,7 @@ const refreshTokenCookieOptions = {
   httpOnly: true,
   secure: isProduction,
   sameSite,
+  ...cookieDomain,
   maxAge: 7 * 24 * 60 * 60 * 1000,
   path: '/auth',
 };
@@ -31,6 +34,7 @@ const deviceIdCookieOptions = {
   httpOnly: false, // Accessible to client-side JS to sync with localStorage
   secure: isProduction,
   sameSite,
+  ...cookieDomain,
   maxAge: 10 * 365 * 24 * 60 * 60 * 1000,
   path: '/',
 };

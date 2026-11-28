@@ -23,6 +23,15 @@ if (!process.env.ADMIN_PASSWORD) {
   process.exit(1);
 }
 
+const ADMIN_PLACEHOLDER_RE = /change_me|placeholder|your_|example|password123/i;
+if (ADMIN_PLACEHOLDER_RE.test(process.env.ADMIN_PASSWORD) || process.env.ADMIN_PASSWORD.length < 12) {
+  if (process.env.NODE_ENV === 'production') {
+    console.error('[FATAL] ADMIN_PASSWORD looks like a placeholder or is shorter than 12 characters. Set a strong password in production.');
+    process.exit(1);
+  }
+  console.warn('[WARN] ADMIN_PASSWORD is weak or looks like a placeholder — set a strong password.');
+}
+
 // ── FRONTEND_URL validation ─────────────────────────────────────────────────
 // With credentials: true (cookies), browsers and CORS specification strictly
 // forbid wildcards (* or *.domain). In production, origins must be explicit.
@@ -485,9 +494,13 @@ const config = {
     accessCodes: resolveFlag(process.env.ACCESS_CODES_ENABLED, true),
     handwriting: resolveFlag(process.env.HANDWRITING_ENABLED, false),
     essayPhoto: resolveFlag(process.env.ESSAY_PHOTO_ENABLED, false),
+    gamification: resolveFlag(process.env.GAMIFICATION_ENABLED, false),
     // Second exception (default FALSE). Read at MOUNT time (app.js): while it is
     // false there is no agent router, no SSE endpoint and no LLM call at all.
     aiAgent: aiAgent.enabled,
+  },
+  gamification: {
+    tenantId: (process.env.TENANT_ID || 'default').trim() || 'default',
   },
   paymob: resolvePaymob(),
   admin: {

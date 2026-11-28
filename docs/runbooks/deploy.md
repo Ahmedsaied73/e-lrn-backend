@@ -63,14 +63,14 @@ sequenceDiagram
 
     D->>DB: Pre-deploy backup: backup.sh --pre-deploy
     D->>D: Pull new image from GHCR
-    D->>DB: docker compose run --rm api npx prisma migrate deploy
-    D->>S: Launch standby container on internal network
+    D->>DB: docker compose -f deploy/docker-compose.yml --env-file .env run --rm --no-deps api npx prisma migrate deploy
+    D->>S: Launch standby container on teacher_internal with DB & Redis env
     loop Health Gate Check (up to 60s)
         D->>S: GET http://127.0.0.1:3005/readyz
     end
     alt /readyz is 200 OK
         D->>A: Recreate API & Worker with new image
-        D->>N: docker compose exec nginx nginx -s reload
+        D->>N: docker compose -f deploy/docker-compose.yml --env-file .env exec -T nginx nginx -s reload
         D->>S: Clean up standby container
         D->>D: Notify Telegram: Success
     else /readyz fails or times out

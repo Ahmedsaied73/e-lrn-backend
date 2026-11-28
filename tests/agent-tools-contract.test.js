@@ -335,11 +335,12 @@ describe('agent tools — model-facing JSON Schema (Gemini transport)', () => {
 
   const allTools = () => toLangChainTools(listDefinitions({ includeActions: true }));
 
-  it('binds EVERY tool, actions included, so the scan below covers the whole catalogue', () => {
+  it('binds EVERY tool, confirmable mutations included, so the scan below covers the whole catalogue', () => {
     const defs = listDefinitions({ includeActions: true });
     const tools = allTools();
     assert.equal(tools.length, defs.length, 'one bound tool per definition');
-    assert.ok(defs.some((d) => d.kind === 'action'), 'action tools must be in scope or this proves nothing');
+    assert.ok(defs.some((d) => d.kind === 'confirm'), 'confirm tools must be in scope or this proves nothing');
+    assert.ok(defs.every((d) => d.kind !== 'action'), 'no unconfirmed KIND_ACTION tool may be exposed');
     assert.ok(defs.length > 30, `expected the full catalogue, got ${defs.length}`);
   });
 

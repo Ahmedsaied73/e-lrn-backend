@@ -386,7 +386,7 @@ function createAgentGraph({
     // The full catalogue, for diagnostics and for anything that must reason about
     // what the agent is CAPABLE of (the approval UI, the audit trail).
     toolNames: defs.map((d) => d.name),
-    hasMutatingTools: defs.some((d) => d.kind === 'action'),
+    hasMutatingTools: defs.some((d) => d.kind === 'action' || d.kind === 'confirm'),
     // Per-turn measurements for the AGENT_TURN audit row (Decision Q3): the size of the
     // model-facing surface the turn bound, and how many model calls it spent. toolSurface
     // is null when no model call ever happened (the deterministic tier answered).

@@ -432,6 +432,20 @@ async function resolveHlsUrl(bunnyLibraryId, bunnyVideoId, token, expiresAt) {
  *   id matches videoId; otherwise the authoritative fetch runs.
  * @returns {Promise<{videoSlug, playbackUrl, expiresAt}>}
  */
+function computeClampedTokenTtl(enrollmentExpiresAt) {
+  if (!enrollmentExpiresAt) return undefined;
+  const cfg = require('../config/env');
+  if (!(cfg && cfg.features && cfg.features.payments && cfg.paymob && cfg.paymob.enabled)) return undefined;
+  const expMs = enrollmentExpiresAt instanceof Date ? enrollmentExpiresAt.getTime() : Date.parse(enrollmentExpiresAt);
+  if (!Number.isFinite(expMs)) return undefined;
+  const remainingSec = Math.floor((expMs - Date.now()) / 1000);
+  if (remainingSec <= 0) {
+    throw new AppError('Your access to this course has expired — purchase again to continue', 403, 'ACCESS_EXPIRED');
+  }
+  const defaultTtl = Number(process.env.BUNNY_STREAM_TOKEN_TTL_SECONDS) || 21600;
+  return remainingSec < defaultTtl ? Math.max(60, remainingSec) : undefined;
+}
+
 async function getPlaybackAccess(videoId, userId, { video: preloadedVideo } = {}) {
   // Load video — this is the authoritative courseId; we never trust client-supplied courseId.
   // A caller-supplied preloaded row skips the redundant re-fetch (R6).
@@ -484,20 +498,19 @@ async function getPlaybackAccess(videoId, userId, { video: preloadedVideo } = {}
   // Note: userId here is always from the JWT — the caller must pass req.user.id
   const enrollment = await prisma.enrollment.findFirst({
     where: { userId, courseId: video.courseId },
+    select: { id: true, isPaid: true, expiresAt: true },
   });
 
-  if (!enrollment) {
+  const { checkEnrollmentAccess } = require('./quizService');
+  const access = checkEnrollmentAccess(enrollment);
+  if (!access.ok) {
     log.info('video.playback.denied', {
       videoId: video.id,
       courseId: video.courseId,
       userId,
-      reason: 'not_enrolled',
+      reason: access.code.toLowerCase(),
     });
-    throw new AppError(
-      'You must be enrolled in this course to watch videos',
-      403,
-      ErrorCodes.VIDEO_ACCESS_DENIED
-    );
+    throw new AppError(access.reason, 403, access.code);
   }
 
   if (video.status !== 'READY') {
@@ -508,8 +521,9 @@ async function getPlaybackAccess(videoId, userId, { video: preloadedVideo } = {}
     );
   }
 
-  // Generate signed embed URL — token is safe to return; it's time-limited and video-scoped
-  const { token, expiresAt } = bunnyClient.generatePlaybackToken(video.bunnyVideoId);
+  // Generate signed embed URL — clamped so tokens never outlive enrollment.expiresAt
+  const clampedTtl = computeClampedTokenTtl(enrollment.expiresAt);
+  const { token, expiresAt } = bunnyClient.generatePlaybackToken(video.bunnyVideoId, clampedTtl);
   const playbackUrl = `https://iframe.mediadelivery.net/embed/${video.bunnyLibraryId}/${video.bunnyVideoId}?token=${token}&expires=${expiresAt}`;
   const { hlsUrl, hlsExpiresAt } = await resolveHlsUrl(video.bunnyLibraryId, video.bunnyVideoId, token, expiresAt);
 
@@ -778,6 +792,7 @@ module.exports = {
   markFailed,
   applyBunnyStatus,
   getPlaybackAccess,
+  computeClampedTokenTtl,
   resolveHlsUrl,
   getCacheConfig,
   deleteVideo,
